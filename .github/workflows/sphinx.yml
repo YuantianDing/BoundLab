@@ -20,7 +20,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
       - name: Install dependencies
-        run: pip install Sphinx sphinx-math-dollar sphinx_design myst_parser # Install Sphinx and any other required packages
+        run: pip install Sphinx sphinx-math-dollar sphinx_design myst_parser pydata_sphinx_theme # Install Sphinx and any other required packages
       - name: Build Sphinx docs
         run: sphinx-build -b html docs/ docs/_build/html # Adjust paths as needed
       - name: Setup Pages
