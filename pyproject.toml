@@ -22,9 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.0",
-    "atomicx",
     "sortedcontainers",
-    "torchtyping",
 ]
 
 [project.optional-dependencies]

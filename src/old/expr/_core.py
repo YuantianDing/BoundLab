@@ -9,6 +9,11 @@ from typing import Literal, TYPE_CHECKING
 
 import torch
 import enum
+from boundlab.utils import eye_of
+
+if TYPE_CHECKING:
+    from boundlab.expr._base import Add, SubTensor
+    from boundlab.expr._mul import ConstTensorDot
 
 
 class ExprFlags(enum.Flag):
@@ -20,6 +25,8 @@ class ExprFlags(enum.Flag):
     """Expression should be fused with parent when printing."""
     IS_CONST = enum.auto()
     """Expression represents a constant value."""
+    IS_CONST_MULTIPLICATIVE = enum.auto()
+    """Expression is a constant multiplicative transformation."""
 
 _EXPR_ID_COUNTER = itertools.count()
 
@@ -44,10 +51,6 @@ class Expr:
         self.id = next(_EXPR_ID_COUNTER)
         self.flags = flags
 
-    def with_children(self, *new_children: "Expr") -> "Expr":
-        """Return a new expression with the same type and flags but new children."""
-        raise NotImplementedError(f"The :code:`with_children` method is not implemented for {self.__class__.__name__}.")
-
     @property
     def shape(self) -> torch.Size:
         """The shape of the output(s) produced by this expression."""
@@ -58,14 +61,14 @@ class Expr:
         """The child expressions that serve as inputs to this expression."""
         raise NotImplementedError(f"The :code:`children` property is not implemented for {self.__class__.__name__}.")
 
-    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=", "=="] = "==") -> tuple[torch.Tensor | 0, ...] | None:
+    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=", "=="] = "==") -> "Expr | None":
         r"""Perform backward-mode bound propagation through this expression.
 
         This method computes a linear relaxation by propagating weights from
         the output back to the inputs. Given an expression $f(x_1, \ldots, x_n)$
         and output weights $\mathbf{w}$, backward propagation derives:
 
-        $$\mathbf{w}^\top f(x_1, \ldots, x_n) \;\square\; b + \sum_i \mathbf{w}_i^\top x_i$$
+        $$\mathbf{w}^\top f(x_1, \ldots, x_n) \;\square\; \sum_i \mathbf{w}_i^\top x_i + b$$
 
         where $\square$ is determined by the mode parameter:
 
@@ -80,11 +83,34 @@ class Expr:
                 or ``"=="`` (exact).
 
         Returns:
-            A list of tensors, $(b, \mathbf{w}_1, \ldots, \mathbf{w}_n)$, representing the propagated linear form
-            $b + \sum_i \mathbf{w}_i^\top x_i$, or ``None`` if the expression
-            cannot contribute to the bound in the specified mode, e.g. ``"=="``.
+            An expression representing the propagated linear form
+            $\sum_i \mathbf{w}_i^\top x_i + b$, or ``None`` if the expression
+            cannot contribute to the bound in the specified mode.
         """
         raise NotImplementedError(f"The :code:`backward` method is not implemented for {self.__class__.__name__}.")
+
+    def simplify(self) -> "Expr":
+        """Apply algebraic simplifications to reduce the expression DAG.
+
+        Returns:
+            A simplified expression that is semantically equivalent to this one.
+        """
+        return self
+
+    def add_simplify(self, other: "Expr") -> "Expr | None":
+        """Attempt to merge this expression with another under addition.
+
+        This method enables combining like terms when constructing sums,
+        reducing the number of nodes in the expression DAG.
+
+        Args:
+            other: Another expression to potentially merge with this one.
+
+        Returns:
+            A merged expression if the two can be combined, or ``None``
+            if no simplification is applicable.
+        """
+        return None
 
     def to_string(self, *children_str: str) -> str:
         """Return string representation with child strings substituted."""
@@ -95,96 +121,41 @@ class Expr:
 
     def __repr__(self):
         return f"{self.__class__.__name__}(id={self.id}, flags={self.flags})"
-    
-    def __add__(self, other):
+
+    def __add__(self, other) -> "Add":
         from boundlab.expr._base import add
-        if isinstance(other, (Expr, torch.Tensor)):
-            return add(self, other)
-        return NotImplemented
-    
-    def __mul__(self, other):
-        from boundlab.expr._linear import linear_op
-        if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: x * other)(self)
-        return NotImplemented
+        return add(self, other)
 
-    def __rmul__(self, other):
-        from boundlab.expr._linear import linear_op
-        if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: other * x)(self)
-        return NotImplemented
-    
-    def __matmul__(self, other):
-        from boundlab.expr._linear import linear_op
-        if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: x @ other)(self)
-        return NotImplemented
-    
-    def __rmatmul__(self, other):
-        from boundlab.expr._linear import linear_op
-        if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: other @ x)(self)
-        return NotImplemented
+    def __radd__(self, other) -> "Add":
+        from boundlab.expr._base import add
+        return add(other, self)
 
-    def reshape(self, *shape) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.reshape(*shape))(self)
-    
-    def permute(self, *dims) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.permute(*dims))(self)
-    
-    def transpose(self, dim0, dim1) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.transpose(dim0, dim1))(self)
-    
-    def flatten(self, start_dim=0, end_dim=-1) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.flatten(start_dim, end_dim))(self)
-    
-    def unflatten(self, dim, sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.unflatten(dim, sizes))(self)
-    
-    def squeeze(self, dim=None) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.squeeze(dim))(self)
-    
-    def unsqueeze(self, dim) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.unsqueeze(dim))(self)
-    
-    def narrow(self, dim, start, length) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.narrow(dim, start, length))(self)
-    
-    def expand(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.expand(*sizes))(self)
-    
-    def repeat(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.repeat(*sizes))(self)
-    
-    def tile(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.tile(*sizes))(self)
-    
-    def flip(self, dims) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.flip(dims))(self)
-    
-    def roll(self, shifts, dims) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.roll(shifts, dims))(self)
-    
-    def diag(self, diagonal=0) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.diag(diagonal))(self)
+    def __mul__(self, other) -> "Expr":
+        if isinstance(other, (int, float)):
+            from boundlab.expr._mul import ConstTensorDot
+            return ConstTensorDot(torch.tensor(other), self, dims=0)
+        raise NotImplementedError(f"Multiplication is only supported between an expression and a scalar constant. Got {self.__class__.__name__} * {other.__class__.__name__}.")
 
-    def __getitem__(self, indices):
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x[indices])(self)
+    def __rmul__(self, other) -> "Expr":
+        if isinstance(other, (int, float)):
+            from boundlab.expr._mul import ConstTensorDot
+            return ConstTensorDot(torch.tensor(other), self, dims=0)
+        raise NotImplementedError(f"Multiplication is only supported between an expression and a scalar constant. Got {other.__class__.__name__} * {self.__class__.__name__}.")
+
+    def __getitem__(self, indices: int | slice | tuple[int | slice, ...]) -> "SubTensor":
+        from boundlab.expr._base import SubTensor
+        if isinstance(indices, (int, slice)):
+            indices = (indices,)
+        return SubTensor(self, indices)
+
+    def get_all_leave_ids(self) -> set[int]:
+        """Recursively collect all :attr:`id` in leaf expressions in the DAG."""
+        if not self.children:
+            return {self.id}
+        leaves = set()
+        for child in self.children:
+            leaves.update(child.get_all_leave_ids())
+        return leaves
 
     def ub(self) -> torch.Tensor:
         """Compute an upper bound for this expression."""
@@ -201,6 +172,11 @@ class Expr:
         from boundlab import prop
         return prop.ublb(self)
 
+    def backward_eye(self, mode: Literal[">=", "<=", "=="] = "==") -> "Expr | None":
+        """Convenience method for backward propagation with identity weights."""
+        output_shape = self.shape
+        eye_weights = eye_of(output_shape)
+        return self.backward(eye_weights, mode=mode)
 
 
 def expr_pretty_print(expr: Expr, indent: int = 0) -> str:

@@ -1,5 +1,7 @@
+r"""Utility Functions for BoundLab
 
-
+This module provides helper functions used throughout the BoundLab framework.
+"""
 
 import torch
 

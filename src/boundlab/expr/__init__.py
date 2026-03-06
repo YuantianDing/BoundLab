@@ -24,22 +24,22 @@ relaxations by propagating weight matrices from outputs to inputs.
 
 # Import core classes first (no circular dependencies)
 from ._core import Expr, ExprFlags, expr_pretty_print
-
-# Import expression subclasses
-from ._base import ConstVal, Add, SubTensor, add
-from ._var import LInfEps
-from ._mul import ConstTensorDot, ConstMul, ConstMatmul
+from ._base import ConstVal, Add, add
+from ._linear import LinearOp, LinearOpSeq, linear_op, TensorDotLinearOp, contract_linear_ops
 
 __all__ = [
+    # Core
     "Expr",
     "ExprFlags",
     "expr_pretty_print",
+    # Base expressions
     "ConstVal",
     "Add",
-    "SubTensor",
     "add",
-    "LInfEps",
-    "ConstTensorDot",
-    "ConstMul",
-    "ConstMatmul",
+    # Linear operations
+    "LinearOp",
+    "LinearOpSeq",
+    "linear_op",
+    "TensorDotLinearOp",
+    "contract_linear_ops",
 ]
