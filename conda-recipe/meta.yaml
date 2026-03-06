@@ -1,0 +1,43 @@
+{% set name = "boundlab" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  host:
+    - python >=3.8
+    - pip
+    - setuptools >=61.0
+    - wheel
+    - pytorch >=2.0
+  run:
+    - python >=3.8
+    - pytorch >=2.0
+
+test:
+  imports:
+    - boundlab
+  commands:
+    - python -c "import boundlab; print(boundlab.__version__)"
+
+about:
+  home: https://github.com/YuantianDing/boundlab
+  license: MIT
+  license_family: MIT
+  summary: A Python library
+  description: |
+    BoundLab is a Python library.
+  dev_url: https://github.com/YuantianDing/boundlab
+
+extra:
+  recipe-maintainers:
+    - YuantianDing
