@@ -55,6 +55,7 @@ source_suffix = {
 autosummary_generate = True
 autosummary_generate_overwrite = True
 autosummary_imported_members = True
+autosummary_ignore_module_all = False  # Respect __all__ when defined
 
 # Autodoc settings
 autodoc_default_options = {

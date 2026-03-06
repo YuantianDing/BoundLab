@@ -28,7 +28,7 @@ class MyModel(nn.Module):
         return F.relu(x)
 
 inputs = bl.expr.const(load_a_batch_of_data())
-input_noise = bl.expr.var.LInfNoise(*inputs.shape, epsilon=0.1)
+input_noise = 0.1 * bl.expr.var.LInfEpsilon(*inputs.shape)
 
 zonotope = bl.zono.operator(MyModel())(inputs + input_noise)
 ub, lb = zonotope.ublb()

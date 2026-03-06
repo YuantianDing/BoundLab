@@ -54,7 +54,7 @@ def operator(net: "torch.nn.Module", linearizers: ZonoLinearizers = DEFAULT_LINE
     Example:
         >>> net = nn.Sequential(nn.Linear(2, 3), nn.ReLU(), nn.Linear(3, 1))
         >>> transform = operator(net)
-        >>> x = LInfEps((2,))  # Input perturbation
+        >>> x = LInfEpsilon((2,))  # Input perturbation
         >>> y = transform(x)   # Output zonotope expression
     """
     def operation(x: "boundlab.expr.Expr") -> "boundlab.expr.Expr":
