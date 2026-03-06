@@ -5,7 +5,7 @@ the expression framework.
 """
 
 import itertools
-from typing import Literal, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING, Union
 
 import torch
 import enum
@@ -58,7 +58,7 @@ class Expr:
         """The child expressions that serve as inputs to this expression."""
         raise NotImplementedError(f"The :code:`children` property is not implemented for {self.__class__.__name__}.")
 
-    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=", "=="] = "==") -> tuple[torch.Tensor | 0, ...] | None:
+    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=", "=="] = "==") -> Union[tuple[Union[torch.Tensor, int], ...], None]:
         r"""Perform backward-mode bound propagation through this expression.
 
         This method computes a linear relaxation by propagating weights from

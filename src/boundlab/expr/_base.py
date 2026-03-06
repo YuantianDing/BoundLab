@@ -4,7 +4,7 @@ This module defines fundamental expression types including constants,
 addition, and tensor slicing operations.
 """
 
-from typing import Literal, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING, Union, Optional
 
 import torch
 
@@ -17,7 +17,7 @@ class ConstVal(Expr):
     computed as $\mathbf{w}^\top \mathbf{c}$, where $\mathbf{w}$ is the
     propagated weight and $\mathbf{c}$ is the constant value.
     """
-    def __init__(self, value: torch.Tensor, name: str | None = None):
+    def __init__(self, value: torch.Tensor, name: Optional[str] = None):
         super().__init__(ExprFlags.IS_CONST)
         self.value = value
         self.name = name
@@ -68,19 +68,21 @@ class Add(Expr):
 
     def with_children(self, *new_children: Expr) -> "Add":
         """Return a new Add expression with the given children."""
-        return add(*new_children)
+        return sum_exprs(*new_children)
 
-    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=","=="]="==") -> tuple[torch.Tensor | 0, ...]:
-        return tuple(0, *(weights for _ in self.children))
+    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=","=="]="==") -> tuple[Union[torch.Tensor, int], ...]:
+        return (0, *(weights for _ in self.children))
 
     def to_string(self, *children_str: str) -> str:
         return " + ".join(children_str)
 
-def add(*children: (Expr | torch.Tensor)) -> Add:
+def sum_exprs(*children: Union[Expr, torch.Tensor]) -> Add:
     """Construct an Add expression from expressions or tensors.
 
     Tensors are automatically wrapped in :class:`ConstVal`, and nested
     :class:`Add` expressions are flattened into a single level.
+
+    This function is also available as :func:`add` for convenience.
     """
     processed_children = []
     for child in children:
@@ -93,3 +95,7 @@ def add(*children: (Expr | torch.Tensor)) -> Add:
         else:
             processed_children.append(child)
     return Add(*processed_children)
+
+
+# Alias for backwards compatibility
+add = sum_exprs

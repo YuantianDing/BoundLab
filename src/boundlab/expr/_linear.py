@@ -21,15 +21,16 @@ class LinearOp:
     backward propagation of weights through the linear transformation.
 
     The wrapped function must satisfy linearity: ``f(0) = 0``.
-
-    Attributes:
-        original: The original linear function.
-        input_shape: Expected input tensor shape.
-        output_shape: Computed output tensor shape.
-        transposed: The VJP function for backward propagation.
     """
 
     original: Callable[[torch.Tensor], torch.Tensor]
+    """The original linear function."""
+    input_shape: "torch.Size"
+    """Expected input tensor shape."""
+    output_shape: "torch.Size"
+    """Computed output tensor shape."""
+    transposed: Callable[["torch.Tensor"], tuple["torch.Tensor", ...]]
+    """The VJP function for backward propagation."""
 
     def __init__(self, original: Callable[[torch.Tensor], torch.Tensor], input_shape: torch.Size, name=None):
         """Initialize a LinearOp wrapper.
@@ -71,7 +72,8 @@ class LinearOp:
         Returns:
             Propagated weights via the VJP.
         """
-        return torch.vmap(self.transposed)(weights)
+        # VJP returns a tuple of tangents, extract the first (and only) element
+        return torch.vmap(self.transposed)(weights)[0]
     
     def __str__(self):
         if self.original.__name__ == "<lambda>":

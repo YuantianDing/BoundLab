@@ -4,10 +4,13 @@ This module provides functions for computing concrete upper and lower
 bounds from symbolic expressions through backward-mode propagation.
 """
 
-from queue import PriorityQueue as _PriorityQueue
-from typing import TYPE_CHECKING as _TYPE_CHECKING
+import queue
+import typing
 
-import torch as _torch
+import torch
+
+import boundlab.utils
+import boundlab.expr
 
 __all__ = [
     "ub",
@@ -15,10 +18,7 @@ __all__ = [
     "ublb",
 ]
 
-from boundlab.utils import eye_of as _eye_of
-from boundlab.expr import ExprFlags as _ExprFlags
-
-if _TYPE_CHECKING:
+if typing.TYPE_CHECKING:
     from boundlab.expr import Expr
 
 class _TopologicalExpr:
@@ -43,7 +43,7 @@ class _TopologicalExpr:
     def __ne__(self, other: "_TopologicalExpr") -> int:
         return -self.expr.id != -other.expr.id
 
-def ub(e: "Expr") -> _torch.Tensor:
+def ub(e: "Expr") -> torch.Tensor:
     """Compute an upper bound for the given expression.
 
     Uses backward-mode bound propagation with mode ``"<="`` to iteratively
@@ -55,14 +55,14 @@ def ub(e: "Expr") -> _torch.Tensor:
     Returns:
         A tensor containing the upper bound.
     """
-    result = _torch._efficientzerotensor(e.shape)
+    result = torch._efficientzerotensor(e.shape)
 
-    weight_map = {e.id: _eye_of(e.shape)}
-    queue = _PriorityQueue[_TopologicalExpr]()
-    queue.put(_TopologicalExpr(e))
+    weight_map = {e.id: boundlab.utils.eye_of(e.shape)}
+    pqueue = queue.PriorityQueue()
+    pqueue.put(_TopologicalExpr(e))
 
-    while not queue.empty():
-        current = queue.get().expr
+    while not pqueue.empty():
+        current = pqueue.get().expr
         weight = weight_map.pop(current.id)
 
         backward_result = current.backward(weight, mode="<=")
@@ -76,14 +76,14 @@ def ub(e: "Expr") -> _torch.Tensor:
             if not _is0(cw):
                 if child.id not in weight_map:
                     weight_map[child.id] = cw
-                    queue.put(_TopologicalExpr(child))
+                    pqueue.put(_TopologicalExpr(child))
                 else:
                     weight_map[child.id] = weight_map[child.id] + cw
 
     return result
 
 
-def lb(e: "Expr") -> _torch.Tensor:
+def lb(e: "Expr") -> torch.Tensor:
     """Compute a lower bound for the given expression.
 
     Uses backward-mode bound propagation with mode ``">="`` to iteratively
@@ -95,14 +95,14 @@ def lb(e: "Expr") -> _torch.Tensor:
     Returns:
         A tensor containing the lower bound.
     """
-    result = _torch._efficientzerotensor(e.shape)
+    result = torch._efficientzerotensor(e.shape)
 
-    weight_map = {e.id: _eye_of(e.shape)}
-    queue = _PriorityQueue[_TopologicalExpr]()
-    queue.put(_TopologicalExpr(e))
+    weight_map = {e.id: boundlab.utils.eye_of(e.shape)}
+    pqueue = queue.PriorityQueue()
+    pqueue.put(_TopologicalExpr(e))
 
-    while not queue.empty():
-        current = queue.get().expr
+    while not pqueue.empty():
+        current = pqueue.get().expr
         weight = weight_map.pop(current.id)
 
         backward_result = current.backward(weight, mode=">=")
@@ -116,7 +116,7 @@ def lb(e: "Expr") -> _torch.Tensor:
             if not _is0(cw):
                 if child.id not in weight_map:
                     weight_map[child.id] = cw
-                    queue.put(_TopologicalExpr(child))
+                    pqueue.put(_TopologicalExpr(child))
                 else:
                     weight_map[child.id] = weight_map[child.id] + cw
 
@@ -125,7 +125,7 @@ def lb(e: "Expr") -> _torch.Tensor:
 def _is0(a):
     return isinstance(a, int) and a == 0
 
-def ublb(e: "Expr") -> tuple[_torch.Tensor, _torch.Tensor]:
+def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     r"""Compute both upper and lower bounds for the given expression.
 
     This is achieved by iteratively applying backward propagation from the
@@ -139,27 +139,27 @@ def ublb(e: "Expr") -> tuple[_torch.Tensor, _torch.Tensor]:
     Returns:
         A tuple ``(upper_bound, lower_bound)`` of tensors.
     """
-    ub_result = _torch._efficientzerotensor(e.shape)
-    lb_result = _torch._efficientzerotensor(e.shape)
-    const_result = _torch._efficientzerotensor(e.shape)
-    sym_result = _torch._efficientzerotensor(e.shape)
+    ub_result = torch._efficientzerotensor(e.shape)
+    lb_result = torch._efficientzerotensor(e.shape)
+    const_result = torch._efficientzerotensor(e.shape)
+    sym_result = torch._efficientzerotensor(e.shape)
     
-    weight_map = {e.id: _eye_of(e.shape)}
-    queue = _PriorityQueue[_TopologicalExpr]()
-    queue.put(_TopologicalExpr(e))
+    weight_map = {e.id: boundlab.utils.eye_of(e.shape)}
+    pqueue = queue.PriorityQueue()
+    pqueue.put(_TopologicalExpr(e))
 
-    while not queue.empty():
-        current = queue.get().expr
+    while not pqueue.empty():
+        current = pqueue.get().expr
         weight = weight_map.pop(current.id)
         child_weights = None
-        
+
         assert weight is not None, f"Missing weight for expression {current.to_string()} (id={current.id}). This indicates a bug in the bound propagation algorithm."
-        if isinstance(weight, _torch.Tensor):
+        if isinstance(weight, torch.Tensor):
             if a := current.backward(weight, mode="=="):
                 b, *child_weights = a
                 if _is0(b): const_result += b
         if child_weights is None:
-            if ExprFlags.SYMMETRIC_TO_0 in current.flags and len(current.children) == 0:
+            if boundlab.expr.ExprFlags.SYMMETRIC_TO_0 in current.flags and len(current.children) == 0:
                 (ubias,) = current.backward(weight, mode="<=")
                 child_weights = ()
                 if _is0(ubias): sym_result += ubias
@@ -169,12 +169,12 @@ def ublb(e: "Expr") -> tuple[_torch.Tensor, _torch.Tensor]:
                 if _is0(ubias): ub_result += ubias
                 if _is0(lbias): lb_result += lbias
                 child_weights = tuple(uweights.zip(lweights))
-        
-        
+
+
         for child, weights in zip(current.children, child_weights):
             assert child.id < current.id, f"Child expression {child.to_string()} (id={child.id}) has higher id than parent {current.to_string()} (id={current.id}). This indicates a cycle in the expression DAG, which should not happen."
             if not _is0(weights) and weights != (0, 0):
-                queue.put(_TopologicalExpr(child))
+                pqueue.put(_TopologicalExpr(child))
                 if child.id not in weight_map:
                     weight_map[child.id] = weights
                 else:

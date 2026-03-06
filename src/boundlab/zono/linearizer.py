@@ -4,7 +4,7 @@ This module provides linearizers that compute linear relaxations of
 nonlinear activation functions for zonotope-based bound propagation.
 """
 
-from dataclasses import dataclass
+import dataclasses
 import typing
 
 import torch
@@ -18,7 +18,7 @@ __all__ = [
 ]
 
 
-@dataclass
+@dataclasses.dataclass
 class ZonoBounds:
     """Linear relaxation bounds for a nonlinear activation."""
 
