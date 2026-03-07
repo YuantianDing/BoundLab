@@ -25,7 +25,8 @@ relaxations by propagating weight matrices from outputs to inputs.
 # Import core classes first (no circular dependencies)
 from ._core import Expr, ExprFlags, expr_pretty_print
 from ._base import ConstVal, Add, add, sum_exprs
-from ._linear import LinearOp, LinearOpSeq, linear_op, TensorDotLinearOp, contract_linear_ops
+from ._linear import LinearOp, LinearOpSeq, TensorDotLinearOp, contract_linear_ops
+from ._var import LpEpsilon
 
 __all__ = [
     # Core
@@ -39,7 +40,8 @@ __all__ = [
     # Linear operations
     "LinearOp",
     "LinearOpSeq",
-    "linear_op",
     "TensorDotLinearOp",
     "contract_linear_ops",
+    # Variable expressions
+    "LpEpsilon"
 ]

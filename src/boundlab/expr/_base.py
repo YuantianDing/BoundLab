@@ -18,7 +18,7 @@ class ConstVal(Expr):
     propagated weight and $\mathbf{c}$ is the constant value.
     """
     def __init__(self, value: torch.Tensor, name: Optional[str] = None):
-        super().__init__(ExprFlags.IS_CONST)
+        super().__init__(ExprFlags.IS_CONST | ExprFlags.IS_AFFINE)
         self.value = value
         self.name = name
 
@@ -49,7 +49,27 @@ class Add(Expr):
     the same weight tensor is distributed to each child term.
     """
     def __init__(self, *children: Expr):
-        super().__init__()
+        """Construct an Add expression from expressions or tensors.
+
+        Tensors are automatically wrapped in :class:`ConstVal`, and nested
+        :class:`Add` expressions are flattened into a single level.
+
+        This function is also available as :func:`add` for convenience.
+        """
+        super().__init__(ExprFlags.IS_AFFINE)
+
+        processed_children = []
+        for child in children:
+            if not isinstance(child, Expr) and not isinstance(child, torch.Tensor):
+                processed_children.append(ConstVal(torch.tensor(child)))
+            elif isinstance(child, torch.Tensor):
+                processed_children.append(ConstVal(child))
+            elif isinstance(child, Add):
+                processed_children.extend(child.children)
+            else:
+                processed_children.append(child)
+        children = tuple(processed_children)
+
         self._children = tuple(children)
         assert all(not isinstance(child, Add) for child in children), "Nested Add expressions should be flattened. Please use the add() helper function to construct sums."
         if all(ExprFlags.SYMMETRIC_TO_0 in child.flags for child in children):
@@ -68,34 +88,10 @@ class Add(Expr):
 
     def with_children(self, *new_children: Expr) -> "Add":
         """Return a new Add expression with the given children."""
-        return sum_exprs(*new_children)
+        return Add(*new_children)
 
     def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=","=="]="==") -> tuple[Union[torch.Tensor, int], ...]:
         return (0, *(weights for _ in self.children))
 
     def to_string(self, *children_str: str) -> str:
         return " + ".join(children_str)
-
-def sum_exprs(*children: Union[Expr, torch.Tensor]) -> Add:
-    """Construct an Add expression from expressions or tensors.
-
-    Tensors are automatically wrapped in :class:`ConstVal`, and nested
-    :class:`Add` expressions are flattened into a single level.
-
-    This function is also available as :func:`add` for convenience.
-    """
-    processed_children = []
-    for child in children:
-        if not isinstance(child, Expr) and not isinstance(child, torch.Tensor):
-            processed_children.append(ConstVal(torch.tensor(child)))
-        elif isinstance(child, torch.Tensor):
-            processed_children.append(ConstVal(child))
-        elif isinstance(child, Add):
-            processed_children.extend(child.children)
-        else:
-            processed_children.append(child)
-    return Add(*processed_children)
-
-
-# Alias for backwards compatibility
-add = sum_exprs

@@ -43,6 +43,9 @@ class _TopologicalExpr:
     def __ne__(self, other: "_TopologicalExpr") -> int:
         return -self.expr.id != -other.expr.id
 
+_UB_CACHE = {}
+_LB_CACHE = {}
+
 def ub(e: "Expr") -> torch.Tensor:
     """Compute an upper bound for the given expression.
 
@@ -55,6 +58,9 @@ def ub(e: "Expr") -> torch.Tensor:
     Returns:
         A tensor containing the upper bound.
     """
+    if e.id in _UB_CACHE:
+        return _UB_CACHE[e.id]
+    
     result = torch._efficientzerotensor(e.shape)
 
     weight_map = {e.id: boundlab.utils.eye_of(e.shape)}
@@ -80,6 +86,7 @@ def ub(e: "Expr") -> torch.Tensor:
                 else:
                     weight_map[child.id] = weight_map[child.id] + cw
 
+    _UB_CACHE[e.id] = result
     return result
 
 
@@ -95,6 +102,9 @@ def lb(e: "Expr") -> torch.Tensor:
     Returns:
         A tensor containing the lower bound.
     """
+    if e.id in _LB_CACHE:
+        return _LB_CACHE[e.id]
+    
     result = torch._efficientzerotensor(e.shape)
 
     weight_map = {e.id: boundlab.utils.eye_of(e.shape)}
@@ -139,6 +149,9 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     Returns:
         A tuple ``(upper_bound, lower_bound)`` of tensors.
     """
+    if e.id in _UB_CACHE and e.id in _LB_CACHE:
+        return _UB_CACHE[e.id], _LB_CACHE[e.id]
+
     ub_result = torch._efficientzerotensor(e.shape)
     lb_result = torch._efficientzerotensor(e.shape)
     const_result = torch._efficientzerotensor(e.shape)
@@ -180,4 +193,17 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
                 else:
                     weight_map[child.id] += weights
 
-    return const_result + ub_result + sym_result, const_result + lb_result - sym_result
+    _UB_CACHE[e.id] = const_result + ub_result + sym_result
+    _LB_CACHE[e.id] = const_result + lb_result - sym_result
+
+    return _UB_CACHE[e.id], _LB_CACHE[e.id]
+
+def center(e: "Expr") -> torch.Tensor:
+    """Compute the center of the bounds for the given expression."""
+    ub_result, lb_result = ublb(e)
+    return (ub_result + lb_result) / 2    
+
+def bound_width(e: "Expr") -> torch.Tensor:
+    """Compute the width of the bounds for the given expression."""
+    ub_result, lb_result = ublb(e)
+    return ub_result - lb_result

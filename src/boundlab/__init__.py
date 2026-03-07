@@ -10,8 +10,10 @@ __all__ = [
     "expr",
     "prop",
     "zono",
+    "interp",
+    "poly",
     "utils",
 ]
 
-from boundlab import expr, prop, zono, utils
+from boundlab import expr, prop, zono, utils, poly, interp
 

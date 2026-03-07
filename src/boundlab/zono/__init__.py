@@ -4,62 +4,39 @@ This module provides zonotope transformations for computing over-approximations
 of neural network outputs under bounded input perturbations.
 """
 
-import typing
 
+import dataclasses
 import torch
 
-import boundlab.expr
-from .linearizer import ZonoBounds, ZonoLinearizer, ZonoLinearizers, relu_linearizer, DEFAULT_LINEARIZER
+from boundlab import expr
+from boundlab.expr._core import Expr
+from boundlab.expr._linear import contract_linear_ops
+from boundlab.interp import Interpreter
 
-__all__ = [
-    "operator",
-    "ZonoBounds",
-    "ZonoLinearizer",
-    "ZonoLinearizers",
-    "relu_linearizer",
-    "DEFAULT_LINEARIZER",
-]
+from .relu import relu_linearizer
 
-def operator(net: "torch.nn.Module", linearizers: ZonoLinearizers = DEFAULT_LINEARIZER):
-    r"""Construct a zonotope transformation for a neural network.
+interpret = Interpreter({})
+"""Zonotope-Based Abstract Interpretation for Neural Networks"""
 
-    Given a network module and linearization strategies for nonlinear
-    activations, this function returns an operator that propagates
-    zonotope abstractions through the network.
+@dataclasses.dataclass
+class ZonoBounds:
+    """Data class representing zonotope bounds for a neural network layer."""
+    bias: torch.Tensor # The bias term of the zonotope
+    error_coeffs: torch.Tensor # Hardmard product weights of the error terms
+    input_weights: list[torch.Tensor] # Hardmard product weights of the input terms
 
-    The transformation proceeds layer by layer, applying exact affine
-    transformations for linear layers and introducing fresh noise symbols
-    via linearization for nonlinear activations.
 
-    After applying new fresh noise symbols, it simplifies the expression by
-    contracting sequences of linear operations into single operations where possible,
-    which can lead to more efficient bound concretization.
+def _register_linearizer(name: str):
+    def decorator(linearizer: callable):
+        def handler(*exprs: Expr) -> Expr:
+            bounds = linearizer(*exprs)
+            assert all(w.shape == e.shape for w, e in zip(bounds.input_weights, exprs)), "Input weights must match the shapes of the input expressions."
+            result_expr = sum(w * e for w, e in zip(bounds.input_weights, bounds.error_coeffs)) + bounds.bias
+            return contract_linear_ops(result_expr)
+        interpret.dispatcher[name] = handler
+        return linearizer
+    return decorator
 
-    **Supported layers:**
+from . import relu
 
-    - ``nn.Linear``: Exact affine transformation
-    - ``nn.ReLU``: Triangle relaxation (requires 'relu' linearizer)
-
-    To add support for additional layers, use :func:`register_handler`.
-
-    Args:
-        net: The neural network module to transform.
-        linearizers: A dictionary mapping activation function names to linearizer
-            functions. Defaults to :data:`DEFAULT_LINEARIZER`.
-
-    Returns:
-        A callable that maps input expressions to output expressions
-        representing the zonotope abstraction of the network's output.
-
-    Example:
-        >>> net = nn.Sequential(nn.Linear(2, 3), nn.ReLU(), nn.Linear(3, 1))
-        >>> transform = operator(net)
-        >>> x = LInfEpsilon((2,))  # Input perturbation
-        >>> y = transform(x)   # Output zonotope expression
-    """
-    def operation(x: "boundlab.expr.Expr") -> "boundlab.expr.Expr":
-        # TODO: implement the operator function that applies the network transformations
-        pass
-
-    return operation
-
+# TODO: Add more linearizers for other nonlinear activations, such as sigmoid, tanh, etc., and register them with the interpreter.

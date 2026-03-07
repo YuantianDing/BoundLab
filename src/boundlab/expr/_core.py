@@ -20,6 +20,8 @@ class ExprFlags(enum.Flag):
     """Expression should be fused with parent when printing."""
     IS_CONST = enum.auto()
     """Expression represents a constant value."""
+    IS_AFFINE = enum.auto()
+    """Expression represents an affine transformation of its inputs."""
 
 _EXPR_ID_COUNTER = itertools.count()
 
@@ -97,94 +99,104 @@ class Expr:
         return f"{self.__class__.__name__}(id={self.id}, flags={self.flags})"
     
     def __add__(self, other):
-        from boundlab.expr._base import add
+        from boundlab.expr._base import Add
+        if isinstance(other, int) and other == 0:
+            return self
         if isinstance(other, (Expr, torch.Tensor)):
-            return add(self, other)
+            return Add(self, other)
+        return NotImplemented
+
+    def __radd__(self, other):
+        from boundlab.expr._base import Add
+        if isinstance(other, int) and other == 0:
+            return self
+        if isinstance(other, (Expr, torch.Tensor)):
+            return Add(other, self)
         return NotImplemented
     
     def __mul__(self, other):
-        from boundlab.expr._linear import linear_op
+        from boundlab.expr._linear import LinearOpSeq
         if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: x * other)(self)
+            return LinearOpSeq([lambda x: x * other], self)
         return NotImplemented
 
     def __rmul__(self, other):
-        from boundlab.expr._linear import linear_op
+        from boundlab.expr._linear import LinearOpSeq
         if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: other * x)(self)
+            return LinearOpSeq([lambda x: other * x], self)
         return NotImplemented
     
     def __matmul__(self, other):
-        from boundlab.expr._linear import linear_op
+        from boundlab.expr._linear import LinearOpSeq
         if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: x @ other)(self)
+            return LinearOpSeq([lambda x: x @ other], self)
         return NotImplemented
     
     def __rmatmul__(self, other):
-        from boundlab.expr._linear import linear_op
+        from boundlab.expr._linear import LinearOpSeq
         if isinstance(other, torch.Tensor):
-            return linear_op(lambda x: other @ x)(self)
+            return LinearOpSeq([lambda x: other @ x], self)
         return NotImplemented
 
     def reshape(self, *shape) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.reshape(*shape))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.reshape(*shape)], self)
     
     def permute(self, *dims) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.permute(*dims))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.permute(*dims)], self)
     
     def transpose(self, dim0, dim1) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.transpose(dim0, dim1))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.transpose(dim0, dim1)],self)
     
     def flatten(self, start_dim=0, end_dim=-1) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.flatten(start_dim, end_dim))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.flatten(start_dim, end_dim)], self)
     
     def unflatten(self, dim, sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.unflatten(dim, sizes))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.unflatten(dim, sizes)], self)
     
     def squeeze(self, dim=None) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.squeeze(dim))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.squeeze(dim)], self)
     
     def unsqueeze(self, dim) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.unsqueeze(dim))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.unsqueeze(dim)], self)
     
     def narrow(self, dim, start, length) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.narrow(dim, start, length))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.narrow(dim, start, length)], self)
     
     def expand(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.expand(*sizes))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.expand(*sizes)], self)
     
     def repeat(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.repeat(*sizes))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.repeat(*sizes)], self)
     
     def tile(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.tile(*sizes))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.tile(*sizes)], self)
     
     def flip(self, dims) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.flip(dims))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.flip(dims)], self)
     
     def roll(self, shifts, dims) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.roll(shifts, dims))(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.roll(shifts, dims)], self)
     
     def diag(self, diagonal=0) -> "Expr":
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x.diag(diagonal))(self)
-
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x.diag(diagonal)], self)
+    
     def __getitem__(self, indices):
-        from boundlab.expr._linear import linear_op
-        return linear_op(lambda x: x[indices])(self)
+        from boundlab.expr._linear import LinearOpSeq
+        return LinearOpSeq([lambda x: x[indices]], self)
 
     def ub(self) -> torch.Tensor:
         """Compute an upper bound for this expression."""
@@ -200,6 +212,16 @@ class Expr:
         """Compute both an upper bound and a lower bound for this expression."""
         from boundlab import prop
         return prop.ublb(self)
+    
+    def center(self) -> torch.Tensor:
+        """Compute the center of the bounds for this expression."""
+        from boundlab import prop
+        return prop.center(self)
+        
+    def bound_width(self) -> torch.Tensor:
+        """Compute the width of the bounds for this expression."""
+        from boundlab import prop
+        return prop.bound_width(self)
 
 
 
