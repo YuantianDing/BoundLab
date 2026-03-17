@@ -5,10 +5,12 @@ the expression framework.
 """
 
 import itertools
-from typing import Literal, TYPE_CHECKING, Union
+from typing import Literal, Union
 
 import torch
 import enum
+
+from boundlab.linearop import ScalarMul
 
 
 class ExprFlags(enum.Flag):
@@ -60,31 +62,31 @@ class Expr:
         """The child expressions that serve as inputs to this expression."""
         raise NotImplementedError(f"The :code:`children` property is not implemented for {self.__class__.__name__}.")
 
-    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=", "=="] = "==") -> Union[tuple[Union[torch.Tensor, int], ...], None]:
+    def backward(self, weights, direction: Literal[">=", "<=", "=="] = "==") \
+            -> tuple[Union[torch.Tensor, int], list] | None:
         r"""Perform backward-mode bound propagation through this expression.
 
-        This method computes a linear relaxation by propagating weights from
-        the output back to the inputs. Given an expression $f(x_1, \ldots, x_n)$
-        and output weights $\mathbf{w}$, backward propagation derives:
+        Given an accumulated weight ``weights`` (a
+        :class:`~boundlab.linearop.HardmardDot`) from the output back to this
+        node, backward propagation derives child weights and a bias:
 
-        $$\mathbf{w}^\top f(x_1, \ldots, x_n) \;\square\; b + \sum_i \mathbf{w}_i^\top x_i$$
+        .. math::
 
-        where $\square$ is determined by the mode parameter:
-
-        - ``">="`` computes a lower bound relaxation
-        - ``"<="`` computes an upper bound relaxation
-        - ``"=="`` computes an exact linear transformation (when applicable)
+            \mathbf{w}^\top f(x_1, \ldots, x_n)
+            \;\square\; b + \sum_i \mathbf{w}_i^\top x_i
 
         Args:
-            weights: Weight tensor to propagate, with shape compatible with
-                the expression's output shape.
-            mode: Bound direction. One of ``">="`` (lower), ``"<="`` (upper),
+            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated
+                weight from the root expression to this node.
+            direction: Bound direction — ``">="`` (lower), ``"<="`` (upper),
                 or ``"=="`` (exact).
 
         Returns:
-            A list of tensors, $(b, \mathbf{w}_1, \ldots, \mathbf{w}_n)$, representing the propagated linear form
-            $b + \sum_i \mathbf{w}_i^\top x_i$, or ``None`` if the expression
-            cannot contribute to the bound in the specified mode, e.g. ``"=="``.
+            A tuple ``(bias, child_weights)`` where ``bias`` is a
+            :class:`torch.Tensor` or ``0``, and ``child_weights`` is a list
+            of :class:`~boundlab.linearop.HardmardDot` (one per child).
+            Returns ``None`` if this expression cannot contribute to the bound
+            in the given direction.
         """
         raise NotImplementedError(f"The :code:`backward` method is not implemented for {self.__class__.__name__}.")
 
@@ -97,106 +99,149 @@ class Expr:
 
     def __repr__(self):
         return f"{self.__class__.__name__}(id={self.id}, flags={self.flags})"
-    
+
+    # ------------------------------------------------------------------
+    # Arithmetic operators — all produce Linear with HardmardDot ops
+    # ------------------------------------------------------------------
+
     def __add__(self, other):
-        from boundlab.expr._base import Add
+        from boundlab.expr._linear import AffineSum
         if isinstance(other, int) and other == 0:
             return self
-        if isinstance(other, (Expr, torch.Tensor)):
-            return Add(self, other)
+        if isinstance(other, torch.Tensor):
+            other = AffineSum(const=other)
+        if isinstance(other, Expr):
+            assert self.shape == other.shape
+            return AffineSum((ScalarMul(1.0, self.shape), self), (ScalarMul(1.0, other.shape), other))
         return NotImplemented
 
     def __radd__(self, other):
-        from boundlab.expr._base import Add
+        from boundlab.expr._linear import AffineSum
         if isinstance(other, int) and other == 0:
             return self
-        if isinstance(other, (Expr, torch.Tensor)):
-            return Add(other, self)
-        return NotImplemented
-    
-    def __mul__(self, other):
-        from boundlab.expr._linear import LinearOpSeq
         if isinstance(other, torch.Tensor):
-            return LinearOpSeq([lambda x: x * other], self)
+            other = AffineSum(const=other)
+        if isinstance(other, Expr):
+            return AffineSum((ScalarMul(1.0, other.shape), other), (ScalarMul(1.0, self.shape), self))
+        return NotImplemented
+
+    def __neg__(self):
+        from boundlab.expr._linear import AffineSum
+        from boundlab.linearop import HardmardDot
+        return AffineSum((ScalarMul(-1.0, self.shape), self))
+
+    def __sub__(self, other):
+        if isinstance(other, Expr):
+            return self + (-other)
+        if isinstance(other, torch.Tensor):
+            return self + (-other)
+        return NotImplemented
+
+    def __rsub__(self, other):
+        if isinstance(other, Expr):
+            return other + (-self)
+        if isinstance(other, torch.Tensor):
+            return other + (-self)
+        return NotImplemented
+
+    def __mul__(self, other):
+        """Element-wise multiplication (no broadcast)."""
+        from boundlab.expr._linear import AffineSum
+        from boundlab.linearop import HardmardDot
+        if isinstance(other, torch.Tensor):
+            return AffineSum((HardmardDot.from_hardmard(other, len(self.shape)), self))
         return NotImplemented
 
     def __rmul__(self, other):
-        from boundlab.expr._linear import LinearOpSeq
+        """Element-wise multiplication (no broadcast)."""
+        from boundlab.expr._linear import AffineSum
+        from boundlab.linearop import HardmardDot
         if isinstance(other, torch.Tensor):
-            return LinearOpSeq([lambda x: other * x], self)
-        return NotImplemented
-    
-    def __matmul__(self, other):
-        from boundlab.expr._linear import LinearOpSeq
-        if isinstance(other, torch.Tensor):
-            return LinearOpSeq([lambda x: x @ other], self)
-        return NotImplemented
-    
-    def __rmatmul__(self, other):
-        from boundlab.expr._linear import LinearOpSeq
-        if isinstance(other, torch.Tensor):
-            return LinearOpSeq([lambda x: other @ x], self)
+            return AffineSum((HardmardDot.from_hardmard(other, len(self.shape)), self))
         return NotImplemented
 
+    def __matmul__(self, other):
+        """Matrix multiply: self @ other."""
+        from boundlab.expr._linear import AffineSum
+        from boundlab.linearop import HardmardDot
+        if isinstance(other, torch.Tensor) and len(other.shape) == 2:
+            assert self.shape[-1] == other.shape[0], f"Inner dimension of self {self.shape} must match first dimension of other {other.shape} for matmul."
+            tensor = other[tuple([None] * len(self.shape[:-1]) + [slice(None), slice(None)])].expand(*self.shape[:-1], *other.shape)
+            input_dims = list(range(len(self.shape)))
+            output_dims = input_dims[:-1] + [tensor.dim() - 1]
+            return AffineSum((HardmardDot(tensor, input_dims, output_dims), self))
+        return NotImplemented
+
+    def __rmatmul__(self, other):
+        """Matrix multiply: other @ self."""
+        from boundlab.expr._linear import AffineSum
+        from boundlab.linearop import HardmardDot
+        if isinstance(other, torch.Tensor) and len(other.shape) == 2:
+            assert other.shape[-1] == self.shape[-1], f"Inner dimension of other {other.shape} must match first dimension of self {self.shape} for matmul."
+            tensor = other[tuple([None] * len(self.shape[:-1]) + [slice(None), slice(None)])].expand(*self.shape[:-1], *other.shape)
+            output_dims = list(range(len(self.shape)))
+            input_dims = output_dims[:-1] + [tensor.dim() - 1]
+            return AffineSum((HardmardDot(tensor, input_dims, output_dims), self))
+        return NotImplemented
+
+    # ------------------------------------------------------------------
+    # Shape / indexing operators — produce Linear with generic LinearOp
+    # ------------------------------------------------------------------
+
+    def _linear_op(self, fn):
+        """Wrap a shape-manipulation function as a Linear."""
+        from boundlab.expr._linear import AffineSum
+        from boundlab.linearop import LinearOp
+        return AffineSum((LinearOp(fn, self.shape), self))
+
     def reshape(self, *shape) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.reshape(*shape)], self)
-    
+        return self._linear_op(lambda x: x.reshape(*shape))
+
     def permute(self, *dims) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.permute(*dims)], self)
-    
+        return self._linear_op(lambda x: x.permute(*dims))
+
     def transpose(self, dim0, dim1) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.transpose(dim0, dim1)],self)
-    
+        return self._linear_op(lambda x: x.transpose(dim0, dim1))
+
     def flatten(self, start_dim=0, end_dim=-1) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.flatten(start_dim, end_dim)], self)
-    
+        return self._linear_op(lambda x: x.flatten(start_dim, end_dim))
+
     def unflatten(self, dim, sizes) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.unflatten(dim, sizes)], self)
-    
+        return self._linear_op(lambda x: x.unflatten(dim, sizes))
+
     def squeeze(self, dim=None) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.squeeze(dim)], self)
-    
+        return self._linear_op(lambda x: x.squeeze(dim))
+
     def unsqueeze(self, dim) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.unsqueeze(dim)], self)
-    
+        return self._linear_op(lambda x: x.unsqueeze(dim))
+
     def narrow(self, dim, start, length) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.narrow(dim, start, length)], self)
-    
+        return self._linear_op(lambda x: x.narrow(dim, start, length))
+
     def expand(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.expand(*sizes)], self)
-    
+        return self._linear_op(lambda x: x.expand(*sizes))
+
     def repeat(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.repeat(*sizes)], self)
-    
+        return self._linear_op(lambda x: x.repeat(*sizes))
+
     def tile(self, *sizes) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.tile(*sizes)], self)
-    
+        return self._linear_op(lambda x: x.tile(*sizes))
+
     def flip(self, dims) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.flip(dims)], self)
-    
+        return self._linear_op(lambda x: x.flip(dims))
+
     def roll(self, shifts, dims) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.roll(shifts, dims)], self)
-    
+        return self._linear_op(lambda x: x.roll(shifts, dims))
+
     def diag(self, diagonal=0) -> "Expr":
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x.diag(diagonal)], self)
-    
-    def __getitem__(self, indices):
-        from boundlab.expr._linear import LinearOpSeq
-        return LinearOpSeq([lambda x: x[indices]], self)
+        return self._linear_op(lambda x: x.diag(diagonal))
+
+    def __getitem__(self, indices) -> "Expr":
+        return self._linear_op(lambda x: x[indices])
+
+    # ------------------------------------------------------------------
+    # Bound computation helpers
+    # ------------------------------------------------------------------
 
     def ub(self) -> torch.Tensor:
         """Compute an upper bound for this expression."""
@@ -212,29 +257,20 @@ class Expr:
         """Compute both an upper bound and a lower bound for this expression."""
         from boundlab import prop
         return prop.ublb(self)
-    
+
     def center(self) -> torch.Tensor:
         """Compute the center of the bounds for this expression."""
         from boundlab import prop
         return prop.center(self)
-        
+
     def bound_width(self) -> torch.Tensor:
         """Compute the width of the bounds for this expression."""
         from boundlab import prop
         return prop.bound_width(self)
 
 
-
 def expr_pretty_print(expr: Expr, indent: int = 0) -> str:
-    """Pretty print an expression in SSA form.
-
-    Args:
-        expr: The expression to print.
-        indent: Number of spaces to indent each line.
-
-    Returns:
-        A string representation of the expression DAG.
-    """
+    """Pretty print an expression in SSA form."""
     visited = list()
 
     def dfs(e: Expr):
@@ -247,17 +283,14 @@ def expr_pretty_print(expr: Expr, indent: int = 0) -> str:
 
     visited.reverse()
 
-    # Count references to each expression
     ref_count = {e: 0 for e in visited}
     for e in visited:
         for child in e.children:
             ref_count[child] += 1
 
-    # Expressions that can be fused (PRINT_FUSE flag and only one reference)
     def can_fuse(e: Expr) -> bool:
         return (ExprFlags.PRINT_FUSE in e.flags) and ref_count[e] <= 1
 
-    # Build string representation with fusing
     expr_to_str = {}
 
     def get_expr_str(e: Expr) -> str:
@@ -275,10 +308,8 @@ def expr_pretty_print(expr: Expr, indent: int = 0) -> str:
 
     output = []
     for i, e in enumerate(visited):
-        # Skip expressions that will be fused into their parent
         if can_fuse(e):
             continue
         get_expr_str(e)
         output.append((" " * indent) + f"%{i} = {expr_to_str[e]}")
     return "\n".join(output)
-

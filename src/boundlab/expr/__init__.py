@@ -24,9 +24,17 @@ relaxations by propagating weight matrices from outputs to inputs.
 
 # Import core classes first (no circular dependencies)
 from ._core import Expr, ExprFlags, expr_pretty_print
-from ._base import ConstVal, Add, add, sum_exprs
-from ._linear import LinearOp, LinearOpSeq, TensorDotLinearOp, contract_linear_ops
+from ._base import ConstVal
+from ._linear import AffineSum
 from ._var import LpEpsilon
+from ._cat import Cat, Stack
+
+
+def Add(*children: Expr) -> AffineSum:
+    """Create an AffineSum of children with identity weights (convenience alias)."""
+    from boundlab.linearop import ScalarMul
+    return AffineSum(*((ScalarMul(1.0, c.shape), c) for c in children))
+
 
 __all__ = [
     # Core
@@ -35,13 +43,12 @@ __all__ = [
     "expr_pretty_print",
     # Base expressions
     "ConstVal",
-    "Add",
-    "sum_exprs",
     # Linear operations
-    "LinearOp",
-    "LinearOpSeq",
-    "TensorDotLinearOp",
-    "contract_linear_ops",
+    "AffineSum",
+    "Add",
     # Variable expressions
-    "LpEpsilon"
+    "LpEpsilon",
+    # Concatenation
+    "Cat",
+    "Stack",
 ]

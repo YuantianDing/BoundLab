@@ -56,4 +56,6 @@ Thumbs.db
 # mypy
 .mypy_cache/
 
-.old
+.old# pixi environments
+.pixi/*
+!.pixi/config.toml

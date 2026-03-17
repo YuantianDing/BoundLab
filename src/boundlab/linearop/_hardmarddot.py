@@ -1,0 +1,194 @@
+
+
+
+import string
+
+import torch
+
+from boundlab.linearop import LinearOp, ComposedOp, SumOp
+
+
+class HardmardDot(LinearOp):
+    r"""A LinearOp that represents element-wise multiplication (Hardmard product) and summation over specified dimensions.
+    """
+
+    def __init__(self, tensor: torch.Tensor, input_dims: list[int], output_dims: list[int], name=None):
+        """Initialize a HardmardDot.
+
+        This operator behaves like dot product on `input_dims - output_dims`, elementwise multiplication on `input_dims & output_dims`, and batching on `output_dims - input_dims`.
+
+        Args:
+            tensor: The fixed tensor for the hardmard product.
+            input_dims: A list of dimensions of `tensor` that correspond to the input tensor dimensions.
+            output_dims: A list of dimensions of `tensor` that correspond to the output tensor dimensions.
+            name: Optional name for display purposes.
+        """
+        self.tensor = tensor
+        self.input_dims = input_dims
+        self.output_dims = output_dims
+        self.dot_dims = list(set(input_dims) - set(output_dims))
+        self.mul_dims = list(set(output_dims) & set(input_dims))
+        self.batch_dims = list(set(output_dims) - set(input_dims))
+        input_shape = torch.Size(tensor.shape[i] for i in input_dims)
+        output_shape = torch.Size(tensor.shape[i] for i in output_dims)
+        if name is not None:
+            self.name = name
+        else:
+            self.name = f"<hdot {list(input_shape)} -> {list(output_shape)}>"
+        super().__init__(input_shape, output_shape)
+
+    # ---- einsum helpers ----
+
+    def _einsum_strs(self):
+        """Return (tensor_str, input_str, output_str) for einsum."""
+        t_str = "".join(string.ascii_letters[i] for i in range(self.tensor.dim()))
+        i_str = "".join(string.ascii_letters[i] for i in self.input_dims)
+        o_str = "".join(string.ascii_letters[i] for i in self.output_dims)
+        return t_str, i_str, o_str
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        t_str, i_str, o_str = self._einsum_strs()
+        return torch.einsum(f"{t_str},{i_str}->{o_str}", self.tensor, x)
+
+    def backward(self, grad: torch.Tensor) -> torch.Tensor:
+        t_str, i_str, o_str = self._einsum_strs()
+        return torch.einsum(f"{t_str},{o_str}->{i_str}", self.tensor, grad)
+
+    def is_full(self) -> bool:
+        """Check if this HardmardDot fully contracts all input dimensions (output_dims & input_dims == ø)."""
+        return self.mul_dims == []
+
+    def is_hardmard(self) -> bool:
+        """Check if this HardmardDot is effectively an elementwise multiplication (input_dims - output_dims == ø)."""
+        return self.dot_dims == []
+
+    def is_non_expanding(self) -> bool:
+        """Check if this HardmardDot doesn't introduce new dimensions (output_dims - input_dims == ø)."""
+        return self.batch_dims == []
+
+    def is_tensordot(self) -> bool:
+        """Check if this HardmardDot is effectively a tensordot (no elementwise multiplication)."""
+        return all(self.tensor.stride(i) == 0 for i in self.mul_dims)
+
+    def is_zerotensor(self) -> bool:
+        """Check if this HardmardDot is effectively a zero tensor."""
+        return self.tensor.eq(0).all()
+
+    @staticmethod
+    def from_hardmard(tensor: torch.Tensor, n_input_dims: int, name=None) -> "HardmardDot":
+        output_dims = list(range(tensor.dim()))
+        input_dims = output_dims[-n_input_dims:]
+        return HardmardDot(tensor, input_dims, output_dims, name=name)
+
+    @staticmethod
+    def eye(shape: torch.Size) -> "HardmardDot":
+        """Create an identity HardmardDot for the given shape."""
+        tensor = torch.ones(shape)
+        dims = list(range(len(shape)))
+        return HardmardDot(tensor, dims, dims, name="I")
+
+    def __mul__(self, scalar: float) -> "HardmardDot":
+        """Scale the HardmardDot by a scalar."""
+        return HardmardDot(self.tensor * scalar, self.input_dims, self.output_dims, name=f"{scalar} * {self}")
+
+    def __rmul__(self, scalar: float) -> "HardmardDot":
+        """Scale the HardmardDot by a scalar."""
+        return self.__mul__(scalar)
+
+    def __matmul__(self, other: "LinearOp") -> "LinearOp":
+        """Compose this HardmardDot with another LinearOp: (self ∘ other)(x) = self(other(x))."""
+        if isinstance(other, HardmardDot):
+            return merge_hardmard_dot(self, other)
+        if isinstance(other, LinearOp):
+            return ComposedOp(self, other)
+        return NotImplemented
+
+    def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
+        """Compose another LinearOp with this HardmardDot: (other ∘ self)(x) = other(self(x))."""
+        if isinstance(other, HardmardDot):
+            return merge_hardmard_dot(other, self)
+        if isinstance(other, LinearOp):
+            return ComposedOp(other, self)
+        return NotImplemented
+
+    def __add__(self, other: "LinearOp") -> "LinearOp":
+        """Add this HardmardDot to another LinearOp, returning a new LinearOp representing the sum."""
+        if isinstance(other, HardmardDot):
+            self0 = self.permute_for_output()
+            other0 = other.permute_for_output()
+            if self0.input_dims == other0.input_dims and self0.output_dims == other0.output_dims:
+                return HardmardDot(self0.tensor + other0.tensor, self0.input_dims, self0.output_dims, name=f"{self} + {other0}")
+        if isinstance(other, LinearOp):
+            return SumOp(self, other)
+        return NotImplemented
+
+    def __radd__(self, other: "LinearOp") -> "LinearOp":
+        """Add another LinearOp to this HardmardDot."""
+        if isinstance(other, HardmardDot):
+            return other.__add__(self)
+        if isinstance(other, LinearOp):
+            return SumOp(other, self)
+        return NotImplemented
+
+    def _indices_exec(self, indices: list[int], max_index: int) -> (list[int], list[int], int):
+        result = [-1] * self.tensor.dim()
+        for i, idx in zip(indices, self.input_dims):
+            result[idx] = i
+        for i in range(len(result)):
+            if result[i] == -1:
+                result[i] = max_index
+                max_index += 1
+        output_indices = [result[i] for i in self.output_dims]
+        return result, output_indices, max_index
+
+    def _indices_exec_reverse(self, indices: list[int], max_index: int) -> (list[int], list[int], int):
+        result = [-1] * self.tensor.dim()
+        for i, idx in zip(indices, self.output_dims):
+            result[idx] = i
+        for i in range(len(result)):
+            if result[i] == -1:
+                result[i] = max_index
+                max_index += 1
+        input_indices = [result[i] for i in self.input_dims]
+        return result, input_indices, max_index
+
+    def permute_for_input(self):
+        permute_dims = [i for i in range(self.tensor.dim()) if i not in self.input_dims] + self.input_dims
+        new_tensor = self.tensor.permute(permute_dims)
+        input_dims = [permute_dims.index(i) for i in self.input_dims]
+        output_dims = [permute_dims.index(i) for i in self.output_dims]
+        len_diff = len(permute_dims) - len(self.input_dims)
+        assert input_dims == list(range(len_diff, len(permute_dims))), "Input dimensions should be permuted to the end."
+        return HardmardDot(new_tensor, input_dims, output_dims, name=self.name)
+
+    def permute_for_output(self):
+        permute_dims = self.output_dims + [i for i in range(self.tensor.dim()) if i not in self.output_dims]
+        new_tensor = self.tensor.permute(permute_dims)
+        output_dims = [permute_dims.index(i) for i in self.output_dims]
+        input_dims = [permute_dims.index(i) for i in self.input_dims]
+        assert output_dims == list(range(len(output_dims))), "Output dimensions should be permuted to the end."
+        return HardmardDot(new_tensor, input_dims, output_dims, name=self.name)
+
+def merge_hardmard_dot(x: HardmardDot, y: HardmardDot) -> HardmardDot:
+    output_idx = list(range(len(x.output_dims)))
+    max_index = len(output_idx)
+
+    x_idx, intermediate_idx, max_index = y._indices_exec_reverse(output_idx, max_index)
+    y_idx, input_idx, max_index = x._indices_exec_reverse(intermediate_idx, max_index)
+
+    new_tensor_idx = output_idx.copy()
+    output_dims = list(range(len(output_idx)))
+    input_dims = []
+    for i in input_idx:
+        if i in new_tensor_idx:
+            input_dims.append(new_tensor_idx.index(i))
+        else:
+            new_tensor_idx.append(i)
+            input_dims.append(len(new_tensor_idx) - 1)
+
+    y_idx, x_idx, new_tensor_idx = _to_ascii_letters(y_idx, x_idx, new_tensor_idx)
+    tensor = torch.einsum(f"{y_idx},{x_idx}->{new_tensor_idx}", y.tensor, x.tensor)
+    return HardmardDot(tensor, input_dims, output_dims, name=f"({x} ⊚ {y})")
+
+def _to_ascii_letters(*args: list[int]) -> tuple[str, ...]:
+    return tuple("".join(string.ascii_letters[i] for i in a) for a in args)

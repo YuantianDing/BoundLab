@@ -1,245 +1,116 @@
+from __future__ import annotations
+
 r"""Linear Operations for Expressions
 
-This module provides VJP-based linear operation wrappers that enable
-automatic backward propagation through arbitrary linear transformations.
+This module provides Linear, a fused expression class that represents
+a sum of HardmardDot-weighted children: Σ_i op_i(child_i).
+It replaces both LinearOpSeq and Add from the previous design.
 """
 
-import inspect
-from typing import Callable, Literal
+from typing import Literal
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
-from boundlab.expr._base import Add, ConstVal
+
 from boundlab.expr._core import Expr, ExprFlags
+from boundlab.linearop import HardmardDot, LinearOp
 
+class AffineSum(Expr):
+    r"""An expression representing a sum of linear operations applied to children.
 
-class LinearOp:
-    r"""A wrapper for linear functions with automatic VJP computation.
+    Represents :math:`\sum_i \mathrm{op}_i(x_i)` where each :math:`\mathrm{op}_i`
+    is a :class:`~boundlab.linearop.HardmardDot`.
 
-    This class wraps a linear function and computes its vector-Jacobian
-    product (VJP) using ``torch.func.vjp``. The VJP enables efficient
-    backward propagation of weights through the linear transformation.
-
-    The wrapped function must satisfy linearity: ``f(0) = 0``.
-    """
-
-    original: Callable[[torch.Tensor], torch.Tensor]
-    """The original linear function."""
-    input_shape: "torch.Size"
-    """Expected input tensor shape."""
-    output_shape: "torch.Size"
-    """Computed output tensor shape."""
-    transposed: Callable[["torch.Tensor"], tuple["torch.Tensor", ...]]
-    """The VJP function for backward propagation."""
-
-    def __init__(self, original: Callable[[torch.Tensor], torch.Tensor], input_shape: torch.Size, name=None):
-        """Initialize a LinearOp wrapper.
-
-        Args:
-            original: A linear function mapping tensors to tensors.
-            input_shape: The expected shape of input tensors.
-            name: Optional name for display purposes.
-
-        Raises:
-            AssertionError: If the function is not linear (f(0) != 0).
-        """
-        self.original = original
-        self.input_shape = input_shape
-        self.name = name
-        with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
-            self.output_shape = self.original(torch.empty(self.input_shape)).shape
-        bias, vjp = torch.func.vjp(self.original, torch._efficientzerotensor(self.input_shape))
-        assert bias._is_zerotensor(), "Original function must be linear (zero input should yield zero output)."
-        self.transposed = vjp
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the linear operation to a batched input.
-
-        Args:
-            x: Input tensor with a leading batch dimension.
-
-        Returns:
-            Output tensor with the operation applied to each batch element.
-        """
-        return torch.vmap(self.original)(x)
-
-    def backward(self, weights: torch.Tensor) -> torch.Tensor:
-        """Propagate weights backward through the linear operation.
-
-        Args:
-            weights: Weight tensor with a leading batch dimension.
-
-        Returns:
-            Propagated weights via the VJP.
-        """
-        # VJP returns a tuple of tangents, extract the first (and only) element
-        return torch.vmap(self.transposed)(weights)[0]
-    
-    def __str__(self):
-        if self.original.__name__ == "<lambda>":
-            file = inspect.getsourcefile(self.original)
-            line_no = inspect.getsourcelines(self.original)[1]
-            return f"<lambda {file}:{line_no}>"
-        return self.name if self.name is not None else self.original.__name__
-
-    def __call__(self, x: Expr) -> "LinearOpSeq":
-        """Apply this linear operation to an expression, returning a LinearOpSeq."""
-        return LinearOpSeq([self], x)
-    
-class LinearOpSeq(Expr):
-    r"""An expression representing a sequence of composed linear operations.
-
-    This expression applies a sequence of :class:`LinearOp` transformations
-    to a child expression. During backward propagation, weights are
-    propagated through each operation in sequence via their VJPs.
+    During construction, if a child is itself a :class:`Linear`, its pairs
+    are absorbed by composing the outer op with each inner op via ``@``
+    (eager contraction). This ensures the expression tree is always flat
+    — no :class:`Linear` node ever has a :class:`Linear` child.
 
     Attributes:
-        child: The input expression.
-        ops: List of LinearOp operations to apply (in forward order).
+        pairs: List of ``(op, child)`` tuples.
+        ops: List of HardmardDot operators (convenience view).
     """
 
-    def __init__(self, ops: list[LinearOp | Callable[[torch.Tensor], torch.Tensor]], child: Expr):
-        """Initialize a LinearOpSeq expression.
+    def __init__(self, *pairs: tuple, const=None):
+        """Construct a Linear.
 
         Args:
-            ops: Sequence of linear operations or callables to apply.
-            child: The input expression to transform.
-
-        Raises:
-            AssertionError: If child is already a LinearOpSeq (use merging instead).
+            *pairs: Sequence of ``(op, child)`` pairs where ``op`` is a
+                :class:`~boundlab.linearop.HardmardDot` and ``child`` is
+                an :class:`Expr` or :class:`torch.Tensor`.
         """
         super().__init__(ExprFlags.IS_AFFINE)
-        if isinstance(child, LinearOpSeq):
-            ops.extend(child.ops)
-            child = child.child
-        
-        self.child = child
-        
-        self.ops = []
-        shape = self.child.shape
-        for op in reversed(ops):
-            if isinstance(op, LinearOp):
-                linear_op = op
-                assert linear_op.input_shape == shape, f"Shape mismatch: expected {linear_op.input_shape}, got {shape}."
-                self.ops.append(linear_op)
-                shape = linear_op.output_shape
+        self.constant = const
+
+        # Pre-process before allocating ID so ConstVal wrappers get lower IDs.
+        self.children_dict: dict[Expr, LinearOp] = {}
+        for op, child in pairs:
+            if isinstance(child, torch.Tensor):
+                self._add_constant(op.forward(child))
+            elif isinstance(child, AffineSum):
+                # Distribute op through child's pairs: (op ∘ child_op_i, grandchild_i)
+                if child.constant is not None:
+                    self._add_constant(op.forward(child.constant))
+                for grandchild, child_op in child.children_dict.items():
+                    self._add_expr(op @ child_op, grandchild)
             else:
-                linear_op = LinearOp(op, shape)
-                self.ops.append(linear_op)
-                shape = linear_op.output_shape        
-        self.ops.reverse()
-        
+                self._add_expr(op, child)
+
+        output_shapes = {op.output_shape for op in self.children_dict.values()}
+        if self.constant is not None:
+            output_shapes.add(self.constant.shape)
+        assert len(output_shapes) == 1, \
+            f"All ops must share the same output shape; got {output_shapes}."
+        self._shape = output_shapes.pop()
+        # Propagate flags
+        if self.children_dict:
+            if all(ExprFlags.SYMMETRIC_TO_0 in child.flags for child in self.children_dict.keys()):
+                self.flags |= ExprFlags.SYMMETRIC_TO_0
+            if all(child.flags & ExprFlags.IS_CONST for child in self.children_dict.keys()):
+                self.flags |= ExprFlags.IS_CONST
+        else:
+            self.flags |= ExprFlags.IS_CONST
+
+    def _add_constant(self, const: torch.Tensor):
+        """Return a new Linear with the same pairs but added constant."""
+        if const is not None:
+            self.constant = self.constant + const if self.constant is not None else const
+    def _add_expr(self, op: LinearOp, child: Expr):
+        """Return a new Linear with the same pairs but added (op, child)."""
+        if child in self.children_dict:
+            # If child already exists, compose the ops: old_op + op
+            old_op = self.children_dict[child]
+            new_op = old_op + op
+            self.children_dict[child] = new_op
+        else:
+            self.children_dict[child] = op
     @property
     def shape(self) -> torch.Size:
-        return self.ops[0].output_shape
-    
-    @property
-    def children(self) -> tuple[Expr]:
-        return (self.child,)
-
-    def with_children(self, new_child: Expr) -> "LinearOpSeq":
-        """Return a new LinearOpSeq with the same operations but a new child."""
-        return LinearOpSeq(self.ops, new_child)
-
-    def backward(self, weights: torch.Tensor, mode: Literal[">=", "<=", "=="] = "==") -> tuple[0, torch.Tensor] | None:
-        for op in self.ops:
-            weights = op.backward(weights)
-        return (0, weights)
-    
-    def to_string(self, *children_str):
-        return " ∘ ".join([str(op) for op in self.ops]) + f"({children_str[0]})"
+        return self._shape
 
     @property
-    def composed(self) -> Callable[[torch.Tensor], torch.Tensor]:
-        def composed_function(x: torch.Tensor) -> torch.Tensor:
-            for op in self.ops:
-                x = op.original(x)
-            return x
-        return composed_function
-    
-    def contract(self) -> "LinearOpSeq" | "ConstVal":
-        """Attempt to contract the linear operations into a single operation, if possible."""
-        if isinstance(self.child, ConstVal):
-            return ConstVal(self.composed(self.child.value))
-        else:
-            jacobian = torch.func.jacrev(self.composed())(torch._efficientzerotensor(self.child.shape))
-            return LinearOpSeq([TensorDotLinearOp(jacobian, dims=self.child.shape.numel())], self.child)
+    def children(self) -> tuple[Expr, ...]:
+        return tuple(self.children_dict.keys())
 
+    def with_children(self, *new_children: Expr) -> "AffineSum":
+        """Return a new Linear with the same ops but new children."""
+        return AffineSum(*zip(self.children_dict.values(), new_children))
 
-
-class TensorDotLinearOp(LinearOp):
-    r"""A LinearOp implementing tensor dot product with a fixed tensor.
-
-    This is a specialized LinearOp that computes ``torch.tensordot(tensor, x, dims)``.
-
-    Attributes:
-        tensor: The fixed tensor for the dot product.
-        dims: Number of dimensions to contract.
-    """
-
-    def __init__(self, tensor: torch.Tensor, dims: int, name=None):
-        """Initialize a TensorDotLinearOp.
+    def backward(self, weights, direction: Literal[">=", "<=", "=="]) \
+            -> tuple:
+        """Propagate weights backward: each child gets weights ∘ op_i.
 
         Args:
-            tensor: The fixed tensor for the dot product.
-            dims: Number of trailing dimensions to contract.
-            name: Optional name for display purposes.
+            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated weight.
+            direction: Bound direction (unused — Linear is always linear).
+
+        Returns:
+            ``(Constant, [weights @ op_i for op_i in self.ops])``
         """
-        self.tensor = tensor
-        self.dims = dims
-        super().__init__(
-            original=lambda x: torch.tensordot(self.tensor, x, dims=self.dims),
-            input_shape=torch.Size(self.tensor.shape[-self.dims:]),
-            name=f"<tensordot {name}>" if name is not None else f"<tensordot {self.tensor.shape[-self.dims:]}>"
-        )
+        bias = 0
+        if self.constant is not None:
+            bias = weights.original(self.constant)
+        return (bias, [weights @ op for op in self.children_dict.values()])
 
-def contract_linear_ops(expr: Expr, perserve: set[Expr] | Literal["nonaffine"] = "nonaffine") -> Expr:
-    """Contract a LinearOpSeq into a single TensorDotLinearOp.
-
-    Args:
-        expr: A LinearOpSeq expression to contract.
-        perserve: A set of expressions to preserve during contraction.
-        
-    Returns:
-        A new LinearOpSeq with a single contracted operation.
-
-    Raises:
-        TypeError: If expr is not a LinearOpSeq.
-    """
-    if perserve == "nonaffine" and ExprFlags.IS_AFFINE not in expr.flags:
-        return expr
-    if expr in perserve:
-        return expr
-    
-    expr = expr.with_children(*[contract_linear_ops(child) for child in expr.children])
-    if isinstance(expr, LinearOpSeq):
-        if isinstance(expr.child, Add):
-            add_list = []
-            for child in expr.child.children:
-                add_list.append(contract_linear_ops(LinearOpSeq(expr.ops, child)))
-            return Add(*add_list)
-        return expr.contract()
-    if isinstance(expr, Add):
-        other_exprs = []
-        constval = torch._efficientzerotensor(expr.shape)
-        expr.children_map = {}
-        for child in expr.children:
-            if isinstance(child, LinearOpSeq):
-                assert len(child.ops) == 1, "Expected a single operation after contraction."
-                assert isinstance(child.ops[0], TensorDotLinearOp), "Expected a TensorDotLinearOp after contraction."
-                assert len(child.child.children) == 0 or child.child in perserve, "Expected a leaf expression or a preserved expression as the child of a LinearOpSeq."
-
-                if child.child in expr.children_map:
-                    expr.children_map[child.child] = child.ops[0].tensor
-                else:
-                    expr.children_map[child.child] += child.ops[0].tensor
-            elif isinstance(child, ConstVal):
-                constval += child.value
-            else:
-                other_exprs.append(child)
-        
-        new_children = other_exprs
-        new_children.append(ConstVal(constval))
-        new_children.extend([LinearOpSeq([TensorDotLinearOp(v, dims=k.shape.numel())], k) for k, v in expr.children_map.items()])
-        return sum(new_children)
-    return expr
+    def to_string(self, *children_str: str) -> str:
+        parts = [f"{op}({cs})" for op, cs in zip(self.children_dict.values(), children_str)]
+        return " + ".join(parts)

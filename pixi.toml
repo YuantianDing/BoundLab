@@ -1,0 +1,35 @@
+[workspace]
+authors = ["Yuantian Ding <work.yt.ding@gmail.com>"]
+channels = ["conda-forge", "pytorch"]
+name = "boundlab"
+platforms = ["osx-64", "osx-arm64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+test = "pytest"
+test-cov = "pytest --cov=boundlab"
+docs = { cmd = "make html", cwd = "docs" }
+
+[dependencies]
+python = ">=3.11"
+pytorch = ">=2.0"
+
+[pypi-dependencies]
+sortedcontainers = "*"
+boundlab = { path = ".", editable = true }
+
+[feature.dev.dependencies]
+pytest = ">=7.0"
+pytest-cov = ">=4.0"
+
+[feature.docs.pypi-dependencies]
+sphinx = ">=7.0"
+pydata-sphinx-theme = ">=0.15"
+sphinx-design = "*"
+sphinx-autobuild = "*"
+myst-parser = "*"
+sphinx-math-dollar = "*"
+
+[environments]
+default = { features = ["dev"], solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }

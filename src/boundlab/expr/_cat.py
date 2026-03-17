@@ -4,21 +4,147 @@ This module provides expressions for concatenating and stacking
 child expressions along specified dimensions.
 """
 
+from typing import Literal
 
-class Cat:
-    """Expression for concatenating tensors along a dimension.
+import torch
+import torch.nn.functional as F
 
-    TODO: Implement using VJP for backward propagation.
+from boundlab.expr._core import Expr, ExprFlags
+
+
+class Cat(Expr):
+    """Expression for concatenating child expressions along a dimension.
+
+    The backward pass produces an embed LinearOp per child that zero-pads
+    the child's contribution into the full cat output shape. The VJP of
+    F.pad (narrow) is computed automatically.
     """
 
-    pass
+    def __init__(self, *children: Expr, dim: int = 0):
+        super().__init__(ExprFlags.IS_AFFINE)
+        assert len(children) >= 1, "Cat requires at least one child."
+        assert all(
+            c.shape[:dim] == children[0].shape[:dim] and c.shape[dim + 1:] == children[0].shape[dim + 1:]
+            for c in children
+        ), "All children must have matching shapes except along the concatenation dimension."
+        self._children = tuple(children)
+        self.dim = dim
+
+        cat_size = sum(c.shape[dim] for c in children)
+        s = list(children[0].shape)
+        s[dim] = cat_size
+        self._shape = torch.Size(s)
+
+    @property
+    def shape(self) -> torch.Size:
+        return self._shape
+
+    @property
+    def children(self) -> tuple[Expr, ...]:
+        return self._children
+
+    def with_children(self, *new_children: Expr) -> "Cat":
+        return Cat(*new_children, dim=self.dim)
+
+    def backward(self, weights, direction: Literal[">=", "<=", "=="] = "=="):  # noqa: ARG002
+        """Propagate weights to each child via zero-padding embed ops.
+
+        Args:
+            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated weight.
+            direction: Unused (Cat is always linear).
+
+        Returns:
+            ``(0, [child_weight_0, child_weight_1, ...])``
+        """
+        from boundlab.linearop import LinearOp
+        child_ops = []
+        offset = 0
+        cat_size = self._shape[self.dim]
+        for child in self._children:
+            size = child.shape[self.dim]
+            pad_before = offset
+            pad_after = cat_size - offset - size
+            ndim = len(child.shape)
+            # F.pad spec: pairs in reverse dim order, (left, right) per dim
+            pad_spec = [0] * (2 * ndim)
+            pad_spec[2 * (ndim - 1 - self.dim)] = pad_before
+            pad_spec[2 * (ndim - 1 - self.dim) + 1] = pad_after
+            embed_op = LinearOp(
+                lambda x, ps=pad_spec: F.pad(x, ps),
+                child.shape,
+                name=f"embed_cat[{offset}:{offset+size}]"
+            )
+            child_ops.append(weights @ embed_op)
+            offset += size
+        return (0, child_ops)
+
+    def to_string(self, *children_str: str) -> str:
+        return f"cat([{', '.join(children_str)}], dim={self.dim})"
 
 
-class Stack:
-    """Expression for stacking tensors along a new dimension.
+class Stack(Expr):
+    """Expression for stacking child expressions along a new dimension.
 
-    TODO: Implement using VJP for backward propagation.
+    All children must have identical shapes. The backward pass produces
+    an embed LinearOp per child that places the child at its index along
+    the stacking dimension, with zeros elsewhere.
     """
 
-    pass
+    def __init__(self, *children: Expr, dim: int = 0):
+        super().__init__(ExprFlags.IS_AFFINE)
+        assert len(children) >= 1, "Stack requires at least one child."
+        assert all(
+            c.shape == children[0].shape for c in children
+        ), "All children must have the same shape for Stack."
+        self._children = tuple(children)
+        self.dim = dim
 
+        s = list(children[0].shape)
+        s.insert(dim, len(children))
+        self._shape = torch.Size(s)
+
+    @property
+    def shape(self) -> torch.Size:
+        return self._shape
+
+    @property
+    def children(self) -> tuple[Expr, ...]:
+        return self._children
+
+    def with_children(self, *new_children: Expr) -> "Stack":
+        return Stack(*new_children, dim=self.dim)
+
+    def backward(self, weights, direction: Literal[">=", "<=", "=="] = "=="):  # noqa: ARG002
+        """Propagate weights to each child via unsqueeze+cat embed ops.
+
+        Args:
+            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated weight.
+            direction: Unused (Stack is always linear).
+
+        Returns:
+            ``(0, [child_weight_0, child_weight_1, ...])``
+        """
+        from boundlab.linearop import LinearOp
+        n = len(self._children)
+        child_ops = []
+        for i, child in enumerate(self._children):
+            def make_embed(idx, n_children, d):
+                def embed(x):
+                    parts = [
+                        x.unsqueeze(d) if j == idx
+                        else torch.zeros(*x.shape[:d], 1, *x.shape[d:],
+                                         dtype=x.dtype, device=x.device)
+                        for j in range(n_children)
+                    ]
+                    return torch.cat(parts, dim=d)
+                return embed
+            embed_op = LinearOp(
+                make_embed(i, n, self.dim),
+                child.shape,
+                name=f"embed_stack[{i}]"
+            )
+            child_ops.append(weights @ embed_op)
+        return (0, child_ops)
+
+    def to_string(self, *children_str: str) -> str:
+        return f"stack([{', '.join(children_str)}], dim={self.dim})"

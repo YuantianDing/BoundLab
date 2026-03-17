@@ -1,10 +1,44 @@
-
+import torch
 
 from boundlab.expr._core import Expr
+from boundlab.linearop import LinearOp
 
 from . import ZonoBounds, _register_linearizer
 
+
 @_register_linearizer("relu")
-def relu_linearizer(*expr: Expr) -> ZonoBounds:
-    # TODO: Implement the actual linearization logic for ReLU expressions, using the input bounds to compute the output zonotope bounds.
-    pass
+def relu_linearizer(expr: Expr) -> ZonoBounds:
+    """Triangle relaxation of ReLU for zonotope abstract interpretation.
+
+    For each neuron with input bounds [lb, ub]:
+    - Dead   (ub <= 0): output is 0, no contribution.
+    - Active (lb >= 0): output equals input exactly.
+    - Crossing (lb < 0 < ub): triangle relaxation with
+        slope  = ub / (ub - lb),
+        bias   = -ub * lb / (2 * (ub - lb)),
+        error  = -ub * lb / (2 * (ub - lb)).
+    """
+
+    lb = expr.lb()
+    ub = expr.ub()
+    output_shape = ub.shape
+    dead   = ub <= 0
+    active = lb >= 0
+    cross  = ~dead & ~active
+
+    slope = torch.where(active, torch.ones_like(ub), torch.zeros_like(ub))
+    slope = torch.where(cross, ub / (ub - lb), slope)
+
+    error = torch.zeros_like(ub)
+    cross_val = -ub * lb / (2 * (ub - lb))
+    bias  = torch.where(cross, cross_val, torch.zeros_like(ub))
+    nonzero_idx = torch.nonzero(cross, as_tuple=True)
+    length = nonzero_idx[0].shape[0]
+    cross_coeffs = cross_val[nonzero_idx]
+    def error_op(eps: torch.Tensor, _shape=output_shape, _idx=nonzero_idx, _coeffs=cross_coeffs) -> torch.Tensor:
+        result = torch.zeros(_shape)
+        result[_idx] = eps * _coeffs
+        return result
+    error_op = LinearOp(error_op, input_shape=torch.Size((length,)))
+    
+    return ZonoBounds(bias=bias, error_coeffs=error_op, input_weights=[slope])

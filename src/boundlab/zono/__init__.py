@@ -10,33 +10,41 @@ import torch
 
 from boundlab import expr
 from boundlab.expr._core import Expr
-from boundlab.expr._linear import contract_linear_ops
+from boundlab.expr._var import LpEpsilon
 from boundlab.interp import Interpreter
-
-from .relu import relu_linearizer
+from boundlab.linearop import LinearOp
 
 interpret = Interpreter({})
 """Zonotope-Based Abstract Interpretation for Neural Networks"""
+
 
 @dataclasses.dataclass
 class ZonoBounds:
     """Data class representing zonotope bounds for a neural network layer."""
     bias: torch.Tensor # The bias term of the zonotope
-    error_coeffs: torch.Tensor # Hardmard product weights of the error terms
-    input_weights: list[torch.Tensor] # Hardmard product weights of the input terms
+    error_coeffs: LinearOp
+    input_weights: list[torch.Tensor]  # Hadamard product weights of the input terms
 
 
 def _register_linearizer(name: str):
     def decorator(linearizer: callable):
         def handler(*exprs: Expr) -> Expr:
             bounds = linearizer(*exprs)
-            assert all(w.shape == e.shape for w, e in zip(bounds.input_weights, exprs)), "Input weights must match the shapes of the input expressions."
-            result_expr = sum(w * e for w, e in zip(bounds.input_weights, bounds.error_coeffs)) + bounds.bias
-            return contract_linear_ops(result_expr)
+            assert all(w.shape == e.shape for w, e in zip(bounds.input_weights, exprs)), \
+                "Input weights must match the shapes of the input expressions."
+            # Apply slopes to input expressions
+            result_expr = sum(w * e for w, e in zip(bounds.input_weights, exprs)) + bounds.bias
+            # Introduce a fresh noise symbol for the approximation error
+            new_eps = LpEpsilon(bounds.error_coeffs.input_shape)
+            result_expr = result_expr + bounds.error_coeffs(new_eps)
+            return result_expr
         interpret.dispatcher[name] = handler
         return linearizer
     return decorator
 
-from . import relu
 
-# TODO: Add more linearizers for other nonlinear activations, such as sigmoid, tanh, etc., and register them with the interpreter.
+# Import activation modules last so _register_linearizer and ZonoBounds are already defined
+from . import relu as _relu            # registers "relu"
+
+# call_module handlers (mod is the nn.Module instance; pass kwargs when needed)
+interpret.dispatcher["ReLU"]      = lambda _, x: interpret.dispatcher["relu"](x)
