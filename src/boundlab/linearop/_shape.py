@@ -6,7 +6,7 @@ Each class implements explicit forward (the shape operation) and backward
 
 import torch
 
-from boundlab.linearop._base import LinearOp
+from boundlab.linearop._base import LinearOp, LinearOpFlags
 
 
 def _meta_output_shape(fn, input_shape: torch.Size) -> torch.Size:
@@ -24,7 +24,7 @@ class ReshapeOp(LinearOp):
     def __init__(self, input_shape: torch.Size, target_shape: tuple[int, ...]):
         self.target_shape = target_shape
         output_shape = _meta_output_shape(lambda x: x.reshape(*target_shape), input_shape)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.reshape(*self.target_shape)
@@ -53,7 +53,7 @@ class FlattenOp(LinearOp):
         self.original_sizes = input_shape[self.start_dim:self.end_dim + 1]
         output_shape = _meta_output_shape(
             lambda x: x.flatten(start_dim, end_dim), input_shape)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.flatten(self.start_dim, self.end_dim)
@@ -74,7 +74,7 @@ class UnflattenOp(LinearOp):
         self.end_dim = dim + len(sizes) - 1
         output_shape = _meta_output_shape(
             lambda x: x.unflatten(dim, sizes), input_shape)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.unflatten(self.dim, self.sizes)
@@ -99,7 +99,7 @@ class PermuteOp(LinearOp):
         for i, d in enumerate(dims):
             self.inv_dims[d] = i
         output_shape = torch.Size(input_shape[d] for d in dims)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.permute(*self.dims)
@@ -170,7 +170,7 @@ class SqueezeOp(LinearOp):
             self._is_noop = all(s != 1 for s in input_shape)
             self._squeezed_dims = [i for i, s in enumerate(input_shape) if s == 1]
             output_shape = torch.Size(s for s in input_shape if s != 1)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.squeeze(self.dim) if self.dim is not None else x.squeeze()
@@ -194,7 +194,7 @@ class UnsqueezeOp(LinearOp):
     def __init__(self, input_shape: torch.Size, dim: int):
         self.dim = dim
         output_shape = _meta_output_shape(lambda x: x.unsqueeze(dim), input_shape)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.unsqueeze(self.dim)
@@ -229,7 +229,7 @@ class ExpandOp(LinearOp):
         for i in range(len(input_shape)):
             if input_shape[i] == 1 and output_shape[n_new + i] > 1:
                 self._sum_dims.append(n_new + i)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.expand(*self.sizes)
@@ -252,7 +252,7 @@ class RepeatOp(LinearOp):
         self._padded_input_shape = torch.Size([1] * n_pad + list(input_shape))
         output_shape = torch.Size(
             s * r for s, r in zip(self._padded_input_shape, sizes))
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.repeat(*self.sizes)
@@ -279,7 +279,7 @@ class TileOp(RepeatOp):
         n_pad = len(input_shape) - len(sizes)
         if n_pad > 0:
             sizes = (1,) * n_pad + tuple(sizes)
-        super().__init__(input_shape, sizes)
+        super().__init__(input_shape, sizes, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def __str__(self):
         return f"tile({list(self.sizes)})"
@@ -294,7 +294,7 @@ class FlipOp(LinearOp):
 
     def __init__(self, input_shape: torch.Size, dims):
         self.dims = dims
-        super().__init__(input_shape, input_shape)
+        super().__init__(input_shape, input_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.flip(self.dims)
@@ -317,7 +317,7 @@ class RollOp(LinearOp):
             self._inv_shifts = -shifts
         else:
             self._inv_shifts = [-s for s in shifts]
-        super().__init__(input_shape, input_shape)
+        super().__init__(input_shape, input_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.roll(self.shifts, self.dims)
@@ -341,7 +341,7 @@ class DiagOp(LinearOp):
         self._input_ndim = len(input_shape)
         output_shape = _meta_output_shape(
             lambda x: x.diag(diagonal), input_shape)
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return x.diag(self.diagonal)

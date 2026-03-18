@@ -11,6 +11,7 @@ import torch
 
 import boundlab.expr
 from boundlab.linearop import ScalarOp
+from boundlab.linearop._base import ZeroOp
 
 __all__ = [
     "ub",
@@ -51,7 +52,7 @@ def _is0(a) -> bool:
     from boundlab.linearop import EinsumOp
     if isinstance(a, int) and a == 0:
         return True
-    if isinstance(a, EinsumOp) and a.is_zerotensor():
+    if isinstance(a, ZeroOp):
         return True
     return False
 
@@ -73,7 +74,7 @@ def ub(e: "Expr") -> torch.Tensor:
 
     result = torch.zeros(e.shape)
 
-    weight_map = {e.id: EinsumOp.eye(e.shape)}
+    weight_map = {e.id: ScalarOp(1.0, e.shape)}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 
@@ -119,7 +120,7 @@ def lb(e: "Expr") -> torch.Tensor:
 
     result = torch.zeros(e.shape)
 
-    weight_map = {e.id: EinsumOp.eye(e.shape)}
+    weight_map = {e.id: ScalarOp(1.0, e.shape)}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 

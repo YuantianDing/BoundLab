@@ -5,7 +5,8 @@ import string
 
 import torch
 
-from boundlab.linearop._base import LinearOp, ComposedOp, SumOp
+from boundlab.linearop._base import LinearOp, ComposedOp, ScalarOp, SumOp
+from boundlab.utils import merge_name
 
 
 class EinsumOp(LinearOp):
@@ -40,9 +41,14 @@ class EinsumOp(LinearOp):
         if name is not None:
             self.name = name
         else:
-            self.name = f"<hdot {list(input_shape)} -> {list(output_shape)}>"
+            self.name = None
         super().__init__(input_shape, output_shape)
 
+    def __str__(self):
+        if self.name is not None:
+            return self.name
+        else:
+            return f"<einsum {list(self.input_shape)} -> {list(self.output_shape)}>"
     # ---- einsum helpers ----
 
     def _einsum_strs(self):
@@ -55,10 +61,18 @@ class EinsumOp(LinearOp):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t_str, i_str, o_str = self._einsum_strs()
         return torch.einsum(f"{t_str},{i_str}->{o_str}", self.tensor, x)
+    
+    def _vmaped_forward(self, x):
+        t_str, i_str, o_str = self._einsum_strs()
+        return torch.einsum(f"{t_str},{i_str}z->{o_str}z", self.tensor, x)
 
     def backward(self, grad: torch.Tensor) -> torch.Tensor:
         t_str, i_str, o_str = self._einsum_strs()
         return torch.einsum(f"{t_str},{o_str}->{i_str}", self.tensor, grad)
+    
+    def _vmaped_backward(self, grad):
+        t_str, i_str, o_str = self._einsum_strs()
+        return torch.einsum(f"{t_str},z{o_str}->z{i_str}", self.tensor, grad)
 
     def is_full(self) -> bool:
         """Check if this EinsumOp fully contracts all input dimensions (output_dims & input_dims == ø)."""
@@ -81,10 +95,6 @@ class EinsumOp(LinearOp):
         """Check if this EinsumOp is effectively a tensordot (no elementwise multiplication)."""
         return all(self.tensor.stride(i) == 0 for i in self.mul_dims)
 
-    def is_zerotensor(self) -> bool:
-        """Check if this EinsumOp is effectively a zero tensor."""
-        return self.tensor.eq(0).all()
-
     @staticmethod
     def from_hardmard(tensor: torch.Tensor, n_input_dims: int, name=None) -> "EinsumOp":
         """Create an EinsumOp for Hadamard-style multiplication with ``tensor``.
@@ -97,16 +107,9 @@ class EinsumOp(LinearOp):
         input_dims = output_dims[-n_input_dims:]
         return EinsumOp(tensor, input_dims, output_dims, name=name)
 
-    @staticmethod
-    def eye(shape: torch.Size) -> "EinsumOp":
-        """Create an identity EinsumOp for the given shape."""
-        tensor = torch.ones(shape)
-        dims = list(range(len(shape)))
-        return EinsumOp(tensor, dims, dims, name="I")
-
     def __mul__(self, scalar: float) -> "EinsumOp":
         """Scale the EinsumOp by a scalar."""
-        return EinsumOp(self.tensor * scalar, self.input_dims, self.output_dims, name=f"{scalar} * {self}")
+        return EinsumOp(self.tensor * scalar, self.input_dims, self.output_dims)
 
     def __rmul__(self, scalar: float) -> "EinsumOp":
         """Scale the EinsumOp by a scalar."""
@@ -114,16 +117,37 @@ class EinsumOp(LinearOp):
 
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose this EinsumOp with another LinearOp: (self ∘ other)(x) = self(other(x))."""
+        if self.is_full():
+            op = self.permute_for_input()
+            idims = op.tensor.dim() - len(op.input_dims)
+            assert all(a == b for a, b in zip(op.input_dims, range(idims, op.tensor.dim()))), "Full EinsumOp should have input_dims permuted to the end."
+            tensor = other.vbackward(op.tensor)
+            input_dims = list(range(idims, tensor.dim()))
+            return EinsumOp(tensor, input_dims, op.output_dims, name=merge_name(self, "@", other))
         if isinstance(other, EinsumOp):
             return merge_einsumop(self, other)
+        if isinstance(other, ScalarOp):
+            if other.scalar == 1.0:
+                return self
+            return self * other.scalar
         if isinstance(other, LinearOp):
             return ComposedOp(self, other)
         return NotImplemented
 
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose another LinearOp with this EinsumOp: (other ∘ self)(x) = other(self(x))."""
+        if self.is_full():
+            op = self.permute_for_output()
+            odims = len(op.output_dims)
+            assert all(a == b for a, b in zip(op.output_dims, range(odims))), "Full EinsumOp should have output_dims permuted to the end."
+            tensor = other.vforward(op.tensor)
+            output_dims = list(range(0, odims))
+            input_dims = list(range(odims, tensor.dim()))
+            return EinsumOp(tensor, input_dims, output_dims, name=merge_name(other, "@", self))
         if isinstance(other, EinsumOp):
             return merge_einsumop(other, self)
+        if isinstance(other, ScalarOp):
+            return self * other.scalar
         if isinstance(other, LinearOp):
             return ComposedOp(other, self)
         return NotImplemented
@@ -185,13 +209,22 @@ class EinsumOp(LinearOp):
         input_dims = [permute_dims.index(i) for i in self.input_dims]
         assert output_dims == list(range(len(output_dims))), "Output dimensions should be permuted to the end."
         return EinsumOp(new_tensor, input_dims, output_dims, name=self.name)
+    
+    def jacobian(self) -> torch.Tensor:
+        """Return the Jacobian matrix of this EinsumOp, if it is fast enough to materialize."""
+        if self.is_full():
+            return self.tensor.view(self.output_shape + self.input_shape)
+        else:
+            raise NotImplementedError("Jacobian is only implemented for full EinsumOps.")
 
 def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
     output_idx = list(range(len(x.output_dims)))
     max_index = len(output_idx)
 
-    x_idx, intermediate_idx, max_index = y._indices_exec_reverse(output_idx, max_index)
-    y_idx, input_idx, max_index = x._indices_exec_reverse(intermediate_idx, max_index)
+    x_idx, intermediate_idx, max_index = x._indices_exec_reverse(output_idx, max_index)
+    assert len(x_idx) == x.tensor.dim()
+    y_idx, input_idx, max_index = y._indices_exec_reverse(intermediate_idx, max_index)
+    assert len(y_idx) == y.tensor.dim()
 
     new_tensor_idx = output_idx.copy()
     output_dims = list(range(len(output_idx)))
@@ -205,7 +238,7 @@ def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
 
     y_idx, x_idx, new_tensor_idx = _to_ascii_letters(y_idx, x_idx, new_tensor_idx)
     tensor = torch.einsum(f"{y_idx},{x_idx}->{new_tensor_idx}", y.tensor, x.tensor)
-    return EinsumOp(tensor, input_dims, output_dims, name=f"({x} ⊚ {y})")
+    return EinsumOp(tensor, input_dims, output_dims, name=merge_name(x, "@", y))
 
 def _to_ascii_letters(*args: list[int]) -> tuple[str, ...]:
     return tuple("".join(string.ascii_letters[i] for i in a) for a in args)

@@ -2,6 +2,7 @@ import torch
 
 from boundlab.expr._core import Expr
 from boundlab.linearop import LinearOp
+from boundlab.linearop._base import LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._indices import SetIndicesOp
 
@@ -39,4 +40,5 @@ def relu_linearizer(expr: Expr) -> ZonoBounds:
     cross_coeffs = cross_val[nonzero_idx]
     indices_op = SetIndicesOp(nonzero_idx, torch.Size((length,)), output_shape) 
     hardmard_op = EinsumOp.from_hardmard(cross_coeffs, 1)
+    hardmard_op.flags |= LinearOpFlags.IS_NON_NEGATIVE
     return ZonoBounds(bias=bias, error_coeffs=indices_op @ hardmard_op, input_weights=[slope])

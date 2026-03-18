@@ -10,6 +10,8 @@ from typing import Literal
 import torch
 
 from boundlab.expr._core import Expr, ExprFlags
+from boundlab.linearop._base import LinearOp, LinearOpFlags
+from boundlab.linearop._einsum import EinsumOp
 
 
 class LpEpsilon(Expr):
@@ -47,7 +49,7 @@ class LpEpsilon(Expr):
     def children(self) -> tuple[()]:
         return ()
 
-    def backward(self, weights, direction: Literal[">=", "<=", "=="]) \
+    def backward(self, weights: LinearOp, direction: Literal[">=", "<=", "=="]) \
             -> tuple[torch.Tensor, list] | None:
         r"""Compute the dual-norm bound contribution.
 
@@ -62,25 +64,22 @@ class LpEpsilon(Expr):
             ``(±norm, [])`` or ``None`` for ``"=="``.
         """
         from boundlab.linearop import LinearOp
-        assert isinstance(weights, LinearOp), \
-            f"LpEpsilon.backward only supports LinearOp weights, got {type(weights).__name__}."
         if direction == "==":
             return None
-        # Materialize the weight matrix by applying backward to each basis vector.
-        # For output shape (*out), we flatten, apply backward via vmap, then reshape.
-        out_shape = weights.output_shape
-        flat_size = 1
-        for s in out_shape:
-            flat_size *= s
-        eye = torch.eye(flat_size).reshape(flat_size, *out_shape)
-        # w_tensor: (flat_size, *self.shape)
-        w_tensor = torch.vmap(weights.backward)(eye)
-        # Reshape to (*out_shape, *self.shape)
-        w_tensor = w_tensor.reshape(*out_shape, *self.shape)
-        extra = len(out_shape)
-        norm = w_tensor.norm(p=self.q,
-                             dim=list(range(extra, extra + len(self.shape))))
-        return (norm if direction == "<=" else -norm, [])
+        
+        match weights:
+            case EinsumOp():
+                weights.dot_dims
+                result = weights.tensor.abs().sum(dim=weights.dot_dims)
+            case _:
+                if LinearOpFlags.IS_NON_NEGATIVE in weights.flags:
+                    result = weights.forward(torch.ones(self.shape))
+                else:
+                    raise NotImplementedError(
+                        f"LpEpsilon backward only supports EinsumOp weights; got {weights}"
+                    )
+                
+        return (result if direction == "<=" else -result, [])
 
     def to_string(self) -> str:
         if self.name is not None:

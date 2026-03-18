@@ -1,7 +1,13 @@
 """Base LinearOp class and fundamental composition operators."""
 
+import enum
+
 import torch
 
+class LinearOpFlags(enum.Flag):
+    """Flags for LinearOps that can be used for optimization and simplification."""
+    NONE = 0
+    IS_NON_NEGATIVE = enum.auto()  # Output is guaranteed to be non-negative for non-negative input
 
 class LinearOp:
     r"""A base class for linear operators that can be applied to boundlab expressions.
@@ -16,15 +22,17 @@ class LinearOp:
     output_shape: "torch.Size"
     """Computed output tensor shape."""
 
-    def __init__(self, input_shape: torch.Size, output_shape: torch.Size):
+    def __init__(self, input_shape: torch.Size, output_shape: torch.Size, flags: LinearOpFlags = LinearOpFlags.NONE):
         """Initialize a LinearOp wrapper.
 
         Args:
             input_shape: The expected shape of input tensors.
             output_shape: The expected shape of output tensors.
+            flags: Flags indicating special properties of this LinearOp.
         """
         self.input_shape = input_shape
         self.output_shape = output_shape
+        self.flags = flags
 
     def __str__(self):
         return self.name if hasattr(self, "name") else f"<unknown linop {self.input_shape} -> {self.output_shape}>"
@@ -53,17 +61,23 @@ class LinearOp:
         assert x.shape[:len(self.input_shape)] == self.input_shape, f"Expected input shape {self.input_shape}, got {x.shape}."
         orig_additional_dims = x.shape[len(self.input_shape):]
         x = x.reshape(*self.input_shape, -1)
-        result = torch.vmap(self.forward, in_dims=-1, out_dims=-1)(x)
+        result = self._vmaped_forward(x)
         return result.reshape(*self.output_shape, *orig_additional_dims)
+    
+    def _vmaped_forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.vmap(self.forward, in_dims=-1, out_dims=-1)(x)
 
     def vbackward(self, grad_output: torch.Tensor) -> torch.Tensor:
         """Apply the transposed linear function to an input tensor, supporting additional leading dimensions for batching."""
         assert grad_output.shape[-len(self.output_shape):] == self.output_shape, f"Expected gradient output shape {self.output_shape}, got {grad_output.shape}."
         orig_additional_dims = grad_output.shape[:-len(self.output_shape)]
         grad_output = grad_output.reshape(-1, *self.output_shape)
-        result = torch.vmap(self.backward)(grad_output)
+        result = self._vmaped_backward(grad_output)
         return result.reshape(*orig_additional_dims, *self.input_shape)
-    
+
+    def _vmaped_backward(self, grad_output: torch.Tensor) -> torch.Tensor:
+        return torch.vmap(self.backward)(grad_output)
+
     def __mul__(self, other: float) -> "LinearOp":
         """Scale this LinearOp by a scalar factor."""
         if isinstance(other, (int, float)):
@@ -100,46 +114,89 @@ class LinearOp:
         if isinstance(other, LinearOp):
             return SumOp(other, self)
         return NotImplemented
+    
+    def jacobian(self) -> torch.Tensor:
+        """Return the Jacobian matrix of this LinearOp, if it is fast enough to materialize."""
+        return NotImplemented
 
 
 class ComposedOp(LinearOp):
     """Composition of two LinearOps: ``(outer ∘ inner)(x) = outer(inner(x))``."""
 
-    def __init__(self, outer: LinearOp, inner: LinearOp):
-        self.outer = outer
-        self.inner = inner
+    def __init__(self, *ops: LinearOp):
+        self.ops = []
+        for op in ops:
+            if isinstance(op, ComposedOp):
+                self.ops.extend(op.ops)
+            else:
+                self.ops.append(op)
+        inner = self.ops[-1]
+        outer = self.ops[0]
+        for i in range(len(self.ops) - 1):
+            assert self.ops[i].input_shape == self.ops[i + 1].output_shape, \
+                f"Shape mismatch in ComposedOp: {self.ops[i].input_shape}->{self.ops[i].output_shape} vs {self.ops[i + 1].input_shape}->{self.ops[i + 1].output_shape}"
         super().__init__(inner.input_shape, outer.output_shape)
+        if all(op.flags & LinearOpFlags.IS_NON_NEGATIVE for op in self.ops):
+            self.flags |= LinearOpFlags.IS_NON_NEGATIVE
 
     def forward(self, x):
-        return self.outer.forward(self.inner.forward(x))
+        for op in reversed(self.ops):
+            x = op.forward(x)
+        return x
 
     def backward(self, grad):
-        return self.inner.backward(self.outer.backward(grad))
+        for op in self.ops:
+            grad = op.backward(grad)
+        return grad
+    
+    def vforward(self, x):
+        for op in reversed(self.ops):
+            x = op.vforward(x)
+        return x
+    
+    def vbackward(self, grad):
+        for op in self.ops:
+            grad = op.vbackward(grad)
+        return grad
 
     def __str__(self):
-        return f"({self.outer} ∘ {self.inner})"
+        return "(" + " ∘ ".join(str(op) for op in self.ops) + ")"
 
 
 class SumOp(LinearOp):
     """Sum of two LinearOps: ``(a + b)(x) = a(x) + b(x)``."""
 
-    def __init__(self, a: LinearOp, b: LinearOp):
-        self.a = a
-        self.b = b
-        assert a.input_shape == b.input_shape and a.output_shape == b.output_shape, \
-            f"Shape mismatch in SumOp: {a.input_shape}->{a.output_shape} vs {b.input_shape}->{b.output_shape}"
-        super().__init__(a.input_shape, a.output_shape)
+    def __init__(self, *ops: LinearOp):
+        self.ops = []
+        for op in ops:
+            if isinstance(op, SumOp):
+                self.ops.extend(op.ops)
+            else:
+                self.ops.append(op)
+        inner = self.ops[0]
+        outer = self.ops[0]
+        assert all(op.input_shape == inner.input_shape and op.output_shape == inner.output_shape for op in self.ops), \
+            f"Shape mismatch in SumOp: {inner.input_shape}->{inner.output_shape} vs {self.ops[1].input_shape}->{self.ops[1].output_shape}"
+        super().__init__(inner.input_shape, outer.output_shape)
+
+        if all(op.flags & LinearOpFlags.IS_NON_NEGATIVE for op in self.ops):
+            self.flags |= LinearOpFlags.IS_NON_NEGATIVE
 
     def forward(self, x):
-        return self.a.forward(x) + self.b.forward(x)
+        return sum(op.forward(x) for op in self.ops)
+    
+    def vforward(self, x):
+        return sum(op.vforward(x) for op in self.ops)
 
     def backward(self, grad):
-        return self.a.backward(grad) + self.b.backward(grad)
+        return sum(op.backward(grad) for op in self.ops)
+
+    def vbackward(self, grad):
+        return sum(op.vbackward(grad) for op in self.ops)
 
     def __str__(self):
-        return f"({self.a} + {self.b})"
-
-
+        return "(" + " + ".join(str(op) for op in self.ops) + ")"
+    
 class ScalarOp(LinearOp):
     """A LinearOp that scales its input by a scalar factor."""
 
@@ -148,6 +205,9 @@ class ScalarOp(LinearOp):
         if name is not None:
             self.name = name
         super().__init__(input_shape, input_shape)
+
+        if scalar >= 0:
+            self.flags |= LinearOpFlags.IS_NON_NEGATIVE
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.scalar * x
@@ -208,7 +268,7 @@ class ZeroOp(LinearOp):
     def __init__(self, input_shape: torch.Size, output_shape: torch.Size, name=None):
         if name is not None:
             self.name = name
-        super().__init__(input_shape, output_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
 
     def forward(self, x):
         return torch.zeros(self.output_shape, dtype=x.dtype, device=x.device)

@@ -5,7 +5,7 @@ the expression framework.
 """
 
 import itertools
-from typing import Literal, Union
+from typing import Callable, Literal, Union
 
 from numpy import indices
 import torch
@@ -33,7 +33,7 @@ class Expr:
 
     Each expression represents a node in a directed acyclic graph (DAG) of
     computations. Expressions are immutable after construction, and each
-    instance is assigned a unique time-ordered integer ID to enable deterministic
+    instance is assigned a unique time-ordered UUID to enable deterministic
     topological ordering during bound propagation.
 
     Subclasses must implement :attr:`shape`, :attr:`children`, and
@@ -102,7 +102,7 @@ class Expr:
         return f"{self.__class__.__name__}(id={self.id}, flags={self.flags})"
 
     # ------------------------------------------------------------------
-    # Arithmetic operators — all produce AffineSum expressions
+    # Arithmetic operators — all produce Linear with EinsumOp ops
     # ------------------------------------------------------------------
 
     def __add__(self, other):
@@ -261,7 +261,7 @@ class Expr:
             return self._apply_op(GetIndicesOp(self.shape, indices))
         raise ValueError("Invalid indices for item selection")
 
-    def zeros_set(self, output_shape) -> torch.Callable[[tuple], "Expr"]:
+    def zeros_set(self, output_shape) -> Callable[[tuple], "Expr"]:
         from boundlab.linearop import SetSliceOp, SetIndicesOp
         def zeros_set(indices):
             if not isinstance(indices, tuple):

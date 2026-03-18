@@ -44,8 +44,8 @@ def _register_linearizer(name: str):
 
 # Import activation modules last so _register_linearizer and ZonoBounds are already defined
 from . import relu as _relu            # registers "relu"
-
 # call_module handlers (mod is the nn.Module instance; pass kwargs when needed)
 interpret.dispatcher["ReLU"]      = lambda _, x: interpret.dispatcher["relu"](x)
 
-__all__ = ["interpret", "ZonoBounds"]
+from .relu import relu_linearizer
+__all__ = ["interpret", "ZonoBounds", "relu_linearizer"]
