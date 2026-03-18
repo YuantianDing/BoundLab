@@ -32,8 +32,8 @@ from ._cat import Cat, Stack
 
 def Add(*children: Expr) -> AffineSum:
     """Create an AffineSum of children with identity weights (convenience alias)."""
-    from boundlab.linearop import ScalarMul
-    return AffineSum(*((ScalarMul(1.0, c.shape), c) for c in children))
+    from boundlab.linearop import ScalarOp
+    return AffineSum(*((ScalarOp(1.0, c.shape), c) for c in children))
 
 
 __all__ = [

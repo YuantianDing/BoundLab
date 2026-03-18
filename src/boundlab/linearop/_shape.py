@@ -6,7 +6,7 @@ Each class implements explicit forward (the shape operation) and backward
 
 import torch
 
-from boundlab.linearop import LinearOp
+from boundlab.linearop._base import LinearOp
 
 
 def _meta_output_shape(fn, input_shape: torch.Size) -> torch.Size:
@@ -161,14 +161,19 @@ class SqueezeOp(LinearOp):
         self.dim = dim
         if dim is not None:
             self._is_noop = (input_shape[dim] != 1)
+            if self._is_noop:
+                output_shape = input_shape
+            else:
+                output_shape = torch.Size(
+                    s for i, s in enumerate(input_shape) if i != dim)
         else:
             self._is_noop = all(s != 1 for s in input_shape)
             self._squeezed_dims = [i for i, s in enumerate(input_shape) if s == 1]
-        output_shape = _meta_output_shape(lambda x: x.squeeze(dim), input_shape)
+            output_shape = torch.Size(s for s in input_shape if s != 1)
         super().__init__(input_shape, output_shape)
 
     def forward(self, x):
-        return x.squeeze(self.dim)
+        return x.squeeze(self.dim) if self.dim is not None else x.squeeze()
 
     def backward(self, grad):
         if self._is_noop:
@@ -206,33 +211,6 @@ class UnsqueezeOp(LinearOp):
 
     def __str__(self):
         return f"unsqueeze({self.dim})"
-
-
-# ---------------------------------------------------------------------------
-# Slicing / narrowing / indexing
-# ---------------------------------------------------------------------------
-
-class NarrowOp(LinearOp):
-    """Select a contiguous slice along *dim*."""
-
-    def __init__(self, input_shape: torch.Size, dim: int, start: int, length: int):
-        self.dim = dim
-        self.start = start
-        self.length = length
-        output_shape = _meta_output_shape(
-            lambda x: x.narrow(dim, start, length), input_shape)
-        super().__init__(input_shape, output_shape)
-
-    def forward(self, x):
-        return x.narrow(self.dim, self.start, self.length)
-
-    def backward(self, grad):
-        result = torch.zeros(self.input_shape, dtype=grad.dtype, device=grad.device)
-        result.narrow(self.dim, self.start, self.length).copy_(grad)
-        return result
-
-    def __str__(self):
-        return f"narrow({self.dim}, {self.start}, {self.length})"
 
 
 # ---------------------------------------------------------------------------
@@ -386,3 +364,5 @@ class DiagOp(LinearOp):
 
     def __str__(self):
         return f"diag({self.diagonal})"
+
+

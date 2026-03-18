@@ -5,15 +5,15 @@ import string
 
 import torch
 
-from boundlab.linearop import LinearOp, ComposedOp, SumOp
+from boundlab.linearop._base import LinearOp, ComposedOp, SumOp
 
 
-class HardmardDot(LinearOp):
+class EinsumOp(LinearOp):
     r"""A LinearOp that represents element-wise multiplication (Hardmard product) and summation over specified dimensions.
     """
 
     def __init__(self, tensor: torch.Tensor, input_dims: list[int], output_dims: list[int], name=None):
-        """Initialize a HardmardDot.
+        """Initialize a EinsumOp.
 
         This operator behaves like dot product on `input_dims - output_dims`, elementwise multiplication on `input_dims & output_dims`, and batching on `output_dims - input_dims`.
 
@@ -55,76 +55,76 @@ class HardmardDot(LinearOp):
         return torch.einsum(f"{t_str},{o_str}->{i_str}", self.tensor, grad)
 
     def is_full(self) -> bool:
-        """Check if this HardmardDot fully contracts all input dimensions (output_dims & input_dims == ø)."""
+        """Check if this EinsumOp fully contracts all input dimensions (output_dims & input_dims == ø)."""
         return self.mul_dims == []
 
     def is_hardmard(self) -> bool:
-        """Check if this HardmardDot is effectively an elementwise multiplication (input_dims - output_dims == ø)."""
+        """Check if this EinsumOp is effectively an elementwise multiplication (input_dims - output_dims == ø)."""
         return self.dot_dims == []
 
     def is_non_expanding(self) -> bool:
-        """Check if this HardmardDot doesn't introduce new dimensions (output_dims - input_dims == ø)."""
+        """Check if this EinsumOp doesn't introduce new dimensions (output_dims - input_dims == ø)."""
         return self.batch_dims == []
 
     def is_tensordot(self) -> bool:
-        """Check if this HardmardDot is effectively a tensordot (no elementwise multiplication)."""
+        """Check if this EinsumOp is effectively a tensordot (no elementwise multiplication)."""
         return all(self.tensor.stride(i) == 0 for i in self.mul_dims)
 
     def is_zerotensor(self) -> bool:
-        """Check if this HardmardDot is effectively a zero tensor."""
+        """Check if this EinsumOp is effectively a zero tensor."""
         return self.tensor.eq(0).all()
 
     @staticmethod
-    def from_hardmard(tensor: torch.Tensor, n_input_dims: int, name=None) -> "HardmardDot":
+    def from_hardmard(tensor: torch.Tensor, n_input_dims: int, name=None) -> "EinsumOp":
         output_dims = list(range(tensor.dim()))
         input_dims = output_dims[-n_input_dims:]
-        return HardmardDot(tensor, input_dims, output_dims, name=name)
+        return EinsumOp(tensor, input_dims, output_dims, name=name)
 
     @staticmethod
-    def eye(shape: torch.Size) -> "HardmardDot":
-        """Create an identity HardmardDot for the given shape."""
+    def eye(shape: torch.Size) -> "EinsumOp":
+        """Create an identity EinsumOp for the given shape."""
         tensor = torch.ones(shape)
         dims = list(range(len(shape)))
-        return HardmardDot(tensor, dims, dims, name="I")
+        return EinsumOp(tensor, dims, dims, name="I")
 
-    def __mul__(self, scalar: float) -> "HardmardDot":
-        """Scale the HardmardDot by a scalar."""
-        return HardmardDot(self.tensor * scalar, self.input_dims, self.output_dims, name=f"{scalar} * {self}")
+    def __mul__(self, scalar: float) -> "EinsumOp":
+        """Scale the EinsumOp by a scalar."""
+        return EinsumOp(self.tensor * scalar, self.input_dims, self.output_dims, name=f"{scalar} * {self}")
 
-    def __rmul__(self, scalar: float) -> "HardmardDot":
-        """Scale the HardmardDot by a scalar."""
+    def __rmul__(self, scalar: float) -> "EinsumOp":
+        """Scale the EinsumOp by a scalar."""
         return self.__mul__(scalar)
 
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
-        """Compose this HardmardDot with another LinearOp: (self ∘ other)(x) = self(other(x))."""
-        if isinstance(other, HardmardDot):
-            return merge_hardmard_dot(self, other)
+        """Compose this EinsumOp with another LinearOp: (self ∘ other)(x) = self(other(x))."""
+        if isinstance(other, EinsumOp):
+            return merge_einsumop(self, other)
         if isinstance(other, LinearOp):
             return ComposedOp(self, other)
         return NotImplemented
 
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
-        """Compose another LinearOp with this HardmardDot: (other ∘ self)(x) = other(self(x))."""
-        if isinstance(other, HardmardDot):
-            return merge_hardmard_dot(other, self)
+        """Compose another LinearOp with this EinsumOp: (other ∘ self)(x) = other(self(x))."""
+        if isinstance(other, EinsumOp):
+            return merge_einsumop(other, self)
         if isinstance(other, LinearOp):
             return ComposedOp(other, self)
         return NotImplemented
 
     def __add__(self, other: "LinearOp") -> "LinearOp":
-        """Add this HardmardDot to another LinearOp, returning a new LinearOp representing the sum."""
-        if isinstance(other, HardmardDot):
+        """Add this EinsumOp to another LinearOp, returning a new LinearOp representing the sum."""
+        if isinstance(other, EinsumOp):
             self0 = self.permute_for_output()
             other0 = other.permute_for_output()
             if self0.input_dims == other0.input_dims and self0.output_dims == other0.output_dims:
-                return HardmardDot(self0.tensor + other0.tensor, self0.input_dims, self0.output_dims, name=f"{self} + {other0}")
+                return EinsumOp(self0.tensor + other0.tensor, self0.input_dims, self0.output_dims, name=f"{self} + {other0}")
         if isinstance(other, LinearOp):
             return SumOp(self, other)
         return NotImplemented
 
     def __radd__(self, other: "LinearOp") -> "LinearOp":
-        """Add another LinearOp to this HardmardDot."""
-        if isinstance(other, HardmardDot):
+        """Add another LinearOp to this EinsumOp."""
+        if isinstance(other, EinsumOp):
             return other.__add__(self)
         if isinstance(other, LinearOp):
             return SumOp(other, self)
@@ -159,7 +159,7 @@ class HardmardDot(LinearOp):
         output_dims = [permute_dims.index(i) for i in self.output_dims]
         len_diff = len(permute_dims) - len(self.input_dims)
         assert input_dims == list(range(len_diff, len(permute_dims))), "Input dimensions should be permuted to the end."
-        return HardmardDot(new_tensor, input_dims, output_dims, name=self.name)
+        return EinsumOp(new_tensor, input_dims, output_dims, name=self.name)
 
     def permute_for_output(self):
         permute_dims = self.output_dims + [i for i in range(self.tensor.dim()) if i not in self.output_dims]
@@ -167,9 +167,9 @@ class HardmardDot(LinearOp):
         output_dims = [permute_dims.index(i) for i in self.output_dims]
         input_dims = [permute_dims.index(i) for i in self.input_dims]
         assert output_dims == list(range(len(output_dims))), "Output dimensions should be permuted to the end."
-        return HardmardDot(new_tensor, input_dims, output_dims, name=self.name)
+        return EinsumOp(new_tensor, input_dims, output_dims, name=self.name)
 
-def merge_hardmard_dot(x: HardmardDot, y: HardmardDot) -> HardmardDot:
+def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
     output_idx = list(range(len(x.output_dims)))
     max_index = len(output_idx)
 
@@ -188,7 +188,7 @@ def merge_hardmard_dot(x: HardmardDot, y: HardmardDot) -> HardmardDot:
 
     y_idx, x_idx, new_tensor_idx = _to_ascii_letters(y_idx, x_idx, new_tensor_idx)
     tensor = torch.einsum(f"{y_idx},{x_idx}->{new_tensor_idx}", y.tensor, x.tensor)
-    return HardmardDot(tensor, input_dims, output_dims, name=f"({x} ⊚ {y})")
+    return EinsumOp(tensor, input_dims, output_dims, name=f"({x} ⊚ {y})")
 
 def _to_ascii_letters(*args: list[int]) -> tuple[str, ...]:
     return tuple("".join(string.ascii_letters[i] for i in a) for a in args)

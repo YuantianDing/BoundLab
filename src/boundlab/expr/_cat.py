@@ -7,7 +7,6 @@ child expressions along specified dimensions.
 from typing import Literal
 
 import torch
-import torch.nn.functional as F
 
 from boundlab.expr._core import Expr, ExprFlags
 
@@ -50,13 +49,13 @@ class Cat(Expr):
         """Propagate weights to each child via zero-padding embed ops.
 
         Args:
-            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated weight.
+            weights: A :class:`~boundlab.linearop.EinsumOp` accumulated weight.
             direction: Unused (Cat is always linear).
 
         Returns:
             ``(0, [child_weight_0, child_weight_1, ...])``
         """
-        from boundlab.linearop import LinearOp
+        from boundlab.linearop import PadOp
         child_ops = []
         offset = 0
         cat_size = self._shape[self.dim]
@@ -69,11 +68,7 @@ class Cat(Expr):
             pad_spec = [0] * (2 * ndim)
             pad_spec[2 * (ndim - 1 - self.dim)] = pad_before
             pad_spec[2 * (ndim - 1 - self.dim) + 1] = pad_after
-            embed_op = LinearOp(
-                lambda x, ps=pad_spec: F.pad(x, ps),
-                child.shape,
-                name=f"embed_cat[{offset}:{offset+size}]"
-            )
+            embed_op = PadOp(child.shape, pad_spec)
             child_ops.append(weights @ embed_op)
             offset += size
         return (0, child_ops)
@@ -118,31 +113,25 @@ class Stack(Expr):
         """Propagate weights to each child via unsqueeze+cat embed ops.
 
         Args:
-            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated weight.
+            weights: A :class:`~boundlab.linearop.EinsumOp` accumulated weight.
             direction: Unused (Stack is always linear).
 
         Returns:
             ``(0, [child_weight_0, child_weight_1, ...])``
         """
-        from boundlab.linearop import LinearOp
+        from boundlab.linearop import PadOp, UnsqueezeOp, ComposedOp
         n = len(self._children)
         child_ops = []
         for i, child in enumerate(self._children):
-            def make_embed(idx, n_children, d):
-                def embed(x):
-                    parts = [
-                        x.unsqueeze(d) if j == idx
-                        else torch.zeros(*x.shape[:d], 1, *x.shape[d:],
-                                         dtype=x.dtype, device=x.device)
-                        for j in range(n_children)
-                    ]
-                    return torch.cat(parts, dim=d)
-                return embed
-            embed_op = LinearOp(
-                make_embed(i, n, self.dim),
-                child.shape,
-                name=f"embed_stack[{i}]"
-            )
+            # unsqueeze to add the stack dim, then pad to fill the full stack size
+            unsq = UnsqueezeOp(child.shape, self.dim)
+            ndim = len(self._shape)
+            pad_spec = [0] * (2 * ndim)
+            d_rev = ndim - 1 - self.dim
+            pad_spec[2 * d_rev] = i
+            pad_spec[2 * d_rev + 1] = n - i - 1
+            pad = PadOp(unsq.output_shape, pad_spec)
+            embed_op = ComposedOp(pad, unsq)
             child_ops.append(weights @ embed_op)
         return (0, child_ops)
 

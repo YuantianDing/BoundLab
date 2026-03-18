@@ -24,7 +24,7 @@ class LpEpsilon(Expr):
     is the materialized weight tensor and :math:`q` is the dual norm of
     :math:`p` defined by :math:`\frac{1}{p} + \frac{1}{q} = 1`.
 
-    Only :class:`~boundlab.linearop.HardmardDot` weights are supported.
+    Only :class:`~boundlab.linearop.EinsumOp` weights are supported.
     """
     def __init__(self, *shape, name=None, p="inf"):
         super().__init__(ExprFlags.SYMMETRIC_TO_0)
@@ -52,8 +52,8 @@ class LpEpsilon(Expr):
         r"""Compute the dual-norm bound contribution.
 
         Args:
-            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated
-                weight. Must be a ``HardmardDot`` instance.
+            weights: A :class:`~boundlab.linearop.EinsumOp` accumulated
+                weight. Must be a ``EinsumOp`` instance.
             direction: ``"<="`` returns :math:`+\|\mathbf{w}\|_q`;
                 ``">="`` returns :math:`-\|\mathbf{w}\|_q`;
                 ``"=="`` returns ``None``.

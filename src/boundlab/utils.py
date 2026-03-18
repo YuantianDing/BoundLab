@@ -25,13 +25,3 @@ def eye_of(shape: torch.Size) -> torch.Tensor:
     else:
         # TODO: Implement for higher dimensions if needed
         raise NotImplementedError("eye_of is only implemented for 1D shapes for now.")
-
-def hardmarddot(x: torch.Tensor, input_dim_map: list[int] = None, output_dim_map: list[int] = None) \
-    -> Callable[[torch.Tensor], torch.Tensor]:
-    x_idx = string.ascii_letters[:x.dim()]
-    input_idx = "".join(x_idx[b] for b in input_dim_map)
-    output_idx = "".join(x_idx[b] for b in output_dim_map)
-
-    def hardmarddot_fn(input: torch.Tensor) -> torch.Tensor:
-        return torch.einsum(f"{input_idx},{x_idx}->{output_idx}", input, x)
-    return hardmarddot_fn

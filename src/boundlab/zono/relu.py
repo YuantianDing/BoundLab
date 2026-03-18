@@ -2,6 +2,8 @@ import torch
 
 from boundlab.expr._core import Expr
 from boundlab.linearop import LinearOp
+from boundlab.linearop._einsum import EinsumOp
+from boundlab.linearop._indices import SetIndicesOp
 
 from . import ZonoBounds, _register_linearizer
 
@@ -35,10 +37,6 @@ def relu_linearizer(expr: Expr) -> ZonoBounds:
     nonzero_idx = torch.nonzero(cross, as_tuple=True)
     length = nonzero_idx[0].shape[0]
     cross_coeffs = cross_val[nonzero_idx]
-    def error_op(eps: torch.Tensor, _shape=output_shape, _idx=nonzero_idx, _coeffs=cross_coeffs) -> torch.Tensor:
-        result = torch.zeros(_shape)
-        result[_idx] = eps * _coeffs
-        return result
-    error_op = LinearOp(error_op, input_shape=torch.Size((length,)))
-    
-    return ZonoBounds(bias=bias, error_coeffs=error_op, input_weights=[slope])
+    indices_op = SetIndicesOp(nonzero_idx, torch.Size((length,)), output_shape) 
+    hardmard_op = EinsumOp.from_hardmard(cross_coeffs, 1)
+    return ZonoBounds(bias=bias, error_coeffs=indices_op @ hardmard_op, input_weights=[slope])

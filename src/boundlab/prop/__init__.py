@@ -10,7 +10,7 @@ import typing
 import torch
 
 import boundlab.expr
-from boundlab.linearop import ScalarMul
+from boundlab.linearop import ScalarOp
 
 __all__ = [
     "ub",
@@ -48,10 +48,10 @@ _LB_CACHE = {}
 
 def _is0(a) -> bool:
     """Check if a value is effectively zero."""
-    from boundlab.linearop import HardmardDot
+    from boundlab.linearop import EinsumOp
     if isinstance(a, int) and a == 0:
         return True
-    if isinstance(a, HardmardDot) and a.is_zerotensor():
+    if isinstance(a, EinsumOp) and a.is_zerotensor():
         return True
     return False
 
@@ -67,13 +67,13 @@ def ub(e: "Expr") -> torch.Tensor:
     Returns:
         A tensor containing the upper bound.
     """
-    from boundlab.linearop import HardmardDot
+    from boundlab.linearop import EinsumOp
     if e.id in _UB_CACHE:
         return _UB_CACHE[e.id]
 
     result = torch.zeros(e.shape)
 
-    weight_map = {e.id: HardmardDot.eye(e.shape)}
+    weight_map = {e.id: EinsumOp.eye(e.shape)}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 
@@ -113,13 +113,13 @@ def lb(e: "Expr") -> torch.Tensor:
     Returns:
         A tensor containing the lower bound.
     """
-    from boundlab.linearop import HardmardDot
+    from boundlab.linearop import EinsumOp
     if e.id in _LB_CACHE:
         return _LB_CACHE[e.id]
 
     result = torch.zeros(e.shape)
 
-    weight_map = {e.id: HardmardDot.eye(e.shape)}
+    weight_map = {e.id: EinsumOp.eye(e.shape)}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 
@@ -160,7 +160,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     Returns:
         A tuple ``(upper_bound, lower_bound)`` of tensors.
     """
-    from boundlab.linearop import HardmardDot
+    from boundlab.linearop import EinsumOp
     if e.id in _UB_CACHE and e.id in _LB_CACHE:
         return _UB_CACHE[e.id], _LB_CACHE[e.id]
 
@@ -169,7 +169,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     const_result = torch.zeros(e.shape)
     sym_result = torch.zeros(e.shape)
 
-    weight_map = {e.id: ScalarMul(1.0, e.shape)}
+    weight_map = {e.id: ScalarOp(1.0, e.shape)}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 

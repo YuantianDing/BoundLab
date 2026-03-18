@@ -3,7 +3,7 @@ from __future__ import annotations
 r"""Linear Operations for Expressions
 
 This module provides Linear, a fused expression class that represents
-a sum of HardmardDot-weighted children: Σ_i op_i(child_i).
+a sum of EinsumOp-weighted children: Σ_i op_i(child_i).
 It replaces both LinearOpSeq and Add from the previous design.
 """
 
@@ -12,13 +12,13 @@ from typing import Literal
 import torch
 
 from boundlab.expr._core import Expr, ExprFlags
-from boundlab.linearop import HardmardDot, LinearOp
+from boundlab.linearop import EinsumOp, LinearOp
 
 class AffineSum(Expr):
     r"""An expression representing a sum of linear operations applied to children.
 
     Represents :math:`\sum_i \mathrm{op}_i(x_i)` where each :math:`\mathrm{op}_i`
-    is a :class:`~boundlab.linearop.HardmardDot`.
+    is a :class:`~boundlab.linearop.EinsumOp`.
 
     During construction, if a child is itself a :class:`Linear`, its pairs
     are absorbed by composing the outer op with each inner op via ``@``
@@ -27,7 +27,7 @@ class AffineSum(Expr):
 
     Attributes:
         pairs: List of ``(op, child)`` tuples.
-        ops: List of HardmardDot operators (convenience view).
+        ops: List of EinsumOp operators (convenience view).
     """
 
     def __init__(self, *pairs: tuple, const=None):
@@ -35,7 +35,7 @@ class AffineSum(Expr):
 
         Args:
             *pairs: Sequence of ``(op, child)`` pairs where ``op`` is a
-                :class:`~boundlab.linearop.HardmardDot` and ``child`` is
+                :class:`~boundlab.linearop.EinsumOp` and ``child`` is
                 an :class:`Expr` or :class:`torch.Tensor`.
         """
         super().__init__(ExprFlags.IS_AFFINE)
@@ -100,7 +100,7 @@ class AffineSum(Expr):
         """Propagate weights backward: each child gets weights ∘ op_i.
 
         Args:
-            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated weight.
+            weights: A :class:`~boundlab.linearop.EinsumOp` accumulated weight.
             direction: Bound direction (unused — Linear is always linear).
 
         Returns:
@@ -108,7 +108,7 @@ class AffineSum(Expr):
         """
         bias = 0
         if self.constant is not None:
-            bias = weights.original(self.constant)
+            bias = weights.forward(self.constant)
         return (bias, [weights @ op for op in self.children_dict.values()])
 
     def to_string(self, *children_str: str) -> str:

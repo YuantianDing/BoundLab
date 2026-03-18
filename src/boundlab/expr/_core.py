@@ -7,10 +7,11 @@ the expression framework.
 import itertools
 from typing import Literal, Union
 
+from numpy import indices
 import torch
 import enum
 
-from boundlab.linearop import ScalarMul
+from boundlab.linearop import ScalarOp
 
 
 class ExprFlags(enum.Flag):
@@ -66,8 +67,8 @@ class Expr:
             -> tuple[Union[torch.Tensor, int], list] | None:
         r"""Perform backward-mode bound propagation through this expression.
 
-        Given an accumulated weight ``weights`` (a
-        :class:`~boundlab.linearop.HardmardDot`) from the output back to this
+        Given an accumulated weight ``weights`` (usually a 
+        :class:`~boundlab.linearop.EinsumOp`) from the output back to this
         node, backward propagation derives child weights and a bias:
 
         .. math::
@@ -76,7 +77,7 @@ class Expr:
             \;\square\; b + \sum_i \mathbf{w}_i^\top x_i
 
         Args:
-            weights: A :class:`~boundlab.linearop.HardmardDot` accumulated
+            weights: A :class:`~boundlab.linearop.EinsumOp` accumulated
                 weight from the root expression to this node.
             direction: Bound direction — ``">="`` (lower), ``"<="`` (upper),
                 or ``"=="`` (exact).
@@ -84,7 +85,7 @@ class Expr:
         Returns:
             A tuple ``(bias, child_weights)`` where ``bias`` is a
             :class:`torch.Tensor` or ``0``, and ``child_weights`` is a list
-            of :class:`~boundlab.linearop.HardmardDot` (one per child).
+            of :class:`~boundlab.linearop.EinsumOp` (one per child).
             Returns ``None`` if this expression cannot contribute to the bound
             in the given direction.
         """
@@ -101,7 +102,7 @@ class Expr:
         return f"{self.__class__.__name__}(id={self.id}, flags={self.flags})"
 
     # ------------------------------------------------------------------
-    # Arithmetic operators — all produce Linear with HardmardDot ops
+    # Arithmetic operators — all produce Linear with EinsumOp ops
     # ------------------------------------------------------------------
 
     def __add__(self, other):
@@ -112,7 +113,7 @@ class Expr:
             other = AffineSum(const=other)
         if isinstance(other, Expr):
             assert self.shape == other.shape
-            return AffineSum((ScalarMul(1.0, self.shape), self), (ScalarMul(1.0, other.shape), other))
+            return AffineSum((ScalarOp(1.0, self.shape), self), (ScalarOp(1.0, other.shape), other))
         return NotImplemented
 
     def __radd__(self, other):
@@ -122,13 +123,13 @@ class Expr:
         if isinstance(other, torch.Tensor):
             other = AffineSum(const=other)
         if isinstance(other, Expr):
-            return AffineSum((ScalarMul(1.0, other.shape), other), (ScalarMul(1.0, self.shape), self))
+            return AffineSum((ScalarOp(1.0, other.shape), other), (ScalarOp(1.0, self.shape), self))
         return NotImplemented
 
     def __neg__(self):
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import HardmardDot
-        return AffineSum((ScalarMul(-1.0, self.shape), self))
+        from boundlab.linearop import EinsumOp
+        return AffineSum((ScalarOp(-1.0, self.shape), self))
 
     def __sub__(self, other):
         if isinstance(other, Expr):
@@ -147,97 +148,139 @@ class Expr:
     def __mul__(self, other):
         """Element-wise multiplication (no broadcast)."""
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import HardmardDot
+        from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor):
-            return AffineSum((HardmardDot.from_hardmard(other, len(self.shape)), self))
+            return AffineSum((EinsumOp.from_hardmard(other, len(self.shape)), self))
         return NotImplemented
 
     def __rmul__(self, other):
         """Element-wise multiplication (no broadcast)."""
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import HardmardDot
+        from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor):
-            return AffineSum((HardmardDot.from_hardmard(other, len(self.shape)), self))
+            return AffineSum((EinsumOp.from_hardmard(other, len(self.shape)), self))
         return NotImplemented
 
     def __matmul__(self, other):
         """Matrix multiply: self @ other."""
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import HardmardDot
+        from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor) and len(other.shape) == 2:
             assert self.shape[-1] == other.shape[0], f"Inner dimension of self {self.shape} must match first dimension of other {other.shape} for matmul."
             tensor = other[tuple([None] * len(self.shape[:-1]) + [slice(None), slice(None)])].expand(*self.shape[:-1], *other.shape)
             input_dims = list(range(len(self.shape)))
             output_dims = input_dims[:-1] + [tensor.dim() - 1]
-            return AffineSum((HardmardDot(tensor, input_dims, output_dims), self))
+            return AffineSum((EinsumOp(tensor, input_dims, output_dims), self))
         return NotImplemented
 
     def __rmatmul__(self, other):
         """Matrix multiply: other @ self."""
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import HardmardDot
+        from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor) and len(other.shape) == 2:
             assert other.shape[-1] == self.shape[-1], f"Inner dimension of other {other.shape} must match first dimension of self {self.shape} for matmul."
             tensor = other[tuple([None] * len(self.shape[:-1]) + [slice(None), slice(None)])].expand(*self.shape[:-1], *other.shape)
             output_dims = list(range(len(self.shape)))
             input_dims = output_dims[:-1] + [tensor.dim() - 1]
-            return AffineSum((HardmardDot(tensor, input_dims, output_dims), self))
+            return AffineSum((EinsumOp(tensor, input_dims, output_dims), self))
         return NotImplemented
+    
 
     # ------------------------------------------------------------------
     # Shape / indexing operators — produce Linear with generic LinearOp
     # ------------------------------------------------------------------
 
-    def _linear_op(self, fn):
-        """Wrap a shape-manipulation function as a Linear."""
+    def _apply_op(self, op):
+        """Wrap a LinearOp as an AffineSum expression."""
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import LinearOp
-        return AffineSum((LinearOp(fn, self.shape), self))
+        return AffineSum((op, self))
 
     def reshape(self, *shape) -> "Expr":
-        return self._linear_op(lambda x: x.reshape(*shape))
+        from boundlab.linearop import ReshapeOp
+        return self._apply_op(ReshapeOp(self.shape, shape))
 
     def permute(self, *dims) -> "Expr":
-        return self._linear_op(lambda x: x.permute(*dims))
+        from boundlab.linearop import PermuteOp
+        return self._apply_op(PermuteOp(self.shape, dims))
 
     def transpose(self, dim0, dim1) -> "Expr":
-        return self._linear_op(lambda x: x.transpose(dim0, dim1))
+        from boundlab.linearop import TransposeOp
+        return self._apply_op(TransposeOp(self.shape, dim0, dim1))
 
     def flatten(self, start_dim=0, end_dim=-1) -> "Expr":
-        return self._linear_op(lambda x: x.flatten(start_dim, end_dim))
+        from boundlab.linearop import FlattenOp
+        return self._apply_op(FlattenOp(self.shape, start_dim, end_dim))
 
     def unflatten(self, dim, sizes) -> "Expr":
-        return self._linear_op(lambda x: x.unflatten(dim, sizes))
+        from boundlab.linearop import UnflattenOp
+        return self._apply_op(UnflattenOp(self.shape, dim, sizes))
 
     def squeeze(self, dim=None) -> "Expr":
-        return self._linear_op(lambda x: x.squeeze(dim))
+        from boundlab.linearop import SqueezeOp
+        return self._apply_op(SqueezeOp(self.shape, dim))
 
     def unsqueeze(self, dim) -> "Expr":
-        return self._linear_op(lambda x: x.unsqueeze(dim))
+        from boundlab.linearop import UnsqueezeOp
+        return self._apply_op(UnsqueezeOp(self.shape, dim))
 
     def narrow(self, dim, start, length) -> "Expr":
-        return self._linear_op(lambda x: x.narrow(dim, start, length))
+        from boundlab.linearop import NarrowOp
+        return self._apply_op(NarrowOp(self.shape, dim, start, length))
 
     def expand(self, *sizes) -> "Expr":
-        return self._linear_op(lambda x: x.expand(*sizes))
+        from boundlab.linearop import ExpandOp
+        return self._apply_op(ExpandOp(self.shape, sizes))
 
     def repeat(self, *sizes) -> "Expr":
-        return self._linear_op(lambda x: x.repeat(*sizes))
+        from boundlab.linearop import RepeatOp
+        return self._apply_op(RepeatOp(self.shape, sizes))
 
     def tile(self, *sizes) -> "Expr":
-        return self._linear_op(lambda x: x.tile(*sizes))
+        from boundlab.linearop import TileOp
+        return self._apply_op(TileOp(self.shape, sizes))
 
     def flip(self, dims) -> "Expr":
-        return self._linear_op(lambda x: x.flip(dims))
+        from boundlab.linearop import FlipOp
+        return self._apply_op(FlipOp(self.shape, dims))
 
     def roll(self, shifts, dims) -> "Expr":
-        return self._linear_op(lambda x: x.roll(shifts, dims))
+        from boundlab.linearop import RollOp
+        return self._apply_op(RollOp(self.shape, shifts, dims))
 
     def diag(self, diagonal=0) -> "Expr":
-        return self._linear_op(lambda x: x.diag(diagonal))
+        from boundlab.linearop import DiagOp
+        return self._apply_op(DiagOp(self.shape, diagonal))
 
     def __getitem__(self, indices) -> "Expr":
-        return self._linear_op(lambda x: x[indices])
+        from boundlab.linearop import GetItemOp, GetIndicesOp
+        if not isinstance(indices, tuple):
+            indices = (indices,)
+        if all(isinstance(idx, slice) or isinstance(idx, int) for idx in indices):
+            return self._apply_op(GetItemOp(self.shape, indices))
+        elif all(isinstance(idx, torch.Tensor) and idx.dtype == torch.bool for idx in indices):
+            return self._apply_op(GetIndicesOp(self.shape, indices))
+        raise ValueError("Invalid indices for item selection")
+
+    def zeros_set(self, output_shape) -> torch.Callable[[tuple], "Expr"]:
+        from boundlab.linearop import SetSliceOp, SetIndicesOp
+        def zeros_set(indices):
+            if not isinstance(indices, tuple):
+                indices = (indices,)
+            if all(isinstance(idx, slice) or isinstance(idx, int) for idx in indices):
+                return self._apply_op(SetSliceOp(indices, self.shape, output_shape))
+            elif all(isinstance(idx, torch.Tensor) and idx.dtype == torch.bool for idx in indices):
+                return self._apply_op(SetIndicesOp(indices, self.shape, output_shape))
+            else:
+                raise ValueError("Invalid indices for zero setting")
+        return zeros_set
+    
+    def scatter(self, indices, output_shape) -> "Expr":
+        from boundlab.linearop import ScatterOp
+        return self._apply_op(ScatterOp(indices, self.shape, output_shape))
+    
+    def gather(self, indices) -> "Expr":
+        from boundlab.linearop import GatherOp
+        return self._apply_op(GatherOp(indices, self.shape))
 
     # ------------------------------------------------------------------
     # Bound computation helpers
