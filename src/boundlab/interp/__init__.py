@@ -1,5 +1,6 @@
 """Abstract Interpretation Framework for Neural Network Verification"""
 
+from __future__ import annotations
 
 from typing import Any, Callable
 from torch import nn
@@ -7,6 +8,7 @@ import torch
 
 from boundlab.expr._core import Expr
 
+__all__ = ["Interpreter"]
 
 class Interpreter:
     def __init__(self, dispatcher: dict[str, Callable], handle_affine: bool = True):
@@ -76,49 +78,6 @@ class Interpreter:
         return interpret
 
 
-def _conv2d_handler(mod, x):
-    import torch.nn.functional as F
-    from boundlab.linearop import LinearOp
-    from boundlab.expr._base import ConstVal
-    w = mod.weight.detach()
-    stride, padding = mod.stride, mod.padding
-    dilation, groups = mod.dilation, mod.groups
-    lin_op = LinearOp(
-        lambda inp: F.conv2d(inp, w, None, stride, padding, dilation, groups),
-        x.shape, name="conv2d",
-    )
-    result = lin_op(x)
-    if mod.bias is not None:
-        b = mod.bias.detach()
-        ndim = len(lin_op.output_shape)
-        result = result + ConstVal(b.reshape(-1, *([1] * (ndim - 1))).expand(lin_op.output_shape))
-    return result
-
-
-def _batchnorm_handler(mod, x):
-    from boundlab.expr._base import ConstVal
-    scale = (mod.weight / (mod.running_var + mod.eps).sqrt()).detach()
-    shift = (mod.bias - mod.running_mean * scale).detach()
-    ndim = len(x.shape)
-    if ndim > 1:
-        scale = scale.reshape(-1, *([1] * (ndim - 1)))
-        shift = shift.reshape(-1, *([1] * (ndim - 1)))
-    return scale * x + ConstVal(shift)
-
-
-def _avgpool2d_handler(mod, x):
-    import torch.nn.functional as F
-    from boundlab.linearop import LinearOp
-    ks, stride = mod.kernel_size, mod.stride
-    padding, ceil_mode = mod.padding, mod.ceil_mode
-    count_include_pad = mod.count_include_pad
-    lin_op = LinearOp(
-        lambda inp: F.avg_pool2d(inp, ks, stride, padding, ceil_mode, count_include_pad),
-        x.shape, name="avg_pool2d",
-    )
-    return lin_op(x)
-
-
 _AFFINE_DISPATCHER: dict[str, Callable] = {
     # ---- arithmetic call_function ops ----------------------------------
     "add": lambda x, y: x + y,
@@ -127,21 +86,8 @@ _AFFINE_DISPATCHER: dict[str, Callable] = {
     "mul": lambda x, y: x * y if isinstance(y, torch.Tensor) else y * x,
     # ---- call_module: linear layers ------------------------------------
     "Linear":       lambda mod, x: x @ mod.weight.T + mod.bias,
-    "Conv2d":       _conv2d_handler,
-    "BatchNorm1d":  _batchnorm_handler,
-    "BatchNorm2d":  _batchnorm_handler,
-    "AvgPool2d":    _avgpool2d_handler,
     # ---- call_function: F.linear (weight/bias arrive as ConstVal) ------
     "linear": lambda x, w, b=None: x @ w.value.T + (b.value if b is not None else 0),
-    # ---- activations: placeholders overridden by zono.interpret --------
-    "relu":      lambda x: x.ub().clamp(min=0),
-    "sigmoid":   lambda x: torch.sigmoid(x.ub()),
-    "tanh":      lambda x: torch.tanh(x.ub()),
-    "ReLU":      lambda _, x: x.ub().clamp(min=0),
-    "Sigmoid":   lambda _, x: torch.sigmoid(x.ub()),
-    "Tanh":      lambda _, x: torch.tanh(x.ub()),
-    "LeakyReLU": lambda mod, x: torch.nn.functional.leaky_relu(x.ub(), mod.negative_slope),
-    "Hardtanh":  lambda mod, x: torch.clamp(x.ub(), mod.min_val, mod.max_val),
     # ---- shape-manipulation call_method ops ----------------------------
     "reshape":    lambda x, *shape: x.reshape(*shape),
     "view":       lambda x, *shape: x.reshape(*shape),

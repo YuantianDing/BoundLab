@@ -17,7 +17,6 @@ from boundlab.linearop import LinearOp
 interpret = Interpreter({})
 """Zonotope-Based Abstract Interpretation for Neural Networks"""
 
-
 @dataclasses.dataclass
 class ZonoBounds:
     """Data class representing zonotope bounds for a neural network layer."""
@@ -48,3 +47,5 @@ from . import relu as _relu            # registers "relu"
 
 # call_module handlers (mod is the nn.Module instance; pass kwargs when needed)
 interpret.dispatcher["ReLU"]      = lambda _, x: interpret.dispatcher["relu"](x)
+
+__all__ = ["interpret", "ZonoBounds"]
