@@ -2,9 +2,10 @@ from __future__ import annotations
 
 r"""Linear Operations for Expressions
 
-This module provides Linear, a fused expression class that represents
+This module provides ``AffineSum``, a fused expression class that represents
 a sum of EinsumOp-weighted children: Σ_i op_i(child_i).
-It replaces both LinearOpSeq and Add from the previous design.
+It replaces separate linear-sequence and add-node structures from the
+previous design.
 """
 
 from typing import Literal
@@ -20,10 +21,10 @@ class AffineSum(Expr):
     Represents :math:`\sum_i \mathrm{op}_i(x_i)` where each :math:`\mathrm{op}_i`
     is a :class:`~boundlab.linearop.EinsumOp`.
 
-    During construction, if a child is itself a :class:`Linear`, its pairs
+    During construction, if a child is itself an :class:`AffineSum`, its pairs
     are absorbed by composing the outer op with each inner op via ``@``
     (eager contraction). This ensures the expression tree is always flat
-    — no :class:`Linear` node ever has a :class:`Linear` child.
+    — no :class:`AffineSum` node ever has an :class:`AffineSum` child.
 
     Attributes:
         pairs: List of ``(op, child)`` tuples.
@@ -31,7 +32,7 @@ class AffineSum(Expr):
     """
 
     def __init__(self, *pairs: tuple, const=None):
-        """Construct a Linear.
+        """Construct an AffineSum.
 
         Args:
             *pairs: Sequence of ``(op, child)`` pairs where ``op`` is a
@@ -71,11 +72,11 @@ class AffineSum(Expr):
             self.flags |= ExprFlags.IS_CONST
 
     def _add_constant(self, const: torch.Tensor):
-        """Return a new Linear with the same pairs but added constant."""
+        """Accumulate a constant term into this AffineSum."""
         if const is not None:
             self.constant = self.constant + const if self.constant is not None else const
     def _add_expr(self, op: LinearOp, child: Expr):
-        """Return a new Linear with the same pairs but added (op, child)."""
+        """Accumulate an ``(op, child)`` contribution into this AffineSum."""
         if child in self.children_dict:
             # If child already exists, compose the ops: old_op + op
             old_op = self.children_dict[child]
@@ -92,7 +93,7 @@ class AffineSum(Expr):
         return tuple(self.children_dict.keys())
 
     def with_children(self, *new_children: Expr) -> "AffineSum":
-        """Return a new Linear with the same ops but new children."""
+        """Return a new AffineSum with the same ops but new children."""
         return AffineSum(*zip(self.children_dict.values(), new_children))
 
     def backward(self, weights, direction: Literal[">=", "<=", "=="]) \
@@ -104,7 +105,7 @@ class AffineSum(Expr):
             direction: Bound direction (unused — Linear is always linear).
 
         Returns:
-            ``(Constant, [weights @ op_i for op_i in self.ops])``
+            ``(bias, [weights @ op_i for op_i in self.children_dict.values()])``.
         """
         bias = 0
         if self.constant is not None:

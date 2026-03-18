@@ -9,16 +9,22 @@ from boundlab.linearop._base import LinearOp, ComposedOp, SumOp
 
 
 class EinsumOp(LinearOp):
-    r"""A LinearOp that represents element-wise multiplication (Hardmard product) and summation over specified dimensions.
+    r"""A linear operator defined by an Einstein summation with a fixed tensor.
+
+    Depending on ``input_dims`` and ``output_dims``, this can express
+    contraction (dot-product-like behavior), Hadamard-style elementwise
+    multiplication, and dimension expansion.
     """
 
     def __init__(self, tensor: torch.Tensor, input_dims: list[int], output_dims: list[int], name=None):
-        """Initialize a EinsumOp.
+        """Initialize an EinsumOp.
 
-        This operator behaves like dot product on `input_dims - output_dims`, elementwise multiplication on `input_dims & output_dims`, and batching on `output_dims - input_dims`.
+        This operator behaves like contraction on ``input_dims - output_dims``,
+        elementwise multiplication on ``input_dims & output_dims``, and
+        expansion on ``output_dims - input_dims``.
 
         Args:
-            tensor: The fixed tensor for the hardmard product.
+            tensor: The fixed tensor used in the Einstein summation.
             input_dims: A list of dimensions of `tensor` that correspond to the input tensor dimensions.
             output_dims: A list of dimensions of `tensor` that correspond to the output tensor dimensions.
             name: Optional name for display purposes.
@@ -59,7 +65,12 @@ class EinsumOp(LinearOp):
         return self.mul_dims == []
 
     def is_hardmard(self) -> bool:
-        """Check if this EinsumOp is effectively an elementwise multiplication (input_dims - output_dims == ø)."""
+        """Check whether this EinsumOp performs no contraction over input dims.
+
+        Note:
+            The method name keeps the historical ``hardmard`` spelling for
+            backward compatibility.
+        """
         return self.dot_dims == []
 
     def is_non_expanding(self) -> bool:
@@ -76,6 +87,12 @@ class EinsumOp(LinearOp):
 
     @staticmethod
     def from_hardmard(tensor: torch.Tensor, n_input_dims: int, name=None) -> "EinsumOp":
+        """Create an EinsumOp for Hadamard-style multiplication with ``tensor``.
+
+        Note:
+            The constructor name keeps the historical ``hardmard`` spelling for
+            backward compatibility.
+        """
         output_dims = list(range(tensor.dim()))
         input_dims = output_dims[-n_input_dims:]
         return EinsumOp(tensor, input_dims, output_dims, name=name)

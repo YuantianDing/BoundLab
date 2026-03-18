@@ -33,7 +33,7 @@ class Expr:
 
     Each expression represents a node in a directed acyclic graph (DAG) of
     computations. Expressions are immutable after construction, and each
-    instance is assigned a unique time-ordered UUID to enable deterministic
+    instance is assigned a unique time-ordered integer ID to enable deterministic
     topological ordering during bound propagation.
 
     Subclasses must implement :attr:`shape`, :attr:`children`, and
@@ -102,7 +102,7 @@ class Expr:
         return f"{self.__class__.__name__}(id={self.id}, flags={self.flags})"
 
     # ------------------------------------------------------------------
-    # Arithmetic operators — all produce Linear with EinsumOp ops
+    # Arithmetic operators — all produce AffineSum expressions
     # ------------------------------------------------------------------
 
     def __add__(self, other):
