@@ -8,6 +8,7 @@ It replaces separate linear-sequence and add-node structures from the
 previous design.
 """
 
+import sys
 from typing import Literal
 
 import torch

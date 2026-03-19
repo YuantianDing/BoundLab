@@ -1,11 +1,13 @@
 
 
 
+from functools import reduce
 import string
 
 import torch
 
 from boundlab.linearop._base import LinearOp, ComposedOp, ScalarOp, SumOp
+from boundlab.linearop._shape import ExpandOp, PermuteOp
 from boundlab.utils import merge_name
 
 
@@ -33,9 +35,9 @@ class EinsumOp(LinearOp):
         self.tensor = tensor
         self.input_dims = input_dims
         self.output_dims = output_dims
-        self.dot_dims = list(set(input_dims) - set(output_dims))
-        self.mul_dims = list(set(output_dims) & set(input_dims))
-        self.batch_dims = list(set(output_dims) - set(input_dims))
+        self.dot_dims = [i for i in input_dims if i not in output_dims]
+        self.mul_dims = [i for i in output_dims if i in input_dims]
+        self.batch_dims = [i for i in output_dims if i not in input_dims]
         input_shape = torch.Size(tensor.shape[i] for i in input_dims)
         output_shape = torch.Size(tensor.shape[i] for i in output_dims)
         if name is not None:
@@ -48,31 +50,33 @@ class EinsumOp(LinearOp):
         if self.name is not None:
             return self.name
         else:
-            return f"<einsum {list(self.input_shape)} -> {list(self.output_shape)}>"
+            return f"<einsum {list(self.tensor.shape)}: {list(self.input_dims)} -> {list(self.output_dims)}>"
     # ---- einsum helpers ----
 
     def _einsum_strs(self):
         """Return (tensor_str, input_str, output_str) for einsum."""
-        t_str = "".join(string.ascii_letters[i] for i in range(self.tensor.dim()))
-        i_str = "".join(string.ascii_letters[i] for i in self.input_dims)
-        o_str = "".join(string.ascii_letters[i] for i in self.output_dims)
+        t_str = [i for i in range(self.tensor.dim())]
+        i_str = [i for i in self.input_dims]
+        o_str = [i for i in self.output_dims]
         return t_str, i_str, o_str
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        t_str, i_str, o_str = self._einsum_strs()
-        return torch.einsum(f"{t_str},{i_str}->{o_str}", self.tensor, x)
+        t_idx = [i for i in range(self.tensor.dim())]
+        return torch.einsum(self.tensor, t_idx, x, self.input_dims, self.output_dims)
     
-    def _vmaped_forward(self, x):
-        t_str, i_str, o_str = self._einsum_strs()
-        return torch.einsum(f"{t_str},{i_str}z->{o_str}z", self.tensor, x)
-
     def backward(self, grad: torch.Tensor) -> torch.Tensor:
-        t_str, i_str, o_str = self._einsum_strs()
-        return torch.einsum(f"{t_str},{o_str}->{i_str}", self.tensor, grad)
+        t_idx = [i for i in range(self.tensor.dim())]
+        return torch.einsum(self.tensor, t_idx, grad, self.output_dims, self.input_dims)
     
-    def _vmaped_backward(self, grad):
-        t_str, i_str, o_str = self._einsum_strs()
-        return torch.einsum(f"{t_str},z{o_str}->z{i_str}", self.tensor, grad)
+    def vforward(self, x: torch.Tensor) -> torch.Tensor:
+        t_idx = [i for i in range(self.tensor.dim())]
+        a_idx = [self.tensor.dim() + i for i in range(x.dim() - len(self.input_dims))]
+        return torch.einsum(self.tensor, t_idx, x, self.input_dims + a_idx, self.output_dims + a_idx)
+    
+    def vbackward(self, grad: torch.Tensor) -> torch.Tensor:
+        t_idx = [i for i in range(self.tensor.dim())]
+        a_idx = [self.tensor.dim() + i for i in range(grad.dim() - len(self.output_dims))]
+        return torch.einsum(self.tensor, t_idx, grad, a_idx + self.output_dims, a_idx + self.input_dims)
 
     def is_full(self) -> bool:
         """Check if this EinsumOp fully contracts all input dimensions (output_dims & input_dims == ø)."""
@@ -106,6 +110,13 @@ class EinsumOp(LinearOp):
         output_dims = list(range(tensor.dim()))
         input_dims = output_dims[-n_input_dims:]
         return EinsumOp(tensor, input_dims, output_dims, name=name)
+    
+    @staticmethod
+    def from_full(tensor: torch.Tensor, input_dim: int, name=None) -> "EinsumOp":
+        """Create an EinsumOp that fully contracts over the specified input dimension."""
+        output_dims = list(range(tensor.dim()-input_dim))
+        input_dims = list(range(tensor.dim()-input_dim, tensor.dim()))
+        return EinsumOp(tensor, input_dims, output_dims, name=name)
 
     def __mul__(self, scalar: float) -> "EinsumOp":
         """Scale the EinsumOp by a scalar."""
@@ -130,8 +141,12 @@ class EinsumOp(LinearOp):
             if other.scalar == 1.0:
                 return self
             return self * other.scalar
+        if isinstance(other, PermuteOp):
+            assert other.output_shape == self.input_shape, "PermuteOp shape must match EinsumOp output shape."
+            new_input_dims = [self.input_dims[other.inv_dims[i]] for i in range(len(self.input_dims))]
+            return EinsumOp(self.tensor, new_input_dims, self.output_dims, name=merge_name(self, "@", other))
         if isinstance(other, LinearOp):
-            return ComposedOp(self, other)
+            return NotImplemented
         return NotImplemented
 
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
@@ -148,27 +163,51 @@ class EinsumOp(LinearOp):
             return merge_einsumop(other, self)
         if isinstance(other, ScalarOp):
             return self * other.scalar
+        if isinstance(other, PermuteOp):
+            assert other.input_shape == self.output_shape, "PermuteOp shape must match EinsumOp output shape."
+            new_output_dims = [self.output_dims[other.dims[i]] for i in range(len(self.output_dims))]
+            return EinsumOp(self.tensor, self.input_dims, new_output_dims, name=merge_name(other, "@", self))
+        from boundlab.linearop._shape import ExpandOp
+        if isinstance(other, ExpandOp) and len(other.output_shape) == len(other.input_shape):
+            assert other.input_shape == self.output_shape, "ExpandOp shape must match EinsumOp output shape."
+            shape = list(self.tensor.shape)
+            flag = True
+            # Account for new leading dims by slicing other.output_shape
+            for idx, size in zip(self.output_dims, other.output_shape):
+                if shape[idx] != size:
+                    assert shape[idx] == 1, f"Dimension {idx} has size {shape[idx]} but expected {size}"
+                    shape[idx] = size
+                    flag = flag and idx in self.batch_dims
+            if flag:
+                tensor = self.tensor.expand(shape)
+                return EinsumOp(tensor, self.input_dims, self.output_dims, name=merge_name(other, "@", self))
         if isinstance(other, LinearOp):
-            return ComposedOp(other, self)
+            return super().__rmatmul__(other)
         return NotImplemented
 
     def __add__(self, other: "LinearOp") -> "LinearOp":
         """Add this EinsumOp to another LinearOp, returning a new LinearOp representing the sum."""
-        if isinstance(other, EinsumOp):
-            self0 = self.permute_for_output()
-            other0 = other.permute_for_output()
-            if self0.input_dims == other0.input_dims and self0.output_dims == other0.output_dims:
-                return EinsumOp(self0.tensor + other0.tensor, self0.input_dims, self0.output_dims, name=f"{self} + {other0}")
         if isinstance(other, LinearOp):
-            return SumOp(self, other)
+            return other.__radd__(self)
         return NotImplemented
 
     def __radd__(self, other: "LinearOp") -> "LinearOp":
         """Add another LinearOp to this EinsumOp."""
         if isinstance(other, EinsumOp):
-            return other.__add__(self)
+            self0 = self.permute_for_output()
+            other0 = other.permute_for_output()
+            if self0.input_dims == other0.input_dims and self0.output_dims == other0.output_dims:
+                return EinsumOp(self0.tensor + other0.tensor, self0.input_dims, self0.output_dims, name=f"{self} + {other0}")
+            if other.is_full():
+                out = self.jacobian_scatter(other.permute_for_output().tensor)
+                return EinsumOp.from_full(out, len(self.input_dims), name=merge_name(self, "+", other))
+            if self.is_full():
+                out = other.jacobian_scatter(self.permute_for_output().tensor)
+                return EinsumOp.from_full(out, len(self.input_dims), name=merge_name(self, "+", other))
+            print(f"Warning: Adding EinsumOps with different input/output dims: {self0} + {other0}. This needs `force_jacobian`.")
+            return EinsumOp.from_full(SumOp(self, other).force_jacobian(), len(self.input_dims), name=merge_name(self, "+", other))
         if isinstance(other, LinearOp):
-            return SumOp(other, self)
+            return super().__radd__(other)
         return NotImplemented
 
     def _indices_exec(self, indices: list[int], max_index: int) -> (list[int], list[int], int):
@@ -213,9 +252,87 @@ class EinsumOp(LinearOp):
     def jacobian(self) -> torch.Tensor:
         """Return the Jacobian matrix of this EinsumOp, if it is fast enough to materialize."""
         if self.is_full():
-            return self.tensor.view(self.output_shape + self.input_shape)
+            return self.permute_for_output().tensor.view(self.output_shape + self.input_shape)
         else:
-            raise NotImplementedError("Jacobian is only implemented for full EinsumOps.")
+            return NotImplemented
+            # raise NotImplementedError(f"Jacobian is only implemented for full EinsumOps: {self}")
+        
+    def abs(self) -> "LinearOp":
+        """Return a LinearOp representing the element-wise absolute value of this EinsumOp."""
+        return EinsumOp(self.tensor.abs(), self.input_dims, self.output_dims, name=f"|{self}|" if self.name else None)
+    
+    def sum_input(self):
+        """Return a LinearOp that sums over the input dimensions of this EinsumOp."""
+        tensor_dims_output_id = [None for i in range(self.tensor.dim())]
+        for i, idx in enumerate(self.output_dims):
+            tensor_dims_output_id[idx] = idx
+        tensor_dims_output_id = [x for x in tensor_dims_output_id if x is not None]
+        assert len(tensor_dims_output_id) == len(self.output_dims)
+        assert len(self.output_dims) == len(self.tensor.shape) - len(self.dot_dims), "Output dims should cover all non-input dims of the tensor."
+        
+        if self.dot_dims == []:
+            new_tensor = self.tensor
+        else:
+            new_tensor = self.tensor.sum(dim=self.dot_dims)
+        assert len(new_tensor.shape) == len(self.output_dims), f" {self.tensor.shape} - {self.dot_dims} -> {new_tensor.shape}"
+        new_input_dims = []
+        new_output_dims = [tensor_dims_output_id.index(p) for p in self.output_dims]
+        return EinsumOp(new_tensor, new_input_dims, new_output_dims, name=f"{self}.sum_input()" if hasattr(self, "name") else None)
+    
+    def sum_output(self):
+        """Return a LinearOp that sums over the output dimensions of this EinsumOp."""
+        tensor_dims_input_id = [None for i in range(self.tensor.dim())]
+        for i, idx in enumerate(self.input_dims):
+            tensor_dims_input_id[idx] = idx
+        tensor_dims_input_id = [x for x in tensor_dims_input_id if x is not None]
+        
+        new_tensor = self.tensor.sum(dim=self.batch_dims)
+        new_input_dims = [tensor_dims_input_id.index(p) for p in self.input_dims]
+        new_output_dims = []
+        return EinsumOp(new_tensor, new_input_dims, new_output_dims, name=f"{self}.sum_output()" if hasattr(self, "name") else None)
+
+    def jacobian_scatter(self, src: torch.Tensor) -> torch.Tensor:
+        """Scatter a tensor of the same shape as the Jacobian back to the original input space."""
+        if self.is_full():
+            return src + self.jacobian()
+        else:
+            mul_dims_numel = reduce(lambda x, y: x * y, (self.tensor.shape[i] for i in self.mul_dims), 1)
+            batch_sizes = [self.tensor.shape[i] for i in self.batch_dims]
+            dot_sizes = [self.tensor.shape[i] for i in self.dot_dims]
+
+            bmd_dims = self.batch_dims + self.mul_dims + self.dot_dims
+            bmd_inputs = [bmd_dims.index(i) for i in self.input_dims]
+            bmd_outputs = [bmd_dims.index(i) for i in self.output_dims]
+
+            output_permute = [None for i in range(len(bmd_outputs))]
+            for i, idx in enumerate(bmd_outputs):
+                output_permute[idx] = i
+            input_permute = [None for i in range(len(bmd_inputs))]
+            for i, idx in enumerate(bmd_inputs):
+                input_permute[idx - len(self.batch_dims)] = i
+
+            src_permute = output_permute + [i + len(bmd_outputs) for i in input_permute] # bmmd
+
+            permuted = src.permute(src_permute)
+            permuted_shape = permuted.shape
+            permuted = permuted.view(*batch_sizes, mul_dims_numel, mul_dims_numel, *dot_sizes)
+
+            bdm_dims = self.batch_dims + self.dot_dims + self.mul_dims
+            tensor = self.tensor.permute(bdm_dims).view(*batch_sizes, *dot_sizes, mul_dims_numel)
+            existing_diag = torch.diagonal(permuted, dim1=len(self.batch_dims), dim2=len(self.batch_dims) + 1)
+            scattered = torch.diagonal_scatter(permuted, existing_diag + tensor, dim1=len(self.batch_dims), dim2=len(self.batch_dims) + 1)
+            scattered = scattered.view(permuted_shape)
+
+            src_permute_inv = [None for i in range(len(scattered.shape))]
+            for i, _ in enumerate(scattered.shape):
+                src_permute_inv[src_permute[i]] = i
+
+            result = scattered.permute(src_permute_inv)
+            assert result.shape == src.shape, f"Expected scattered shape {src.shape}, got {result.shape}."
+            assert torch.allclose(result, src + self.force_jacobian(), atol=1e-5), f"Scattered result does not match expected Jacobian scatter: {result} vs {src + self.jacobian()}"
+            return result
+
+            
 
 def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
     output_idx = list(range(len(x.output_dims)))

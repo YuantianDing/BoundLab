@@ -4,7 +4,9 @@ This module defines the base expression class and flags used throughout
 the expression framework.
 """
 
+from copy import copy
 import itertools
+import sys
 from typing import Callable, Literal, Union
 
 from numpy import indices
@@ -12,6 +14,7 @@ import torch
 import enum
 
 from boundlab.linearop import ScalarOp
+from boundlab.linearop._base import LinearOp
 
 
 class ExprFlags(enum.Flag):
@@ -48,7 +51,7 @@ class Expr:
     def __init__(self, flags: ExprFlags = ExprFlags.NONE):
         self.id = next(_EXPR_ID_COUNTER)
         self.flags = flags
-
+    
     def with_children(self, *new_children: "Expr") -> "Expr":
         """Return a new expression with the same type and flags but new children."""
         raise NotImplementedError(f"The :code:`with_children` method is not implemented for {self.__class__.__name__}.")
@@ -63,7 +66,7 @@ class Expr:
         """The child expressions that serve as inputs to this expression."""
         raise NotImplementedError(f"The :code:`children` property is not implemented for {self.__class__.__name__}.")
 
-    def backward(self, weights, direction: Literal[">=", "<=", "=="] = "==") \
+    def backward(self, weights: LinearOp, direction: Literal[">=", "<=", "=="] = "==") \
             -> tuple[Union[torch.Tensor, int], list] | None:
         r"""Perform backward-mode bound propagation through this expression.
 
@@ -110,6 +113,8 @@ class Expr:
         if isinstance(other, int) and other == 0:
             return self
         if isinstance(other, torch.Tensor):
+            if other.shape != self.shape:
+                other = other.expand(self.shape)
             other = AffineSum(const=other)
         if isinstance(other, Expr):
             assert self.shape == other.shape
@@ -121,6 +126,8 @@ class Expr:
         if isinstance(other, int) and other == 0:
             return self
         if isinstance(other, torch.Tensor):
+            if other.shape != self.shape:
+                other = other.expand(self.shape)
             other = AffineSum(const=other)
         if isinstance(other, Expr):
             return AffineSum((ScalarOp(1.0, other.shape), other), (ScalarOp(1.0, self.shape), self))
@@ -148,7 +155,9 @@ class Expr:
     def __mul__(self, other):
         """Element-wise multiplication (no broadcast)."""
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import EinsumOp
+        from boundlab.linearop import EinsumOp, ScalarOp
+        if isinstance(other, (int, float)):
+            return AffineSum((ScalarOp(float(other), self.shape), self))
         if isinstance(other, torch.Tensor):
             return AffineSum((EinsumOp.from_hardmard(other, len(self.shape)), self))
         return NotImplemented
@@ -156,9 +165,19 @@ class Expr:
     def __rmul__(self, other):
         """Element-wise multiplication (no broadcast)."""
         from boundlab.expr._linear import AffineSum
-        from boundlab.linearop import EinsumOp
+        from boundlab.linearop import EinsumOp, ScalarOp
+        if isinstance(other, (int, float)):
+            return AffineSum((ScalarOp(float(other), self.shape), self))
         if isinstance(other, torch.Tensor):
             return AffineSum((EinsumOp.from_hardmard(other, len(self.shape)), self))
+        return NotImplemented
+
+    def __truediv__(self, other):
+        """Division by a scalar or tensor."""
+        if isinstance(other, (int, float)):
+            return self * (1.0 / other)
+        if isinstance(other, torch.Tensor):
+            return self * (1.0 / other)
         return NotImplemented
 
     def __matmul__(self, other):
@@ -174,15 +193,27 @@ class Expr:
         return NotImplemented
 
     def __rmatmul__(self, other):
-        """Matrix multiply: other @ self."""
+        """Matrix multiply: other @ self.
+
+        Handles both:
+        - Tensor(m, k) @ Expr(k,)   → Expr(m,)      (matrix-vector)
+        - Tensor(m, k) @ Expr(k, n) → Expr(m, n)     (matrix-matrix)
+        """
         from boundlab.expr._linear import AffineSum
         from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor) and len(other.shape) == 2:
-            assert other.shape[-1] == self.shape[-1], f"Inner dimension of other {other.shape} must match first dimension of self {self.shape} for matmul."
-            tensor = other[tuple([None] * len(self.shape[:-1]) + [slice(None), slice(None)])].expand(*self.shape[:-1], *other.shape)
-            output_dims = list(range(len(self.shape)))
-            input_dims = output_dims[:-1] + [tensor.dim() - 1]
-            return AffineSum((EinsumOp(tensor, input_dims, output_dims), self))
+            m, k = other.shape
+            if len(self.shape) == 1:
+                # Matrix-vector: (m, k) @ (k,) → (m,)
+                assert self.shape[0] == k, f"Inner dims must match: {other.shape} @ {self.shape}"
+                # EinsumOp: tensor(m,k), input_dims=[1], output_dims=[0]
+                return AffineSum((EinsumOp(other, input_dims=[1], output_dims=[0]), self))
+            elif len(self.shape) == 2:
+                # Matrix-matrix: (m, k) @ (k, n) → (m, n)
+                k2, n = self.shape
+                assert k == k2, f"Inner dims must match: {other.shape} @ {self.shape}"
+                tensor3d = other.unsqueeze(2).expand(m, k, n)
+                return AffineSum((EinsumOp(tensor3d, input_dims=[1, 2], output_dims=[0, 2]), self))
         return NotImplemented
     
 

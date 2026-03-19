@@ -1,6 +1,7 @@
 """Base LinearOp class and fundamental composition operators."""
 
 import enum
+from functools import reduce
 
 import torch
 
@@ -83,7 +84,7 @@ class LinearOp:
         if isinstance(other, (int, float)):
             return ScalarOp(other, self.input_shape) @ self
         return NotImplemented
-    
+
     def __rmul__(self, other: float) -> "LinearOp":
         """Scale this LinearOp by a scalar factor."""
         if isinstance(other, (int, float)):
@@ -93,8 +94,6 @@ class LinearOp:
 
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose this LinearOp with another (self ∘ other)."""
-        if isinstance(other, LinearOp):
-            return ComposedOp(self, other)
         return NotImplemented
 
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
@@ -118,7 +117,44 @@ class LinearOp:
     def jacobian(self) -> torch.Tensor:
         """Return the Jacobian matrix of this LinearOp, if it is fast enough to materialize."""
         return NotImplemented
-
+    
+    def abs(self) -> "LinearOp":
+        """Return a LinearOp representing the element-wise absolute value of this LinearOp."""
+        if self.flags & LinearOpFlags.IS_NON_NEGATIVE:
+            return self
+        raise NotImplementedError("Subclasses of LinearOp must implement the abs method if they support it.")
+    
+    def sum_input(self) -> "LinearOp":
+        """Return a LinearOp that sums over the input dimensions, if supported."""
+        raise NotImplementedError("Subclasses of LinearOp must implement the sum_input method if they support it.")
+    
+    def sum_output(self) -> "LinearOp":
+        """Return a LinearOp that sums over the output dimensions, if supported."""
+        raise NotImplementedError("Subclasses of LinearOp must implement the sum_output method if they support it.")
+    
+    def __neg__(self):
+        """Return the negation of this LinearOp."""
+        return (-1) * self
+    
+    def __repr__(self):
+        return str(self)
+    
+    def force_jacobian(self):
+        input_numel = self.input_shape.numel()
+        output_numel = self.output_shape.numel()
+        if input_numel < output_numel:
+            jacobian = torch.eye(input_numel).reshape(*self.input_shape, *self.input_shape)
+            jacobian = self.vforward(jacobian)
+            assert jacobian.shape == (self.output_shape + self.input_shape), f"Expected Jacobian shape {self.output_shape + self.input_shape}, got {jacobian.shape}."
+            return jacobian
+        else:
+            jacobian = torch.eye(output_numel).reshape(*self.output_shape, *self.output_shape)
+            jacobian = self.vbackward(jacobian)
+            assert jacobian.shape == (self.output_shape + self.input_shape), f"Expected Jacobian shape {self.output_shape + self.input_shape}, got {jacobian.shape}."
+            return jacobian
+    
+    def jacobian_scatter(self, src: torch.Tensor) -> torch.Tensor:
+        return NotImplemented
 
 class ComposedOp(LinearOp):
     """Composition of two LinearOps: ``(outer ∘ inner)(x) = outer(inner(x))``."""
@@ -161,6 +197,52 @@ class ComposedOp(LinearOp):
 
     def __str__(self):
         return "(" + " ∘ ".join(str(op) for op in self.ops) + ")"
+    
+    def __matmul__(self, other: "LinearOp") -> "LinearOp":
+        if isinstance(other, LinearOp) and not isinstance(other, ComposedOp):
+            for i, op in reversed(enumerate(self.ops)):
+                other = op @ other
+                if isinstance(other, ComposedOp):
+                    return ComposedOp(*(self.ops[:i] + other.ops))
+            return other
+        return NotImplemented
+
+    def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
+        if isinstance(other, LinearOp) and not isinstance(other, ComposedOp):
+            for i, op in enumerate(self.ops):
+                other = other @ op
+                if isinstance(other, ComposedOp):
+                    return ComposedOp(*(other.ops + self.ops[i + 1:]))
+            return other
+        return super().__rmatmul__(other)
+    
+    def abs(self) -> "LinearOp":
+        return ComposedOp(*(op.abs() for op in self.ops))
+    
+    def sum_input(self):
+        ops = self.ops.copy()
+        ops[-1] = ops[-1].sum_input()
+        return ComposedOp(*ops)
+
+    def sum_output(self):
+        ops = self.ops.copy()
+        ops[0] = ops[0].sum_output()
+        return ComposedOp(*ops)
+    
+    def jacobian(self):
+        jac = self.ops[0].jacobian()
+        if jac is not NotImplemented:
+            for op in self.ops[1:]:
+                jac = op.vbackward(jac)
+            return jac
+        
+        jac = self.ops[-1].jacobian()
+        if jac is not NotImplemented:
+            for op in reversed(self.ops[:-1]):
+                jac = op.vforward(jac)
+            return jac
+
+        return NotImplemented
 
 
 class SumOp(LinearOp):
@@ -197,6 +279,26 @@ class SumOp(LinearOp):
     def __str__(self):
         return "(" + " + ".join(str(op) for op in self.ops) + ")"
     
+    def __matmul__(self, other: "LinearOp") -> "LinearOp":
+        return NotImplemented
+    
+    def __rmatmul__(self, other):
+        return super().__rmatmul__(other)
+    
+    def abs(self) -> "LinearOp":
+        print(f"Warning: taking abs of a {self} may be loose; consider using abs on individual terms if possible.")
+        return SumOp(*(op.abs() for op in self.ops))
+    
+    def sum_input(self):
+        return SumOp(*(op.sum_input() for op in self.ops))
+    
+    def sum_output(self):
+        return SumOp(*(op.sum_output() for op in self.ops))
+    
+    def jacobian(self):
+        return sum(op.jacobian() for op in self.ops)
+        
+
 class ScalarOp(LinearOp):
     """A LinearOp that scales its input by a scalar factor."""
 
@@ -237,7 +339,7 @@ class ScalarOp(LinearOp):
             if self.scalar == 1.0:
                 return other
             else:
-                return other * self.scalar
+                return NotImplemented
         return NotImplemented
 
     def __rmatmul__(self, other):
@@ -245,7 +347,7 @@ class ScalarOp(LinearOp):
             if self.scalar == 1.0:
                 return other
             else:
-                return other * self.scalar
+                return super().__rmatmul__(other)
         return NotImplemented
 
     def __add__(self, other):
@@ -260,6 +362,17 @@ class ScalarOp(LinearOp):
 
     def is_identity(self) -> bool:
         return self.scalar == 1.0
+    
+    def abs(self):
+        return ScalarOp(abs(self.scalar), self.input_shape, name=f"|{self}|" if hasattr(self, "name") else None)
+    
+    def sum_input(self):
+        from boundlab.linearop._einsum import EinsumOp
+        return EinsumOp.from_full(torch.tensor(self.scalar).expand(self.output_shape), 0)
+    
+    def sum_output(self):
+        from boundlab.linearop._einsum import EinsumOp
+        return EinsumOp.from_full(torch.tensor(self.scalar).expand(self.input_shape), len(self.input_shape))
 
 
 class ZeroOp(LinearOp):
@@ -306,3 +419,12 @@ class ZeroOp(LinearOp):
         if isinstance(other, LinearOp):
             return other
         return NotImplemented
+    
+    def sum_input(self):
+        return ZeroOp(torch.Size(()), self.output_shape)
+    
+    def sum_output(self):
+        return ZeroOp(self.input_shape, torch.Size(()))
+    
+    def jacobian(self):
+        return torch.zeros(self.output_shape + self.input_shape)

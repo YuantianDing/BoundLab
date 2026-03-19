@@ -97,4 +97,7 @@ _AFFINE_DISPATCHER: dict[str, Callable] = {
     "unsqueeze":  lambda x, dim: x.unsqueeze(dim),
     "squeeze":    lambda x, dim=None: x.squeeze(dim),
     "contiguous": lambda x: x,
+    # ---- arithmetic: division -----------------------------------------
+    "truediv":    lambda x, y: x / y,
+    "floordiv":   lambda x, y: x / y,  # approximate
 }

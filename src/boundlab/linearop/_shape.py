@@ -6,7 +6,7 @@ Each class implements explicit forward (the shape operation) and backward
 
 import torch
 
-from boundlab.linearop._base import LinearOp, LinearOpFlags
+from boundlab.linearop._base import LinearOp, LinearOpFlags, ScalarOp
 
 
 def _meta_output_shape(fn, input_shape: torch.Size) -> torch.Size:
@@ -123,28 +123,15 @@ class PermuteOp(LinearOp):
         return f"permute({self.dims})"
 
 
-class TransposeOp(LinearOp):
-    """Swap two dimensions of the input tensor (self-adjoint)."""
+class TransposeOp(PermuteOp):
+    """Swap two dimensions of the input tensor — special case of PermuteOp."""
 
     def __init__(self, input_shape: torch.Size, dim0: int, dim1: int):
         self.dim0 = dim0
         self.dim1 = dim1
-        shape_list = list(input_shape)
-        shape_list[dim0], shape_list[dim1] = shape_list[dim1], shape_list[dim0]
-        super().__init__(input_shape, torch.Size(shape_list))
-
-    def forward(self, x):
-        return x.transpose(self.dim0, self.dim1)
-
-    def backward(self, grad):
-        return grad.transpose(self.dim0, self.dim1)
-
-    def vforward(self, x):
-        return x.transpose(self.dim0, self.dim1)
-
-    def vbackward(self, grad):
-        batch_ndim = grad.dim() - len(self.output_shape)
-        return grad.transpose(batch_ndim + self.dim0, batch_ndim + self.dim1)
+        dims = list(range(len(input_shape)))
+        dims[dim0], dims[dim1] = dims[dim1], dims[dim0]
+        super().__init__(input_shape, tuple(dims))
 
     def __str__(self):
         return f"transpose({self.dim0}, {self.dim1})"
@@ -219,6 +206,11 @@ class UnsqueezeOp(LinearOp):
 
 class ExpandOp(LinearOp):
     """Broadcast-expand dimensions (adjoint sums over expanded dims)."""
+
+    def __new__(cls, input_shape: torch.Size, sizes: tuple[int, ...]):
+        if input_shape == torch.Size(sizes):
+            return ScalarOp(1.0, input_shape)
+        return super().__new__(cls)
 
     def __init__(self, input_shape: torch.Size, sizes: tuple[int, ...]):
         self.sizes = sizes

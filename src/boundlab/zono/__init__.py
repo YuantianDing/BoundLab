@@ -44,8 +44,31 @@ def _register_linearizer(name: str):
 
 # Import activation modules last so _register_linearizer and ZonoBounds are already defined
 from . import relu as _relu            # registers "relu"
+from . import exp as _exp              # registers "exp"
+from . import reciprocal as _reciprocal  # registers "reciprocal"
+from . import tanh as _tanh            # registers "tanh"
+
 # call_module handlers (mod is the nn.Module instance; pass kwargs when needed)
 interpret.dispatcher["ReLU"]      = lambda _, x: interpret.dispatcher["relu"](x)
+interpret.dispatcher["Tanh"]      = lambda _, x: interpret.dispatcher["tanh"](x)
+
+# Bilinear matmul handler (supports Expr @ Expr)
+from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
+interpret.dispatcher["matmul"]    = matmul_handler
+interpret.dispatcher["bmm"]       = matmul_handler  # alias for batched matmul
+interpret.dispatcher["mm"]        = matmul_handler   # alias for 2D matmul
+
+# Softmax handler (composed from exp + sum + reciprocal)
+from .softmax import softmax_handler
+interpret.dispatcher["softmax"]   = softmax_handler
 
 from .relu import relu_linearizer
-__all__ = ["interpret", "ZonoBounds", "relu_linearizer"]
+from .exp import exp_linearizer
+from .reciprocal import reciprocal_linearizer
+from .tanh import tanh_linearizer
+
+__all__ = [
+    "interpret", "ZonoBounds",
+    "relu_linearizer", "exp_linearizer", "reciprocal_linearizer", "tanh_linearizer",
+    "bilinear_matmul", "bilinear_elementwise", "matmul_handler", "softmax_handler",  # noqa: F401
+]

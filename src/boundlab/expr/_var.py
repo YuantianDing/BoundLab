@@ -67,18 +67,14 @@ class LpEpsilon(Expr):
         if direction == "==":
             return None
         
-        match weights:
-            case EinsumOp():
-                weights.dot_dims
-                result = weights.tensor.abs().sum(dim=weights.dot_dims)
-            case _:
-                if LinearOpFlags.IS_NON_NEGATIVE in weights.flags:
-                    result = weights.forward(torch.ones(self.shape))
-                else:
-                    raise NotImplementedError(
-                        f"LpEpsilon backward only supports EinsumOp weights; got {weights}"
-                    )
-                
+        result = weights.abs().sum_input()
+        assert len(result.input_shape) == 0 and result.output_shape == weights.output_shape
+        result = result.jacobian()
+        assert result.shape == weights.output_shape
+        # input_dims = tuple(range(len(weights.output_shape), len(weights.output_shape) + len(weights.input_shape)))
+
+        # result = weights.force_jacobian().abs().sum(dim=input_dims)
+        
         return (result if direction == "<=" else -result, [])
 
     def to_string(self) -> str:

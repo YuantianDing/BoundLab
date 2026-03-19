@@ -272,7 +272,7 @@ class SetIndicesOp(LinearOp):
         return grad[all_indices]
 
     def __str__(self):
-        return f"set_indices({self.input_shape} -> {self.output_shape})"
+        return f"set_indices({list(self.input_shape)} -> {list(self.output_shape)})"
 
 
 # ---------------------------------------------------------------------------
