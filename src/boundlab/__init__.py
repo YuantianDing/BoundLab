@@ -13,6 +13,7 @@ __all__ = [
     "interp",
     "poly",
     "utils",
+    "linearop"
 ]
 
 from boundlab import expr, prop, zono, utils, poly, interp
