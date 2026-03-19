@@ -14,12 +14,13 @@ def relu_linearizer(expr: Expr) -> ZonoBounds:
     """Triangle relaxation of ReLU for zonotope abstract interpretation.
 
     For each neuron with input bounds [lb, ub]:
-    - Dead   (ub <= 0): output is 0, no contribution.
+
+    - Dead (ub <= 0): output is 0, no contribution.
     - Active (lb >= 0): output equals input exactly.
     - Crossing (lb < 0 < ub): triangle relaxation with
-        slope  = ub / (ub - lb),
-        bias   = -ub * lb / (2 * (ub - lb)),
-        error  = -ub * lb / (2 * (ub - lb)).
+      slope = ub / (ub - lb),
+      bias = -ub * lb / (2 * (ub - lb)),
+      error = -ub * lb / (2 * (ub - lb)).
     """
 
     lb = expr.lb()

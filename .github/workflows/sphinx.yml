@@ -3,7 +3,7 @@ name: Deploy Sphinx documentation to Pages
 on:
   push:
     branches:
-      - master # Or your default branch name
+      - master
 
 jobs:
   pages:
@@ -17,18 +17,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-      - name: Install dependencies
-        run: pip install Sphinx sphinx-math-dollar sphinx_design myst_parser pydata_sphinx_theme # Install Sphinx and any other required packages
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.8.8
       - name: Build Sphinx docs
-        run: sphinx-build -b html docs/ docs/_build/html # Adjust paths as needed
+        run: pixi run -e docs docs
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'docs/_build/html' # The directory containing your built HTML files
-      - name: Deploy to GitHub Pagesa
+          path: 'docs/_build/html'
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

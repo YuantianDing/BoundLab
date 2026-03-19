@@ -18,6 +18,7 @@ def exp_linearizer(expr: Expr) -> ZonoBounds:
     """Minimal-area exp relaxation (DeepT, Section 4.5).
 
     For each element with input bounds [l, u]:
+
     - Degenerate (u ≈ l): output is exp(l), no error.
     - General: tangent line at optimal point t_opt as lower bound,
       secant between (l, exp(l)) and (u, exp(u)) as upper bound.
