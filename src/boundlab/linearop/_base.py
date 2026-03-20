@@ -369,6 +369,8 @@ class ScalarOp(LinearOp):
         return self.__mul__(other)
 
     def __matmul__(self, other):
+        if isinstance(other, ScalarOp):
+            return ScalarOp(self.scalar * other.scalar, other.input_shape)
         if isinstance(other, LinearOp):
             if self.scalar == 1.0:
                 return other
