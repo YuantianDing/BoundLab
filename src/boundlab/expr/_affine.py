@@ -46,6 +46,7 @@ class AffineSum(Expr):
         # Pre-process before allocating ID so ConstVal wrappers get lower IDs.
         self.children_dict: dict[Expr, LinearOp] = {}
         for op, child in pairs:
+            assert isinstance(child, Expr), "Tuple expressions are not supported as children of AffineSum; use multiple arguments instead."
             if isinstance(child, torch.Tensor):
                 self._add_constant(op.forward(child))
             elif isinstance(child, AffineSum):
@@ -116,3 +117,22 @@ class AffineSum(Expr):
     def to_string(self, *children_str: str) -> str:
         parts = [f"{op}({cs})" for op, cs in zip(self.children_dict.values(), children_str)]
         return " + ".join(parts)
+
+
+class ConstVal(AffineSum):
+    """Expression representing a constant tensor value.
+
+    Implemented as an AffineSum with no children and only a constant term.
+    When used as a child of another AffineSum, the constant is automatically
+    absorbed via eager contraction.
+    """
+
+    def __init__(self, value: torch.Tensor, name: str | None = None):
+        super().__init__(const=value)
+        self.value = value
+        self.name = name
+
+    def to_string(self) -> str:
+        if self.name is not None:
+            return f"#const {self.name}"
+        return f"#const <{self.id:X}>"

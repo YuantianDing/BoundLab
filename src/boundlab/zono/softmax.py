@@ -10,7 +10,7 @@ by subtracting the center's max value before applying exp.
 import torch
 
 from boundlab.expr._core import Expr
-from boundlab.expr._base import ConstVal
+from boundlab.expr._affine import ConstVal
 from boundlab.expr._var import LpEpsilon
 from .bilinear import bilinear_elementwise
 

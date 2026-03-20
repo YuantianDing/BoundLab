@@ -41,7 +41,7 @@ class Interpreter:
                     input_idx += 1
 
                 elif node.op == "get_attr":
-                    from boundlab.expr._base import ConstVal
+                    from boundlab.expr._affine import ConstVal
                     obj = traced
                     for part in node.target.split("."):
                         obj = getattr(obj, part)

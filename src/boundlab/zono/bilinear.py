@@ -7,7 +7,7 @@ when both operands are symbolic expressions (Expr @ Expr or Expr * Expr).
 import torch
 
 from boundlab.expr._core import Expr
-from boundlab.expr._base import ConstVal
+from boundlab.expr._affine import ConstVal
 from boundlab.expr._var import LpEpsilon
 
 

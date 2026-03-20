@@ -24,8 +24,7 @@ relaxations by propagating weight matrices from outputs to inputs.
 
 # Import core classes first (no circular dependencies)
 from ._core import Expr, ExprFlags, expr_pretty_print
-from ._base import ConstVal
-from ._linear import AffineSum
+from ._affine import AffineSum, ConstVal
 from ._var import LpEpsilon
 from ._cat import Cat, Stack
 

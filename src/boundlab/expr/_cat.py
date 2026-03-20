@@ -21,6 +21,7 @@ class Cat(Expr):
 
     def __init__(self, *children: Expr, dim: int = 0):
         super().__init__(ExprFlags.IS_AFFINE)
+        assert all(isinstance(c, Expr) for c in children), "All children of Cat must be Expr instances."
         assert len(children) >= 1, "Cat requires at least one child."
         assert all(
             c.shape[:dim] == children[0].shape[:dim] and c.shape[dim + 1:] == children[0].shape[dim + 1:]
@@ -86,6 +87,7 @@ class Stack(Expr):
     """
 
     def __init__(self, *children: Expr, dim: int = 0):
+        assert all(isinstance(c, Expr) for c in children), "All children of Stack must be Expr instances."
         super().__init__(ExprFlags.IS_AFFINE)
         assert len(children) >= 1, "Stack requires at least one child."
         assert all(

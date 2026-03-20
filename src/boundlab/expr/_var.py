@@ -32,8 +32,10 @@ class LpEpsilon(Expr):
         super().__init__(ExprFlags.SYMMETRIC_TO_0)
         self._shape = torch.Size(*shape)
         self.name = name
+        if p == "inf":
+            p = math.inf
         self.p = p
-        if p == math.inf or p == "inf":
+        if p == math.inf:
             self.q = 1
         else:
             self.q = 1 / (1 - 1/p) if p > 1 else math.inf
@@ -66,16 +68,22 @@ class LpEpsilon(Expr):
         from boundlab.linearop import LinearOp
         if direction == "==":
             return None
+        try:
+            if self.p == math.inf:
+                result = weights.abs().sum_input()
+                assert len(result.input_shape) == 0 and result.output_shape == weights.output_shape
+                result = result.jacobian()
+                assert result.shape == weights.output_shape
+                return (result if direction == "<=" else -result, [])
+        except NotImplementedError:
+            jac = weights.jacobian()
+            if jac is NotImplemented:
+                print(f"Warning: LpEpsilon backward received weight op {weights}. Calling `force_jacobian` to materialize it, which may be inefficient.")
+                jac = weights.force_jacobian()
+            input_dims = list(range(len(weights.output_shape), len(weights.output_shape) + len(weights.input_shape)))
+            result = jac.norm(p=self.q, dim=input_dims)
+            return (result if direction == "<=" else -result, [])
         
-        result = weights.abs().sum_input()
-        assert len(result.input_shape) == 0 and result.output_shape == weights.output_shape
-        result = result.jacobian()
-        assert result.shape == weights.output_shape
-        # input_dims = tuple(range(len(weights.output_shape), len(weights.output_shape) + len(weights.input_shape)))
-
-        # result = weights.force_jacobian().abs().sum(dim=input_dims)
-        
-        return (result if direction == "<=" else -result, [])
 
     def to_string(self) -> str:
         if self.name is not None:

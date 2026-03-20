@@ -271,7 +271,7 @@ class TileOp(RepeatOp):
         n_pad = len(input_shape) - len(sizes)
         if n_pad > 0:
             sizes = (1,) * n_pad + tuple(sizes)
-        super().__init__(input_shape, sizes, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(input_shape, sizes)
 
     def __str__(self):
         return f"tile({list(self.sizes)})"

@@ -67,7 +67,7 @@ class Expr:
         raise NotImplementedError(f"The :code:`children` property is not implemented for {self.__class__.__name__}.")
 
     def backward(self, weights: LinearOp, direction: Literal[">=", "<=", "=="] = "==") \
-            -> tuple[Union[torch.Tensor, int], list] | None:
+            -> tuple[torch.Tensor, list[LinearOp]] | None:
         r"""Perform backward-mode bound propagation through this expression.
 
         Given an accumulated weight ``weights`` (usually a 
@@ -109,7 +109,7 @@ class Expr:
     # ------------------------------------------------------------------
 
     def __add__(self, other):
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         if isinstance(other, int) and other == 0:
             return self
         if isinstance(other, torch.Tensor):
@@ -122,7 +122,7 @@ class Expr:
         return NotImplemented
 
     def __radd__(self, other):
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         if isinstance(other, int) and other == 0:
             return self
         if isinstance(other, torch.Tensor):
@@ -134,7 +134,7 @@ class Expr:
         return NotImplemented
 
     def __neg__(self):
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         from boundlab.linearop import EinsumOp
         return AffineSum((ScalarOp(-1.0, self.shape), self))
 
@@ -154,7 +154,7 @@ class Expr:
 
     def __mul__(self, other):
         """Element-wise multiplication (no broadcast)."""
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         from boundlab.linearop import EinsumOp, ScalarOp
         if isinstance(other, (int, float)):
             return AffineSum((ScalarOp(float(other), self.shape), self))
@@ -164,7 +164,7 @@ class Expr:
 
     def __rmul__(self, other):
         """Element-wise multiplication (no broadcast)."""
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         from boundlab.linearop import EinsumOp, ScalarOp
         if isinstance(other, (int, float)):
             return AffineSum((ScalarOp(float(other), self.shape), self))
@@ -182,7 +182,7 @@ class Expr:
 
     def __matmul__(self, other):
         """Matrix multiply: self @ other."""
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor) and len(other.shape) == 2:
             assert self.shape[-1] == other.shape[0], f"Inner dimension of self {self.shape} must match first dimension of other {other.shape} for matmul."
@@ -199,7 +199,7 @@ class Expr:
         - Tensor(m, k) @ Expr(k,)   → Expr(m,)      (matrix-vector)
         - Tensor(m, k) @ Expr(k, n) → Expr(m, n)     (matrix-matrix)
         """
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor) and len(other.shape) == 2:
             m, k = other.shape
@@ -223,7 +223,7 @@ class Expr:
 
     def _apply_op(self, op):
         """Wrap a LinearOp as an AffineSum expression."""
-        from boundlab.expr._linear import AffineSum
+        from boundlab.expr._affine import AffineSum
         return AffineSum((op, self))
 
     def reshape(self, *shape) -> "Expr":

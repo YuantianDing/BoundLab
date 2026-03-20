@@ -23,7 +23,7 @@ if typing.TYPE_CHECKING:
     from boundlab.expr import Expr
 
 class _TopologicalExpr:
-    def __init__(self, expr: "Expr"):
+    def __init__(self, expr):
         self.expr = expr
 
     def __eq__(self, other: "_TopologicalExpr") -> bool:
@@ -56,6 +56,30 @@ def _is0(a) -> bool:
         return True
     return False
 
+
+def _accumulate_tuple_weight(tuple_weight_map, pqueue, te, idx, weight):
+    """Accumulate a weight for a TupleExpr at a given index."""
+    if te.id not in tuple_weight_map:
+        tuple_weight_map[te.id] = {}
+        pqueue.put(_TopologicalExpr(te))
+    d = tuple_weight_map[te.id]
+    if idx in d:
+        d[idx] = d[idx] + weight
+    else:
+        d[idx] = weight
+
+
+def _propagate_to_children(weight_map, pqueue, children, child_weights):
+    """Propagate child weights into weight_map and enqueue new children."""
+    for child, cw in zip(children, child_weights):
+        if not _is0(cw):
+            if child.id not in weight_map:
+                weight_map[child.id] = cw
+                pqueue.put(_TopologicalExpr(child))
+            else:
+                weight_map[child.id] = weight_map[child.id] + cw
+
+
 def ub(e: "Expr") -> torch.Tensor:
     """Compute an upper bound for the given expression.
 
@@ -69,17 +93,39 @@ def ub(e: "Expr") -> torch.Tensor:
         A tensor containing the upper bound.
     """
     from boundlab.linearop import EinsumOp
+    from boundlab.expr._tuple import GetTupleItem, TupleExpr
+
     if e.id in _UB_CACHE:
         return _UB_CACHE[e.id]
 
     result = torch.zeros(e.shape)
 
     weight_map = {e.id: ScalarOp(1.0, e.shape)}
+    tuple_weight_map = {}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 
     while not pqueue.empty():
         current = pqueue.get().expr
+
+        if isinstance(current, GetTupleItem):
+            weight = weight_map.pop(current.id)
+            _accumulate_tuple_weight(tuple_weight_map, pqueue,
+                                     current.tuple_expr, current._index, weight)
+            continue
+
+        if isinstance(current, TupleExpr):
+            wd = tuple_weight_map.pop(current.id)
+            ws = [wd.get(i, 0) for i in range(len(current.children))]
+            backward_result = current.backward(*ws, direction="<=")
+            if backward_result is not None:
+                bias, child_weights = backward_result
+                if not _is0(bias):
+                    result = result + bias
+                _propagate_to_children(weight_map, pqueue,
+                                       current.children, child_weights)
+            continue
+
         weight = weight_map.pop(current.id)
 
         backward_result = current.backward(weight, direction="<=")
@@ -90,13 +136,8 @@ def ub(e: "Expr") -> torch.Tensor:
         if not _is0(bias):
             result = result + bias
 
-        for child, cw in zip(current.children, child_weights):
-            if not _is0(cw):
-                if child.id not in weight_map:
-                    weight_map[child.id] = cw
-                    pqueue.put(_TopologicalExpr(child))
-                else:
-                    weight_map[child.id] = weight_map[child.id] + cw
+        _propagate_to_children(weight_map, pqueue,
+                               current.children, child_weights)
 
     _UB_CACHE[e.id] = result
     return result
@@ -115,17 +156,39 @@ def lb(e: "Expr") -> torch.Tensor:
         A tensor containing the lower bound.
     """
     from boundlab.linearop import EinsumOp
+    from boundlab.expr._tuple import GetTupleItem, TupleExpr
+
     if e.id in _LB_CACHE:
         return _LB_CACHE[e.id]
 
     result = torch.zeros(e.shape)
 
     weight_map = {e.id: ScalarOp(1.0, e.shape)}
+    tuple_weight_map = {}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 
     while not pqueue.empty():
         current = pqueue.get().expr
+
+        if isinstance(current, GetTupleItem):
+            weight = weight_map.pop(current.id)
+            _accumulate_tuple_weight(tuple_weight_map, pqueue,
+                                     current.tuple_expr, current._index, weight)
+            continue
+
+        if isinstance(current, TupleExpr):
+            wd = tuple_weight_map.pop(current.id)
+            ws = [wd.get(i, 0) for i in range(len(current.children))]
+            backward_result = current.backward(*ws, direction=">=")
+            if backward_result is not None:
+                bias, child_weights = backward_result
+                if not _is0(bias):
+                    result = result + bias
+                _propagate_to_children(weight_map, pqueue,
+                                       current.children, child_weights)
+            continue
+
         weight = weight_map.pop(current.id)
 
         backward_result = current.backward(weight, direction=">=")
@@ -136,16 +199,48 @@ def lb(e: "Expr") -> torch.Tensor:
         if not _is0(bias):
             result = result + bias
 
-        for child, cw in zip(current.children, child_weights):
-            if not _is0(cw):
-                if child.id not in weight_map:
-                    weight_map[child.id] = cw
-                    pqueue.put(_TopologicalExpr(child))
-                else:
-                    weight_map[child.id] = weight_map[child.id] + cw
+        _propagate_to_children(weight_map, pqueue,
+                               current.children, child_weights)
 
     _LB_CACHE[e.id] = result
     return result
+
+
+def _ublb_add_weight(prev, new):
+    """Add two ublb weights, each either a single LinearOp or a (ub, lb) tuple.
+    Preserves single form when both inputs are single."""
+    prev_is_tuple = isinstance(prev, tuple)
+    new_is_tuple = isinstance(new, tuple)
+    if not prev_is_tuple and not new_is_tuple:
+        return prev + new
+    pu, pl = prev if prev_is_tuple else (prev, prev)
+    nu, nl = new if new_is_tuple else (new, new)
+    return (pu + nu, pl + nl)
+
+
+def _ublb_propagate_children(weight_map, pqueue, children, child_weights):
+    """Propagate child weights for ublb (handles both single and tuple weights)."""
+    for child, weights_pair in zip(children, child_weights):
+        if _is0(weights_pair) or weights_pair == (0, 0):
+            continue
+        if child.id not in weight_map:
+            weight_map[child.id] = weights_pair
+            pqueue.put(_TopologicalExpr(child))
+        else:
+            weight_map[child.id] = _ublb_add_weight(weight_map[child.id], weights_pair)
+
+
+def _ublb_split_results(ub_res, lb_res):
+    """Unpack split-mode backward results into (ub_bias, lb_bias, child_weight_pairs)."""
+    if ub_res is not None:
+        ubias, uweights = ub_res
+    else:
+        ubias, uweights = 0, []
+    if lb_res is not None:
+        lbias, lweights = lb_res
+    else:
+        lbias, lweights = 0, []
+    return ubias, lbias, list(zip(uweights, lweights))
 
 
 def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
@@ -162,6 +257,8 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
         A tuple ``(upper_bound, lower_bound)`` of tensors.
     """
     from boundlab.linearop import EinsumOp
+    from boundlab.expr._tuple import GetTupleItem, TupleExpr
+
     if e.id in _UB_CACHE and e.id in _LB_CACHE:
         return _UB_CACHE[e.id], _LB_CACHE[e.id]
 
@@ -171,11 +268,52 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     sym_result = torch.zeros(e.shape)
 
     weight_map = {e.id: ScalarOp(1.0, e.shape)}
+    tuple_weight_map = {}
     pqueue = queue.PriorityQueue()
     pqueue.put(_TopologicalExpr(e))
 
     while not pqueue.empty():
         current = pqueue.get().expr
+
+        # Handle GetTupleItem: route weight to its TupleExpr
+        if isinstance(current, GetTupleItem):
+            weight = weight_map.pop(current.id)
+            _accumulate_tuple_weight(tuple_weight_map, pqueue,
+                                     current.tuple_expr, current._index, weight)
+            continue
+
+        # Handle TupleExpr: backward with per-index weights
+        if isinstance(current, TupleExpr):
+            wd = tuple_weight_map.pop(current.id)
+            n = len(current.children)
+            ws = [wd.get(i, 0) for i in range(n)]
+
+            all_single = all(not isinstance(w, tuple) for w in ws)
+            child_weights = None
+
+            if all_single:
+                if a := current.backward(*ws, direction="=="):
+                    b, cw_exact = a
+                    if not _is0(b):
+                        const_result = const_result + b
+                    child_weights = list(cw_exact)
+
+            if child_weights is None:
+                ub_ws = [w[0] if isinstance(w, tuple) else w for w in ws]
+                lb_ws = [w[1] if isinstance(w, tuple) else w for w in ws]
+                ubias, lbias, child_weights = _ublb_split_results(
+                    current.backward(*ub_ws, direction="<="),
+                    current.backward(*lb_ws, direction=">="),
+                )
+                if not _is0(ubias):
+                    ub_result = ub_result + ubias
+                if not _is0(lbias):
+                    lb_result = lb_result + lbias
+
+            _ublb_propagate_children(weight_map, pqueue,
+                                     current.children, child_weights)
+            continue
+
         weight = weight_map.pop(current.id)
 
         assert weight is not None, (
@@ -203,46 +341,17 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
                         sym_result = sym_result + ubias
                 child_weights = []
             else:
-                ub_res = current.backward(weight, direction="<=")
-                lb_res = current.backward(weight, direction=">=")
-                if ub_res is not None:
-                    ubias, uweights = ub_res
-                    if not _is0(ubias):
-                        ub_result = ub_result + ubias
-                else:
-                    uweights = []
-                if lb_res is not None:
-                    lbias, lweights = lb_res
-                    if not _is0(lbias):
-                        lb_result = lb_result + lbias
-                else:
-                    lweights = []
-                child_weights = list(zip(uweights, lweights))
+                ubias, lbias, child_weights = _ublb_split_results(
+                    current.backward(weight, direction="<="),
+                    current.backward(weight, direction=">="),
+                )
+                if not _is0(ubias):
+                    ub_result = ub_result + ubias
+                if not _is0(lbias):
+                    lb_result = lb_result + lbias
 
-        for child, weights_pair in zip(current.children, child_weights):
-            assert child.id < current.id, (
-                f"Child {child.to_string()} (id={child.id}) has higher id than "
-                f"parent {current.to_string()} (id={current.id}). Cycle detected."
-            )
-            if _is0(weights_pair) or weights_pair == (0, 0):
-                continue
-            if child.id not in weight_map:
-                weight_map[child.id] = weights_pair
-                pqueue.put(_TopologicalExpr(child))
-            else:
-                prev = weight_map[child.id]
-                if isinstance(weights_pair, tuple):
-                    wu, wl = weights_pair
-                    if isinstance(prev, tuple):
-                        weight_map[child.id] = (prev[0] + wu, prev[1] + wl)
-                    else:
-                        weight_map[child.id] = (prev + wu, prev + wl)
-                else:
-                    if isinstance(prev, tuple):
-                        weight_map[child.id] = (prev[0] + weights_pair,
-                                                 prev[1] + weights_pair)
-                    else:
-                        weight_map[child.id] = prev + weights_pair
+        _ublb_propagate_children(weight_map, pqueue,
+                                 current.children, child_weights)
 
     _UB_CACHE[e.id] = const_result + ub_result + sym_result
     _LB_CACHE[e.id] = const_result + lb_result - sym_result

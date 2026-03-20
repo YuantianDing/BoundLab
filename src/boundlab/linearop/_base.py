@@ -42,7 +42,7 @@ class LinearOp:
         """Apply this LinearOp to an expression, returning a Linear."""
         from boundlab.expr import Expr
         if isinstance(x, Expr):
-            from boundlab.expr._linear import AffineSum
+            from boundlab.expr._affine import AffineSum
             return AffineSum((self, x))
         elif isinstance(x, torch.Tensor):
             return self.forward(x)
@@ -122,15 +122,15 @@ class LinearOp:
         """Return a LinearOp representing the element-wise absolute value of this LinearOp."""
         if self.flags & LinearOpFlags.IS_NON_NEGATIVE:
             return self
-        raise NotImplementedError("Subclasses of LinearOp must implement the abs method if they support it.")
+        raise NotImplementedError(f"LinearOp {self} does not implement abs method, and is not guaranteed to be non-negative.")
     
     def sum_input(self) -> "LinearOp":
         """Return a LinearOp that sums over the input dimensions, if supported."""
-        raise NotImplementedError("Subclasses of LinearOp must implement the sum_input method if they support it.")
+        raise NotImplementedError(f"LinearOp {self} doesn't implement the sum_input method.")
     
     def sum_output(self) -> "LinearOp":
         """Return a LinearOp that sums over the output dimensions, if supported."""
-        raise NotImplementedError("Subclasses of LinearOp must implement the sum_output method if they support it.")
+        raise NotImplementedError(f"LinearOp {self} doesn't implement the sum_output method.")
     
     def __neg__(self):
         """Return the negation of this LinearOp."""
