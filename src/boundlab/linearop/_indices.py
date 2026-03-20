@@ -20,7 +20,15 @@ from boundlab.linearop._base import LinearOp, LinearOpFlags
 
 
 def _meta_output_shape(fn, input_shape: torch.Size) -> torch.Size:
-    """Compute output shape by tracing *fn* on a meta-device tensor."""
+    """Infer an operator output shape without materializing data.
+
+    Args:
+        fn: A shape-preserving callable that accepts a tensor.
+        input_shape: Shape of the hypothetical input tensor.
+
+    Returns:
+        The output shape obtained by running ``fn`` on a meta-device tensor.
+    """
     return fn(torch.empty(input_shape, device="meta")).shape
 
 
@@ -139,13 +147,27 @@ class ScatterOp(LinearOp):
 
 
 class GetIndicesOp(LinearOp):
-    """Advanced indexing using tuple of index tensors.
+    r"""Advanced indexing with a tuple of index tensors.
 
-    Forward: ``output = input[indices]`` where indices is a tuple of tensors
-             with matching shapes, each specifying positions along one dimension.
-    Backward: Scatters gradient back to the indexed positions.
+    Given ``indices = (i_0, i_1, ..., i_{d-1})``, forward evaluation computes:
 
-    Note: For repeated indices, gradients are summed (accumulated).
+    .. math::
+
+       y = x[\text{indices}]
+
+    where each index tensor has shape ``output_shape``.
+    The transpose (backward) operation writes each entry of ``grad`` back to
+    its indexed position in an all-zero tensor, with accumulation for repeated
+    indices.
+
+    Args:
+        indices: Tuple of integer index tensors, one per input dimension.
+        input_shape: Shape of the source tensor ``x``.
+        output_shape: Shape of the indexed output tensor ``y``.
+
+    Notes:
+        If an index appears multiple times, gradients are summed at that
+        position (``accumulate=True`` semantics).
     """
 
     def __init__(self, indices: tuple[torch.Tensor, ...], input_shape: torch.Size, output_shape: torch.Size):
@@ -211,12 +233,14 @@ class GetIndicesOp(LinearOp):
 
 
 class SetIndicesOp(LinearOp):
-    """Set values at advanced index positions into zeros.
+    """Scatter values to advanced index positions in a zero-initialized tensor.
 
-    Forward: Creates zeros of output_shape, sets ``result[indices] = input``.
-    Backward: Extracts gradient at the indexed positions.
+    Forward creates ``result = zeros(output_shape)`` and assigns:
+    ``result[indices] = input``.
+    Backward gathers gradients at the same index positions.
 
-    This is the adjoint/transpose of GetIndicesOp.
+    This operator is the transpose/adjoint counterpart of
+    :class:`GetIndicesOp`.
     """
 
     def __init__(self, indices: tuple[torch.Tensor, ...], input_shape: torch.Size, output_shape: torch.Size):

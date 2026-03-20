@@ -6,4 +6,8 @@ This guide explains how BoundLab represents symbolic computations and computes s
 :maxdepth: 2
 
 user_guide
+expr_api
+linearop_api
+propagation_api
+zono_interpret_api
 ```

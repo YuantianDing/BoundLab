@@ -12,12 +12,30 @@ from boundlab.expr._var import LpEpsilon
 
 
 def bilinear_matmul(A: Expr, B: Expr) -> Expr:
-    """Compute A @ B where both are Expr using McCormick linearization.
+    r"""Linearize ``A @ B`` when both operands are symbolic expressions.
 
     A: (m, k), B: (k, n) → result: (m, n)
 
-    Linearization: c_A @ B + A @ c_B - c_A @ c_B + error
-    Error bound:   hw_A @ hw_B  (half-widths of A and B)
+    The method uses a first-order expansion around expression centers:
+
+    .. math::
+
+       A B \approx c_A B + A c_B - c_A c_B + E
+
+    where :math:`E` is bounded by interval half-widths:
+
+    .. math::
+
+       |E| \le \mathrm{hw}(A)\,\mathrm{hw}(B)
+
+    and represented using fresh noise symbols.
+
+    Args:
+        A: Left expression with shape ``(m, k)``.
+        B: Right expression with shape ``(k, n)``.
+
+    Returns:
+        An expression over-approximating ``A @ B``.
     """
     assert len(A.shape) == 2 and len(B.shape) == 2, \
         f"Only 2D matmul supported, got {A.shape} @ {B.shape}"
@@ -49,12 +67,28 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
 
 
 def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
-    """Element-wise product of two Exprs using McCormick linearization.
+    r"""Linearize element-wise product of two symbolic expressions.
 
     Both A and B must have the same shape.
 
-    Linearization: c_A * B + A * c_B - c_A * c_B + error
-    Error bound:   hw_A * hw_B  (element-wise half-widths)
+    The approximation is:
+
+    .. math::
+
+       A \odot B \approx c_A \odot B + A \odot c_B - c_A \odot c_B + E
+
+    with element-wise error bound:
+
+    .. math::
+
+       |E| \le \mathrm{hw}(A) \odot \mathrm{hw}(B)
+
+    Args:
+        A: First expression.
+        B: Second expression (same shape as ``A``).
+
+    Returns:
+        An expression over-approximating ``A * B``.
     """
     assert A.shape == B.shape, \
         f"Shapes must match for element-wise product: {A.shape} vs {B.shape}"
@@ -81,9 +115,13 @@ def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
 
 
 def matmul_handler(A, B):
-    """Dispatcher handler for torch.matmul.
+    """Dispatcher implementation for ``torch.matmul``.
 
-    Routes to the appropriate implementation based on operand types.
+    Routing rules:
+
+    - ``Expr @ Expr``: McCormick-style bilinear relaxation.
+    - ``Expr @ Tensor`` or ``Tensor @ Expr``: exact affine path.
+    - ``Tensor @ Tensor``: delegated to ``torch.matmul``.
     """
     if isinstance(A, Expr) and isinstance(B, Expr):
         return bilinear_matmul(A, B)

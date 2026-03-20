@@ -81,16 +81,20 @@ def _propagate_to_children(weight_map, pqueue, children, child_weights):
 
 
 def ub(e: "Expr") -> torch.Tensor:
-    """Compute an upper bound for the given expression.
+    r"""Compute an upper bound via backward bound propagation.
 
-    Uses backward-mode bound propagation with direction ``"<="`` to iteratively
-    propagate through the expression DAG using a priority queue.
+    This function propagates linear weights backward through the expression DAG
+    in direction ``"<="`` and accumulates resulting bias terms.
 
     Args:
         e: The expression to bound.
 
     Returns:
-        A tensor containing the upper bound.
+        A tensor :math:`u` such that :math:`x \le u` for all concrete values
+        represented by ``e``.
+
+    Notes:
+        Results are memoized in ``_UB_CACHE`` keyed by expression id.
     """
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
@@ -144,16 +148,20 @@ def ub(e: "Expr") -> torch.Tensor:
 
 
 def lb(e: "Expr") -> torch.Tensor:
-    """Compute a lower bound for the given expression.
+    r"""Compute a lower bound via backward bound propagation.
 
-    Uses backward-mode bound propagation with direction ``">="`` to iteratively
-    propagate through the expression DAG using a priority queue.
+    This function propagates linear weights backward through the expression DAG
+    in direction ``">="`` and accumulates resulting bias terms.
 
     Args:
         e: The expression to bound.
 
     Returns:
-        A tensor containing the lower bound.
+        A tensor :math:`l` such that :math:`x \ge l` for all concrete values
+        represented by ``e``.
+
+    Notes:
+        Results are memoized in ``_LB_CACHE`` keyed by expression id.
     """
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
@@ -254,7 +262,11 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
         e: The expression to bound.
 
     Returns:
-        A tuple ``(upper_bound, lower_bound)`` of tensors.
+        A tuple ``(upper_bound, lower_bound)``.
+
+    Notes:
+        For symmetric leaf expressions (flag ``SYMMETRIC_TO_0``), only one
+        side needs to be computed; the opposite side is obtained by negation.
     """
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
@@ -360,12 +372,22 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def center(e: "Expr") -> torch.Tensor:
-    """Compute the center of the bounds for the given expression."""
+    r"""Compute the midpoint of the concretized interval.
+
+    .. math::
+
+       \mathrm{center}(e) = \frac{\mathrm{ub}(e) + \mathrm{lb}(e)}{2}
+    """
     ub_result, lb_result = ublb(e)
     return (ub_result + lb_result) / 2
 
 
 def bound_width(e: "Expr") -> torch.Tensor:
-    """Compute the width of the bounds for the given expression."""
+    r"""Compute interval width from concretized bounds.
+
+    .. math::
+
+       \mathrm{width}(e) = \mathrm{ub}(e) - \mathrm{lb}(e)
+    """
     ub_result, lb_result = ublb(e)
     return ub_result - lb_result

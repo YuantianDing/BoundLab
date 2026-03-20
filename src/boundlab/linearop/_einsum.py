@@ -250,7 +250,13 @@ class EinsumOp(LinearOp):
         return EinsumOp(new_tensor, input_dims, output_dims, name=self.name)
     
     def jacobian(self) -> torch.Tensor:
-        """Return the Jacobian matrix of this EinsumOp, if it is fast enough to materialize."""
+        """Return an explicit Jacobian for full-layout ``EinsumOp`` instances.
+
+        Returns:
+            A tensor with shape ``[*output_shape, *input_shape]`` when the
+            operator is in full representation (``is_full()``). Otherwise
+            returns ``NotImplemented``.
+        """
         if self.is_full():
             return self.permute_for_output().tensor.view(self.output_shape + self.input_shape)
         else:
@@ -292,7 +298,22 @@ class EinsumOp(LinearOp):
         return EinsumOp(new_tensor, new_input_dims, new_output_dims, name=f"{self}.sum_output()" if hasattr(self, "name") else None)
 
     def jacobian_scatter(self, src: torch.Tensor) -> torch.Tensor:
-        """Scatter a tensor of the same shape as the Jacobian back to the original input space."""
+        """Accumulate this operator's Jacobian into ``src`` efficiently.
+
+        Args:
+            src: Accumulator tensor with shape
+                ``[*output_shape, *input_shape]``.
+
+        Returns:
+            A tensor with the same shape as ``src`` equal to
+            ``src + jacobian(self)``.
+
+        Notes:
+            For full-layout operators, this reduces to direct addition.
+            For compressed/masked layouts, this method performs a structured
+            diagonal-scatter update that avoids full Jacobian expansion in the
+            common case.
+        """
         if self.is_full():
             return src + self.jacobian()
         else:

@@ -1,4 +1,21 @@
-"""Definitions of linear operators and their compositions for use in boundlab expressions."""
+r"""Linear Operator Library for Expression Backpropagation.
+
+This module defines linear operators used by BoundLab expressions during
+symbolic transformation and backward bound propagation.
+
+Key operators:
+
+- :class:`ComposedOp`: Functional composition of linear maps
+  (:math:`A \circ B`), used to chain transformations efficiently.
+- :class:`SumOp`: Pointwise sum of linear maps, used when multiple affine
+  contributions target the same expression.
+- :class:`EinsumOp`: General tensor-linear map based on Einstein summation;
+  this is the most flexible primitive for dense affine transformations.
+
+The module also exposes shape/indexing operators (reshape, permute, gather,
+scatter, slicing, padding) that are all represented as :class:`LinearOp`
+instances and can therefore be composed, summed, and propagated uniformly.
+"""
 
 from ._base import LinearOp, ComposedOp, SumOp, ScalarOp, ZeroOp
 from ._einsum import EinsumOp

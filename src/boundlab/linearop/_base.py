@@ -115,7 +115,14 @@ class LinearOp:
         return NotImplemented
     
     def jacobian(self) -> torch.Tensor:
-        """Return the Jacobian matrix of this LinearOp, if it is fast enough to materialize."""
+        """Return an explicit Jacobian tensor when efficiently available.
+
+        Returns:
+            A tensor with shape ``[*output_shape, *input_shape]`` if the
+            concrete Jacobian can be produced directly. Returns
+            ``NotImplemented`` for operators that only support implicit
+            application.
+        """
         return NotImplemented
     
     def abs(self) -> "LinearOp":
@@ -140,6 +147,19 @@ class LinearOp:
         return str(self)
     
     def force_jacobian(self):
+        """Materialize Jacobian via batched forward/backward application.
+
+        This fallback constructs an identity basis and applies either
+        :meth:`vforward` or :meth:`vbackward` depending on whether the input or
+        output side is smaller.
+
+        Returns:
+            A dense Jacobian tensor with shape ``[*output_shape, *input_shape]``.
+
+        Notes:
+            This may be expensive in time and memory and is mainly intended for
+            debugging, validation, or rare paths that require explicit Jacobians.
+        """
         input_numel = self.input_shape.numel()
         output_numel = self.output_shape.numel()
         if input_numel < output_numel:
@@ -154,6 +174,20 @@ class LinearOp:
             return jacobian
     
     def jacobian_scatter(self, src: torch.Tensor) -> torch.Tensor:
+        """Add this operator's Jacobian contribution into an existing tensor.
+
+        Args:
+            src: A tensor with Jacobian layout ``[*output_shape, *input_shape]``
+                that acts as the accumulation buffer.
+
+        Returns:
+            A tensor with the same shape as ``src`` containing
+            ``src + jacobian(self)``.
+
+        Notes:
+            Subclasses may override this to implement structured/sparse updates
+            without materializing the full Jacobian first.
+        """
         return NotImplemented
 
 class ComposedOp(LinearOp):

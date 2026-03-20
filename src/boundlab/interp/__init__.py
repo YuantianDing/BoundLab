@@ -25,6 +25,23 @@ class Interpreter:
             self.dispatcher = _AFFINE_DISPATCHER | dispatcher
 
     def __call__(self, model: nn.Module | torch.export.ExportedProgram) -> Callable:
+        """Build an expression-level interpreter for a traced model.
+
+        Args:
+            model: Either a ``torch.nn.Module`` (traced via ``torch.fx``) or an
+                already-exported program.
+
+        Returns:
+            A callable ``interpret(*exprs)`` that maps input
+            :class:`~boundlab.expr.Expr` objects to output expression(s).
+
+        Notes:
+            Dispatch is name-based and uses ``self.dispatcher``:
+
+            - ``call_function``: key is ``node.target.__name__``.
+            - ``call_module``: key is submodule class name.
+            - ``call_method``: key is method name string.
+        """
         def interpret(*exprs: Expr) -> Expr | tuple[Expr, ...]:
             """Interpret the given model on the provided input expressions."""
             if isinstance(model, nn.Module):

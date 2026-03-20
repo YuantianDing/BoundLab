@@ -8,10 +8,14 @@ sound over-approximations of reachable sets through bound propagation.
 Consider a zonotope, a commonly used abstract domain for neural network
 verification, expressed in the canonical form:
 
-$$Z = c + \mathbf{G} \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \in [-1, 1]^m$$
+.. math::
 
-where $c \in \mathbb{R}^n$ denotes the center, $\mathbf{G} \in \mathbb{R}^{n \times m}$
-is the generator matrix, and $\boldsymbol{\epsilon}$ represents the noise symbols.
+   Z = c + \mathbf{G} \boldsymbol{\epsilon}, \quad
+   \boldsymbol{\epsilon} \in [-1, 1]^m
+
+where :math:`c \in \mathbb{R}^n` denotes the center,
+:math:`\mathbf{G} \in \mathbb{R}^{n \times m}` is the generator matrix, and
+:math:`\boldsymbol{\epsilon}` represents the noise symbols.
 
 A key feature of this framework is structural sharing: multiple expressions may
 reference the same subexpression. When two zonotopes $Z_1$ and $Z_2$ share
@@ -30,7 +34,23 @@ from ._cat import Cat, Stack
 
 
 def Add(*children: Expr) -> AffineSum:
-    """Create an AffineSum of children with identity weights (convenience alias)."""
+    r"""Construct an affine sum with unit coefficients.
+
+    This is a convenience alias for creating:
+
+    .. math::
+
+       \sum_i x_i
+
+    where each input expression :math:`x_i` receives an identity scalar
+    coefficient ``1.0``.
+
+    Args:
+        *children: Input expressions with matching shapes.
+
+    Returns:
+        An :class:`AffineSum` representing the pointwise sum of ``children``.
+    """
     from boundlab.linearop import ScalarOp
     return AffineSum(*((ScalarOp(1.0, c.shape), c) for c in children))
 

@@ -16,15 +16,27 @@ from .bilinear import bilinear_elementwise
 
 
 def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
-    """Zonotope softmax handler.
+    r"""Zonotope softmax transformer built from primitive handlers.
 
-    Decomposes softmax into exp → sum → reciprocal → element-wise product.
-    Currently supports 2D tensors with softmax along the last dimension.
+    Softmax is decomposed as:
+
+    .. math::
+
+       \mathrm{softmax}(x)_j = \frac{\exp(x_j)}{\sum_k \exp(x_k)}
+
+    The implementation applies:
+    ``exp -> reduce-sum -> reciprocal -> element-wise product``.
+    For stability, it first shifts by the center maximum along the softmax
+    dimension.
+    Currently, only 2D inputs with ``dim == 1`` are supported.
 
     Args:
         x: Input expression with shape (m, n).
         dim: Dimension along which to apply softmax (default: -1).
         dtype: Ignored (for API compatibility with torch.softmax).
+
+    Returns:
+        An expression over-approximating ``torch.softmax(x, dim=dim)``.
     """
     ndim = len(x.shape)
     if dim < 0:
