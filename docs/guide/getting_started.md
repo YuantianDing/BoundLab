@@ -1,14 +1,12 @@
 # Getting Started
 
-## Installation
+This page walks through installation and a minimal end-to-end bound computation.
 
-### From conda (recommended)
+Core workflow: `Expr` (relaxed abstract value) -> transform (`zono.interpret` or expression ops) -> dual-norm concretization (`ub` / `lb` / `ublb`).
 
-```bash
-conda install boundlab -c pytorch -c conda-forge
-```
+## Install
 
-### From source
+### From source (recommended for development)
 
 ```bash
 git clone https://github.com/YuantianDing/boundlab.git
@@ -16,26 +14,61 @@ cd boundlab
 pip install -e .
 ```
 
-## Quick Start
+### Install docs dependencies (optional)
+
+```bash
+pip install -e ".[docs]"
+```
+
+### Verify installation
+
+```bash
+python -c "import boundlab as bl; print(bl.__version__)"
+```
+
+## Quick Start: Bound a Simple ReLU Network
 
 ```python
 import torch
-from torch.nn import functional as F
-import boundlab as bl
+from torch import nn
 
-class MyModel(nn.Module):
-    def forward(self, x):
-        return F.relu(x)
+import boundlab.expr as expr
+import boundlab.zono as zono
 
-inputs = bl.expr.const(load_a_batch_of_data())
-input_noise = 0.1 * bl.expr.LpEpsilon(*inputs.shape, p='inf')
+# A small model we want to verify under input perturbation.
+model = nn.Sequential(
+    nn.Linear(4, 6),
+    nn.ReLU(),
+    nn.Linear(6, 3),
+)
 
-zonotope = bl.zono.operator(MyModel())(inputs + input_noise)
-ub, lb = zonotope.ublb()
-assert (ub - lb).max() < 0.2  # Check that the output is robust to the input noise
+# Nominal input center.
+x_center = torch.randn(4)
+
+# Build symbolic input: x = center + eps, where eps_i in [-1, 1].
+x_expr = expr.ConstVal(x_center) + expr.LpEpsilon([4])
+
+# Build an abstract interpreter for the model and propagate bounds.
+op = zono.interpret(model)
+y_expr = op(x_expr)
+
+ub, lb = y_expr.ublb()
+print("Upper bound:", ub)
+print("Lower bound:", lb)
+print("Width:", ub - lb)
 ```
 
-## Requirements
+## Next Steps
 
-- Python >= 3.8
-- PyTorch >= 2.0
+- Continue with the {doc}`index` to learn the expression system and interpreter internals.
+- Explore runnable patterns in {doc}`../examples/index`.
+- Browse full APIs in {doc}`../api/index`.
+
+## Build This Documentation Locally
+
+```bash
+cd docs
+make html
+```
+
+The generated site is written to `docs/_build/html`.
