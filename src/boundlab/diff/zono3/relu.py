@@ -32,6 +32,30 @@ def relu_linearizer(
     *x_bounds* and *y_bounds* are standard triangle-relaxation zonotopes.
     *diff_bounds* over-approximates ``relu(x) − relu(y)`` with
     ``input_weights = [sx, sy, sd]`` corresponding to inputs ``[x, y, diff]``.
+
+    Examples
+    --------
+    Active/active regime behaves like passthrough on ``diff``:
+
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.diff.zono3.relu import relu_linearizer
+    >>> x = expr.ConstVal(torch.tensor([2.0])) + 0.5 * expr.LpEpsilon([1])
+    >>> y = expr.ConstVal(torch.tensor([1.0])) + 0.5 * expr.LpEpsilon([1])
+    >>> d = x - y
+    >>> _, _, d_bounds = relu_linearizer(x, y, d)
+    >>> d_expr = d_bounds.input_weights[0] * x + d_bounds.input_weights[1] * y + d_bounds.bias
+    >>> torch.allclose(d_expr.ub(), d.ub(), atol=1e-5)
+    True
+
+    Crossing/crossing regime is still sound for ``relu(x) - relu(y)``:
+
+    >>> x = expr.ConstVal(torch.tensor([0.0])) + 0.8 * expr.LpEpsilon([1])
+    >>> y = expr.ConstVal(torch.tensor([0.1])) + 0.8 * expr.LpEpsilon([1])
+    >>> d = x - y
+    >>> _, _, d_bounds = relu_linearizer(x, y, d)
+    >>> d_bounds.bias.shape
+    torch.Size([1])
     """
     x_bounds = std_relu_linearizer(x)
     y_bounds = std_relu_linearizer(y)

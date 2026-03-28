@@ -22,6 +22,16 @@ def exp_linearizer(expr: Expr) -> ZonoBounds:
     - Degenerate (u ≈ l): output is exp(l), no error.
     - General: tangent line at optimal point t_opt as lower bound,
       secant between (l, exp(l)) and (u, exp(u)) as upper bound.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.zono.exp import exp_linearizer
+    >>> x = expr.ConstVal(torch.tensor([0.0])) + 0.1 * expr.LpEpsilon([1])
+    >>> b = exp_linearizer(x)
+    >>> b.bias.shape
+    torch.Size([1])
     """
     lb = expr.lb()
     ub = expr.ub()

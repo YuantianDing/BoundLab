@@ -2,6 +2,19 @@ r"""Zonotope-Based Abstract Interpretation for Neural Networks
 
 This module provides zonotope transformations for computing over-approximations
 of neural network outputs under bounded input perturbations.
+
+Examples
+--------
+>>> import torch
+>>> from torch import nn
+>>> import boundlab.expr as expr
+>>> import boundlab.zono as zono
+>>> model = nn.Sequential(nn.Linear(4, 5), nn.ReLU(), nn.Linear(5, 3))
+>>> op = zono.interpret(model)
+>>> x = expr.ConstVal(torch.zeros(4)) + expr.LpEpsilon([4])
+>>> y = op(x)
+>>> y.ub().shape
+torch.Size([3])
 """
 
 from __future__ import annotations
@@ -16,11 +29,29 @@ from boundlab.interp import Interpreter
 from boundlab.linearop import LinearOp
 
 interpret = Interpreter({})
-"""Zonotope-Based Abstract Interpretation for Neural Networks"""
+"""Zonotope-based interpreter.
+
+Examples
+--------
+>>> import torch
+>>> from torch import nn
+>>> import boundlab.expr as expr
+>>> import boundlab.zono as zono
+>>> op = zono.interpret(nn.Linear(2, 1))
+>>> y = op(expr.ConstVal(torch.zeros(2)) + expr.LpEpsilon([2]))
+>>> y.shape
+torch.Size([1])
+"""
 
 @dataclasses.dataclass
 class ZonoBounds:
-    """Data class representing zonotope bounds for a neural network layer."""
+    """Data class representing zonotope bounds for a neural network layer.
+
+    Examples
+    --------
+    ``input_weights`` has one entry per input expression to the linearizer.
+    For unary ops such as ReLU, this is typically a single slope tensor.
+    """
     bias: torch.Tensor # The bias term of the zonotope
     error_coeffs: LinearOp
     input_weights: list[torch.Tensor | 0]  # Hadamard product weights of the input terms

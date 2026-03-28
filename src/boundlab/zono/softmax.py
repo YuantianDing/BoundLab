@@ -37,6 +37,16 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
 
     Returns:
         An expression over-approximating ``torch.softmax(x, dim=dim)``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.zono.softmax import softmax_handler
+    >>> x = expr.ConstVal(torch.zeros(2, 3)) + 0.1 * expr.LpEpsilon([2, 3])
+    >>> y = softmax_handler(x, dim=1)
+    >>> y.shape
+    torch.Size([2, 3])
     """
     ndim = len(x.shape)
     if dim < 0:

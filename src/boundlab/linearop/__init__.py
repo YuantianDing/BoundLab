@@ -15,6 +15,17 @@ Key operators:
 The module also exposes shape/indexing operators (reshape, permute, gather,
 scatter, slicing, padding) that are all represented as :class:`LinearOp`
 instances and can therefore be composed, summed, and propagated uniformly.
+
+Examples
+--------
+Apply a shape operator to a concrete tensor:
+
+>>> import torch
+>>> from boundlab.linearop import ReshapeOp
+>>> op = ReshapeOp(torch.Size([2, 3]), (3, 2))
+>>> y = op.forward(torch.arange(6.0).reshape(2, 3))
+>>> y.shape
+torch.Size([3, 2])
 """
 
 from ._base import LinearOp, ComposedOp, SumOp, ScalarOp, ZeroOp
@@ -55,7 +66,16 @@ from ._indices import (
 # ---------------------------------------------------------------------------
 
 class NarrowOp(GetSliceOp):
-    """Select a contiguous slice along *dim*. (Alias for GetSliceOp)"""
+    """Select a contiguous slice along *dim*. (Alias for GetSliceOp)
+
+    Examples
+    --------
+    >>> import torch
+    >>> from boundlab.linearop import NarrowOp
+    >>> op = NarrowOp(torch.Size([5]), dim=0, start=1, length=3)
+    >>> op.forward(torch.tensor([0., 1., 2., 3., 4.]))
+    tensor([1., 2., 3.])
+    """
 
     def __init__(self, input_shape, dim: int, start: int, length: int):
         indices = narrow_indices(len(input_shape), dim, start, length)
@@ -69,7 +89,16 @@ class NarrowOp(GetSliceOp):
 
 
 class SelectOp(GetSliceOp):
-    """Select a single index along *dim*, removing that dimension. (Alias for GetSliceOp)"""
+    """Select a single index along *dim*, removing that dimension. (Alias for GetSliceOp)
+
+    Examples
+    --------
+    >>> import torch
+    >>> from boundlab.linearop import SelectOp
+    >>> op = SelectOp(torch.Size([2, 3]), dim=0, index=1)
+    >>> op.forward(torch.tensor([[1., 2., 3.], [4., 5., 6.]]))
+    tensor([4., 5., 6.])
+    """
 
     def __init__(self, input_shape, dim: int, index: int):
         indices = select_indices(len(input_shape), dim, index)
@@ -82,7 +111,7 @@ class SelectOp(GetSliceOp):
 
 
 class GetItemOp(GetSliceOp):
-    """Indexing / slicing via ``x[indices]``. (Alias for GetSliceOp)"""
+    """Indexing / slicing via ``x[indices]``. (Alias for GetSliceOp)."""
 
     def __str__(self):
         from ._indices import _format_indices
@@ -91,7 +120,16 @@ class GetItemOp(GetSliceOp):
 
 
 class PadOp(SetSliceOp):
-    """Zero-pad an input tensor. (Alias for SetSliceOp)"""
+    """Zero-pad an input tensor. (Alias for SetSliceOp)
+
+    Examples
+    --------
+    >>> import torch
+    >>> from boundlab.linearop import PadOp
+    >>> op = PadOp(torch.Size([3]), [1, 2])
+    >>> op.forward(torch.tensor([1., 2., 3.]))
+    tensor([0., 1., 2., 3., 0., 0.])
+    """
 
     def __init__(self, input_shape, pad_spec: list[int]):
         self._pad_spec = list(pad_spec)

@@ -2,6 +2,17 @@ r"""Bound Propagation for Concretizing Expressions
 
 This module provides functions for computing concrete upper and lower
 bounds from symbolic expressions through backward-mode propagation.
+
+Examples
+--------
+>>> import torch
+>>> import boundlab.expr as expr
+>>> import boundlab.prop as prop
+>>> x = expr.ConstVal(torch.tensor([1.0, -1.0])) + expr.LpEpsilon([2])
+>>> ub = prop.ub(x)
+>>> lb = prop.lb(x)
+>>> ub.shape, lb.shape
+(torch.Size([2]), torch.Size([2]))
 """
 
 import queue
@@ -95,6 +106,14 @@ def ub(e: "Expr") -> torch.Tensor:
 
     Notes:
         Results are memoized in ``_UB_CACHE`` keyed by expression id.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> x = expr.ConstVal(torch.tensor([0.0])) + expr.LpEpsilon([1])
+    >>> ub(x).shape
+    torch.Size([1])
     """
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
@@ -162,6 +181,14 @@ def lb(e: "Expr") -> torch.Tensor:
 
     Notes:
         Results are memoized in ``_LB_CACHE`` keyed by expression id.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> x = expr.ConstVal(torch.tensor([0.0])) + expr.LpEpsilon([1])
+    >>> lb(x).shape
+    torch.Size([1])
     """
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
@@ -267,6 +294,15 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     Notes:
         For symmetric leaf expressions (flag ``SYMMETRIC_TO_0``), only one
         side needs to be computed; the opposite side is obtained by negation.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> x = expr.ConstVal(torch.tensor([2.0])) + expr.LpEpsilon([1])
+    >>> u, l = ublb(x)
+    >>> (u >= l).all().item()
+    True
     """
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr

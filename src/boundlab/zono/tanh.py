@@ -23,6 +23,16 @@ def tanh_linearizer(expr: Expr) -> ZonoBounds:
     lambda = min(sech^2(l), sech^2(u)) = min(1-tanh^2(l), 1-tanh^2(u))
     mu = 0.5*(tanh(u) + tanh(l) - lambda*(u + l))
     beta = 0.5*(tanh(u) - tanh(l) - lambda*(u - l))
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.zono.tanh import tanh_linearizer
+    >>> x = expr.ConstVal(torch.tensor([0.0])) + expr.LpEpsilon([1])
+    >>> b = tanh_linearizer(x)
+    >>> b.bias.shape
+    torch.Size([1])
     """
     lb = expr.lb()
     ub = expr.ub()

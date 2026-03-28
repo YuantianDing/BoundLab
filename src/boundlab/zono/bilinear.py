@@ -36,6 +36,17 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
 
     Returns:
         An expression over-approximating ``A @ B``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.zono.bilinear import bilinear_matmul
+    >>> A = expr.ConstVal(torch.ones(2, 3)) + 0.1 * expr.LpEpsilon([2, 3])
+    >>> B = expr.ConstVal(torch.ones(3, 4)) + 0.1 * expr.LpEpsilon([3, 4])
+    >>> C = bilinear_matmul(A, B)
+    >>> C.shape
+    torch.Size([2, 4])
     """
     assert len(A.shape) == 2 and len(B.shape) == 2, \
         f"Only 2D matmul supported, got {A.shape} @ {B.shape}"
@@ -89,6 +100,17 @@ def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
 
     Returns:
         An expression over-approximating ``A * B``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.zono.bilinear import bilinear_elementwise
+    >>> A = expr.ConstVal(torch.ones(3)) + 0.2 * expr.LpEpsilon([3])
+    >>> B = expr.ConstVal(torch.zeros(3)) + 0.3 * expr.LpEpsilon([3])
+    >>> C = bilinear_elementwise(A, B)
+    >>> C.shape
+    torch.Size([3])
     """
     assert A.shape == B.shape, \
         f"Shapes must match for element-wise product: {A.shape} vs {B.shape}"
@@ -122,6 +144,16 @@ def matmul_handler(A, B):
     - ``Expr @ Expr``: McCormick-style bilinear relaxation.
     - ``Expr @ Tensor`` or ``Tensor @ Expr``: exact affine path.
     - ``Tensor @ Tensor``: delegated to ``torch.matmul``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.zono.bilinear import matmul_handler
+    >>> A = expr.ConstVal(torch.ones(1, 2)) + expr.LpEpsilon([1, 2])
+    >>> B = torch.ones(2, 1)
+    >>> matmul_handler(A, B).shape
+    torch.Size([1, 1])
     """
     if isinstance(A, Expr) and isinstance(B, Expr):
         return bilinear_matmul(A, B)

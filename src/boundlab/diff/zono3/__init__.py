@@ -1,4 +1,4 @@
-r"""Zonotope-Based Abstract Interpretation for Differential Verification
+r"""Triple-Zonotope-Based Abstract Interpretation for Differential Verification
 
 This module provides zonotope transformations for computing over-approximations
 of the difference ``f₁(x) − f₂(x)`` between two structurally identical networks,
@@ -16,6 +16,24 @@ matrices are applied to all three components (without bias for ``d``).
 
 Non-linear operations (ReLU, …) use specialised differential linearisers
 derived from VeryDiff (Teuber et al., 2024).
+
+Examples
+--------
+Build a triple ``(x, y, d)`` and propagate it through a model:
+
+>>> import torch
+>>> from torch import nn
+>>> import boundlab.expr as expr
+>>> from boundlab.diff.zono3 import interpret
+>>> model = nn.Sequential(nn.Linear(4, 5), nn.ReLU(), nn.Linear(5, 3))
+>>> op = interpret(model)
+>>> x = expr.ConstVal(torch.zeros(4)) + expr.LpEpsilon([4])
+>>> y = expr.ConstVal(torch.ones(4)) + expr.LpEpsilon([4])
+>>> d = x - y
+>>> _, _, d_out = op((x, y, d))
+>>> d_ub, d_lb = d_out.ublb()
+>>> d_ub.shape, d_lb.shape
+(torch.Size([3]), torch.Size([3]))
 """
 
 from typing import Callable
@@ -165,6 +183,29 @@ interpret = Interpreter[Triple[Expr] | Expr](_DIFF_AFFINE_DISPATCHER, handle_aff
 
 Feed it triples ``(x, y, d)`` where *x* and *y* are the two networks'
 zonotope expressions and *d* over-approximates their difference.
+
+Examples
+--------
+Differential mode (triple input):
+
+>>> import torch
+>>> from torch import nn
+>>> import boundlab.expr as expr
+>>> from boundlab.diff.zono3 import interpret
+>>> model = nn.Linear(4, 3)
+>>> op = interpret(model)
+>>> x = expr.ConstVal(torch.randn(4)) + expr.LpEpsilon([4])
+>>> y = expr.ConstVal(torch.randn(4)) + expr.LpEpsilon([4])
+>>> _, _, d_out = op((x, y, x - y))
+>>> d_out.ub().shape
+torch.Size([3])
+
+Fallback mode (plain ``Expr``) matches standard zonotope interpretation:
+
+>>> z = expr.ConstVal(torch.randn(4)) + expr.LpEpsilon([4])
+>>> z_out = op(z)
+>>> z_out.ub().shape
+torch.Size([3])
 """
 
 

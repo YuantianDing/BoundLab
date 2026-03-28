@@ -24,6 +24,19 @@ tighter bound computation through correlation tracking.
 
 The module implements backward-mode bound propagation, which computes linear
 relaxations by propagating weight matrices from outputs to inputs.
+
+Examples
+--------
+Build ``center + epsilon`` and query bounds:
+
+>>> import torch
+>>> import boundlab.expr as expr
+>>> x = expr.ConstVal(torch.tensor([0.5, -1.0])) + expr.LpEpsilon([2])
+>>> ub, lb = x.ublb()
+>>> torch.allclose(ub, torch.tensor([1.5, 0.0]))
+True
+>>> torch.allclose(lb, torch.tensor([-0.5, -2.0]))
+True
 """
 
 # Import core classes first (no circular dependencies)
@@ -50,6 +63,16 @@ def Add(*children: Expr) -> AffineSum:
 
     Returns:
         An :class:`AffineSum` representing the pointwise sum of ``children``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> a = expr.ConstVal(torch.tensor([1.0, 2.0]))
+    >>> b = expr.LpEpsilon([2])
+    >>> s = expr.Add(a, b)
+    >>> s.shape
+    torch.Size([2])
     """
     from boundlab.linearop import ScalarOp
     return AffineSum(*((ScalarOp(1.0, c.shape), c) for c in children))

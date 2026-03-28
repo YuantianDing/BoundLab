@@ -18,6 +18,16 @@ def reciprocal_linearizer(expr: Expr) -> ZonoBounds:
     """Minimal-area reciprocal relaxation (DeepT, Section 4.6).
 
     Assumes input is strictly positive. Clamps lower bound to 1e-9.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import boundlab.expr as expr
+    >>> from boundlab.zono.reciprocal import reciprocal_linearizer
+    >>> x = expr.ConstVal(torch.tensor([2.0])) + 0.1 * expr.LpEpsilon([1])
+    >>> b = reciprocal_linearizer(x)
+    >>> b.bias.shape
+    torch.Size([1])
     """
     lb = expr.lb()
     ub = expr.ub()

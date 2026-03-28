@@ -1,4 +1,20 @@
-"""Abstract Interpretation Framework for Neural Network Verification"""
+"""Abstract Interpretation Framework for Neural Network Verification.
+
+Examples
+--------
+Use a custom dispatcher for a tiny operator set:
+
+>>> import torch
+>>> from torch import nn
+>>> import boundlab.expr as expr
+>>> from boundlab.interp import Interpreter
+>>> itp = Interpreter({"relu": lambda x: x}, handle_affine=True)
+>>> op = itp(nn.ReLU())
+>>> x = expr.ConstVal(torch.tensor([0.0])) + expr.LpEpsilon([1])
+>>> y = op(x)
+>>> y.shape
+torch.Size([1])
+"""
 
 from __future__ import annotations
 
@@ -43,6 +59,19 @@ class Interpreter(Generic[E]):
             - ``call_function``: key is ``node.target.__name__``.
             - ``call_module``: key is submodule class name.
             - ``call_method``: key is method name string.
+
+        Examples
+        --------
+        >>> import torch
+        >>> from torch import nn
+        >>> import boundlab.expr as expr
+        >>> import boundlab.zono as zono
+        >>> model = nn.Linear(4, 3)
+        >>> op = zono.interpret(model)
+        >>> x = expr.ConstVal(torch.zeros(4)) + expr.LpEpsilon([4])
+        >>> y = op(x)
+        >>> y.ub().shape
+        torch.Size([3])
         """
         def interpret(*exprs: E) -> E | tuple[E, ...]:
             """Interpret the given model on the provided input expressions."""
