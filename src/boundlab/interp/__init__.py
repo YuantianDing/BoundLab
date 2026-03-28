@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Generic, TypeVar
 from torch import nn
 import torch
 
@@ -10,7 +10,9 @@ from boundlab.expr._core import Expr
 
 __all__ = ["Interpreter"]
 
-class Interpreter:
+E = TypeVar("E", bound=Expr)
+
+class Interpreter(Generic[E]):
     def __init__(self, dispatcher: dict[str, Callable], handle_affine: bool = True):
         """Initialize an interpreter with a dispatcher and an estimator.
 
@@ -24,7 +26,7 @@ class Interpreter:
         if handle_affine:
             self.dispatcher = _AFFINE_DISPATCHER | dispatcher
 
-    def __call__(self, model: nn.Module | torch.export.ExportedProgram) -> Callable:
+    def __call__(self, model: nn.Module | torch.export.ExportedProgram) -> Callable[..., E | tuple[E, ...]]:
         """Build an expression-level interpreter for a traced model.
 
         Args:
@@ -42,7 +44,7 @@ class Interpreter:
             - ``call_module``: key is submodule class name.
             - ``call_method``: key is method name string.
         """
-        def interpret(*exprs: Expr) -> Expr | tuple[Expr, ...]:
+        def interpret(*exprs: E) -> E | tuple[E, ...]:
             """Interpret the given model on the provided input expressions."""
             if isinstance(model, nn.Module):
                 traced = torch.fx.symbolic_trace(model)

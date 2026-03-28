@@ -115,6 +115,100 @@ A practical validation loop:
 
 This is used extensively in BoundLab tests and is a good regression guard for custom handlers.
 
+## Inspecting Expressions and Operators
+
+BoundLab provides several ways to inspect expressions and linear operators
+for debugging and exploration.
+
+### Printing an expression graph
+
+`str(expr)` renders the full expression DAG in SSA (static single assignment)
+form. Each node is assigned a `%N` name, and shared subexpressions appear once.
+Purely affine sub-graphs are eagerly flattened by `AffineSum`, so the SSA
+form is most informative after nonlinear operations (e.g. ReLU).
+
+```python
+import torch
+import boundlab.expr as expr
+import boundlab.zono as zono
+
+x = expr.ConstVal(torch.tensor([1.0, -0.5])) + expr.LpEpsilon([2])
+y = zono.interpret.dispatcher["relu"](x)
+print(y)
+```
+
+```text
+bl.Expr {
+    %0 = 𝜀_<6>
+    %1 = 𝜀_<1>
+    %2 = <einsum [2]: [0] -> [0]>(%1) + (set_indices([1] -> [2]) ∘ <einsum [1]: [0] -> [0]>)(%0)
+}
+```
+
+Here `%1` is the original noise symbol, `%0` is a fresh error symbol
+introduced by the ReLU linearizer, and `%2` combines them via EinsumOp
+weights.
+
+You can also call `expr.expr_pretty_print(e)` directly to get the SSA body
+without the wrapper.
+
+### Key `Expr` attributes
+
+Every expression node exposes:
+
+- `e.shape` — output tensor shape.
+- `e.children` — tuple of child expressions.
+- `e.flags` — `ExprFlags` (e.g. `IS_AFFINE`, `SYMMETRIC_TO_0`, `IS_CONST`).
+- `e.id` — unique time-ordered integer (used for topological ordering).
+- `repr(e)` — compact one-line summary: `AffineSum(id=5, flags=ExprFlags.IS_AFFINE)`.
+
+For `AffineSum` nodes specifically:
+
+- `e.children_dict` — `dict[Expr, LinearOp]` mapping each child to its operator.
+- `e.constant` — optional constant tensor (`None` if absent).
+
+```python
+for child, op in x.children_dict.items():
+    print(f"{repr(child)}  ->  {op}  ({op.input_shape} -> {op.output_shape})")
+```
+
+### Inspecting `LinearOp`
+
+`str(op)` gives a human-readable description of the operator. Composed
+operators display their chain with `∘`:
+
+```python
+from boundlab.linearop import ScalarOp, ReshapeOp
+
+a = ScalarOp(2.0, torch.Size([2, 3]))
+b = ReshapeOp(torch.Size([2, 3]), (6,))
+print(b @ a)  # (reshape([6]) ∘ 2.0)
+```
+
+Key attributes:
+
+- `op.input_shape`, `op.output_shape` — tensor shapes.
+- `op.flags` — `LinearOpFlags` (e.g. `IS_NON_NEGATIVE`).
+
+You can materialize the full Jacobian for debugging:
+
+- `op.jacobian()` — efficient closed-form Jacobian if the subclass implements
+  it (returns `NotImplemented` otherwise).
+- `op.force_jacobian()` — always works by applying the operator to a basis;
+  returns a tensor of shape `(*output_shape, *input_shape)`.
+
+```python
+j = (b @ a).force_jacobian()
+print(j.shape)  # torch.Size([6, 2, 3])
+```
+
+You can also test operators on concrete tensors:
+
+- `op.forward(x)` — apply the linear map.
+- `op.backward(grad)` — apply the transpose.
+- `op.vforward(x)` / `op.vbackward(grad)` — batched variants over
+  trailing / leading dimensions.
+
 ## Supported Operations
 
 ### Affine and shape operations
