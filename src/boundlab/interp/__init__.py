@@ -2,14 +2,15 @@
 
 Examples
 --------
-Use a custom dispatcher for a tiny operator set:
+Export a model then interpret it:
 
 >>> import torch
 >>> from torch import nn
 >>> import boundlab.expr as expr
 >>> from boundlab.interp import Interpreter
->>> itp = Interpreter({"relu": lambda x: x}, handle_affine=True)
->>> op = itp(nn.ReLU())
+>>> itp = Interpreter({"relu": lambda x: x})
+>>> gm = torch.export.export(nn.ReLU(), (torch.zeros(1),))
+>>> op = itp(gm)
 >>> x = expr.ConstVal(torch.tensor([0.0])) + expr.LpEpsilon([1])
 >>> y = op(x)
 >>> y.shape
@@ -19,8 +20,8 @@ torch.Size([1])
 from __future__ import annotations
 
 from typing import Any, Callable, Generic, TypeVar
-from torch import nn
 import torch
+import torch.fx
 
 from boundlab.expr._core import Expr
 
@@ -28,37 +29,41 @@ __all__ = ["Interpreter"]
 
 E = TypeVar("E", bound=Expr)
 
+
 class Interpreter(Generic[E]):
-    def __init__(self, dispatcher: dict[str, Callable], handle_affine: bool = True):
-        """Initialize an interpreter with a dispatcher and an estimator.
+    def __init__(self, dispatcher: dict[str, Callable]):
+        """Initialize an interpreter with a dispatcher.
 
         The dispatcher maps neural network operators to functions for interpretation.
+
         Keys are:
-        - For call_function nodes: the callable's ``__name__`` (e.g. ``"add"``).
-        - For call_module nodes: the submodule's class name (e.g. ``"Linear"``).
-        - For call_method nodes: the method name string (e.g. ``"relu"``).
+
+        - For ``call_function`` nodes: the callable's ``__name__``, with any
+          ``.default`` overload suffix stripped (e.g.
+          ``"linear.default"`` -> ``"linear"``).
+        - For ``call_module`` nodes: the submodule's class name (e.g. ``"ReLU"``).
+        - For ``call_method`` nodes: the method name string (e.g. ``"reshape"``).
         """
         self.dispatcher = dispatcher
-        if handle_affine:
-            self.dispatcher = _AFFINE_DISPATCHER | dispatcher
 
-    def __call__(self, model: nn.Module | torch.export.ExportedProgram) -> Callable[..., E | tuple[E, ...]]:
-        """Build an expression-level interpreter for a traced model.
+    def __call__(
+        self, model: torch.export.ExportedProgram | torch.fx.GraphModule
+    ) -> Callable[..., E | tuple[E, ...]]:
+        """Build an expression-level interpreter for an exported model.
 
-        Args:
-            model: Either a ``torch.nn.Module`` (traced via ``torch.fx``) or an
-                already-exported program.
+        Parameters
+        ----------
+        model:
+            A :class:`torch.export.ExportedProgram` (e.g. from
+            ``torch.export.export``) or an already-unwrapped
+            :class:`torch.fx.GraphModule`.  Plain ``nn.Module`` is not accepted —
+            export the model first so that ``call_module`` nodes for built-in layers
+            are lowered to ``call_function`` nodes (e.g. ``linear.default``).
 
-        Returns:
-            A callable ``interpret(*exprs)`` that maps input
-            :class:`~boundlab.expr.Expr` objects to output expression(s).
-
-        Notes:
-            Dispatch is name-based and uses ``self.dispatcher``:
-
-            - ``call_function``: key is ``node.target.__name__``.
-            - ``call_module``: key is submodule class name.
-            - ``call_method``: key is method name string.
+        Returns
+        -------
+        A callable ``interpret(*exprs)`` that maps input
+        :class:`~boundlab.expr.Expr` objects to output expression(s).
 
         Examples
         --------
@@ -67,19 +72,19 @@ class Interpreter(Generic[E]):
         >>> import boundlab.expr as expr
         >>> import boundlab.zono as zono
         >>> model = nn.Linear(4, 3)
-        >>> op = zono.interpret(model)
+        >>> gm = torch.export.export(model, (torch.zeros(4),))
+        >>> op = zono.interpret(gm)
         >>> x = expr.ConstVal(torch.zeros(4)) + expr.LpEpsilon([4])
         >>> y = op(x)
         >>> y.ub().shape
         torch.Size([3])
         """
-        def interpret(*exprs: E) -> E | tuple[E, ...]:
-            """Interpret the given model on the provided input expressions."""
-            if isinstance(model, nn.Module):
-                traced = torch.fx.symbolic_trace(model)
-            else:
-                traced = model
+        if isinstance(model, torch.export.ExportedProgram):
+            traced = model.module()
+        else:
+            traced = model
 
+        def interpret(*exprs: E) -> E | tuple[E, ...]:
             env: dict[str, Any] = {}
             input_idx = 0
 
@@ -96,7 +101,19 @@ class Interpreter(Generic[E]):
                     env[node.name] = ConstVal(obj.detach())
 
                 elif node.op == "call_function":
-                    key = node.target.__name__
+                    raw = node.target.__name__
+                    # Examples:
+                    #   "aten.linear.default"        → "linear"
+                    #   "boundlab.diff_pair.default" → "diff_pair"
+                    #   "aten.transpose.int"         → "transpose"
+                    #   "getitem"                    → "getitem"
+                    parts = raw.split(".")
+                    if len(parts) == 1:
+                        key = parts[0]
+                    elif parts[-1] == "default":
+                        key = parts[-2]
+                    else:
+                        key = parts[0]
                     handler = self.dispatcher[key]
                     args = [env[a.name] if isinstance(a, torch.fx.Node) else a for a in node.args]
                     kwargs = {k: (env[v.name] if isinstance(v, torch.fx.Node) else v) for k, v in node.kwargs.items()}
@@ -105,6 +122,10 @@ class Interpreter(Generic[E]):
                 elif node.op == "call_module":
                     submod = traced.get_submodule(node.target)
                     key = type(submod).__name__
+                    if key not in self.dispatcher:
+                        if node.users:
+                            raise KeyError(f"No handler for call_module '{key}'")
+                        continue  # side-effect-only node (e.g. GuardsFn)
                     handler = self.dispatcher[key]
                     args = [env[a.name] if isinstance(a, torch.fx.Node) else a for a in node.args]
                     kwargs = {k: (env[v.name] if isinstance(v, torch.fx.Node) else v) for k, v in node.kwargs.items()}
@@ -121,31 +142,7 @@ class Interpreter(Generic[E]):
                     out = node.args[0]
                     if isinstance(out, torch.fx.Node):
                         return env[out.name]
-                    return tuple(env[a.name] if isinstance(a, torch.fx.Node) else a for a in out)
+                    vals = tuple(env[a.name] if isinstance(a, torch.fx.Node) else a for a in out)
+                    return vals[0] if len(vals) == 1 else vals
 
         return interpret
-
-
-_AFFINE_DISPATCHER: dict[str, Callable] = {
-    # ---- arithmetic call_function ops ----------------------------------
-    "add": lambda x, y: x + y,
-    "sub": lambda x, y: x - y,
-    "neg": lambda x: -x,
-    "mul": lambda x, y: x * y if isinstance(y, torch.Tensor) else y * x,
-    # ---- call_module: linear layers ------------------------------------
-    "Linear":       lambda mod, x: x @ mod.weight.T + mod.bias,
-    # ---- call_function: F.linear (weight/bias arrive as ConstVal) ------
-    "linear": lambda x, w, b=None: x @ w.value.T + (b.value if b is not None else 0),
-    # ---- shape-manipulation call_method ops ----------------------------
-    "reshape":    lambda x, *shape: x.reshape(*shape),
-    "view":       lambda x, *shape: x.reshape(*shape),
-    "flatten":    lambda x, start_dim=0, end_dim=-1: x.flatten(start_dim, end_dim),
-    "permute":    lambda x, *dims: x.permute(*dims),
-    "transpose":  lambda x, dim0, dim1: x.transpose(dim0, dim1),
-    "unsqueeze":  lambda x, dim: x.unsqueeze(dim),
-    "squeeze":    lambda x, dim=None: x.squeeze(dim),
-    "contiguous": lambda x: x,
-    # ---- arithmetic: division -----------------------------------------
-    "truediv":    lambda x, y: x / y,
-    "floordiv":   lambda x, y: x / y,  # approximate
-}

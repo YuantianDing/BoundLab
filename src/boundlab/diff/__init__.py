@@ -9,5 +9,6 @@ True
 
 from . import zono3
 from . import op
+from . import expr
 
-__all__ = ["zono3", "op"]
+__all__ = ["zono3", "op", "expr"]

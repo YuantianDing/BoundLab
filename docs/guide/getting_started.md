@@ -48,8 +48,9 @@ x_center = torch.randn(4)
 # Build symbolic input: x = center + eps, where eps_i in [-1, 1].
 x_expr = expr.ConstVal(x_center) + expr.LpEpsilon([4])
 
-# Build an abstract interpreter for the model and propagate bounds.
-op = zono.interpret(model)
+# Export first, then build an abstract interpreter and propagate bounds.
+exported = torch.export.export(model, (x_center,))
+op = zono.interpret(exported)
 y_expr = op(x_expr)
 
 ub, lb = y_expr.ublb()

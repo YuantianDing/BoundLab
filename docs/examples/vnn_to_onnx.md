@@ -39,7 +39,7 @@ The exported ONNX model:
 Internally, it encodes the BoundLab VNN process:
 
 - symbolic abstract input `ConstVal(x) + eps`
-- zonotope interpretation via `zono.interpret(...)`
+- zonotope interpretation via `zono.interpret(...)` on FX/exported IR
 - concretization via `ublb()`
 
 ## Source

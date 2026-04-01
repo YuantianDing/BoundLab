@@ -35,7 +35,7 @@ def relu_linearizer(
 
     Examples
     --------
-    Active/active regime behaves like passthrough on ``diff``:
+    Active/active regime: diff weights are ``sx=1, sy=-1``, equivalent to ``x - y``:
 
     >>> import torch
     >>> import boundlab.expr as expr
@@ -44,7 +44,8 @@ def relu_linearizer(
     >>> y = expr.ConstVal(torch.tensor([1.0])) + 0.5 * expr.LpEpsilon([1])
     >>> d = x - y
     >>> _, _, d_bounds = relu_linearizer(x, y, d)
-    >>> d_expr = d_bounds.input_weights[0] * x + d_bounds.input_weights[1] * y + d_bounds.bias
+    >>> sx, sy = d_bounds.input_weights[0], d_bounds.input_weights[1]
+    >>> d_expr = sx * x + sy * y + d_bounds.bias
     >>> torch.allclose(d_expr.ub(), d.ub(), atol=1e-5)
     True
 
@@ -90,6 +91,7 @@ def relu_linearizer(
     nu         = alpha * torch.clamp(-d_lb, min=0.0)
     mu_d       = 0.5 * torch.maximum(d_ub, -d_lb)
 
+    # Case 9 overrides: zero out x/y slopes, use d directly with alpha slope.
     sx   = torch.where(any_any, zeros, sx)
     sy   = torch.where(any_any, zeros, sy)
     sd   = torch.where(any_any, alpha, zeros)

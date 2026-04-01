@@ -1,6 +1,7 @@
 # Example: Verify an MLP with `zono.interpret`
 
-This example uses the model interpreter to build an expression graph automatically from a PyTorch module.
+This example uses the model interpreter to build an expression graph from an
+exported PyTorch program.
 
 ```python
 import torch
@@ -23,7 +24,8 @@ model.eval()
 x_center = torch.randn(4)
 x = expr.ConstVal(x_center) + 0.1 * expr.LpEpsilon([4])
 
-op = zono.interpret(model)
+exported = torch.export.export(model, (x_center,))
+op = zono.interpret(exported)
 y = op(x)
 
 ub, lb = y.ublb()
@@ -41,6 +43,6 @@ assert (ys >= lb.unsqueeze(0) - 1e-5).all()
 
 ## What this demonstrates
 
-- Building model-level symbolic transformations from `nn.Module`.
+- Building model-level symbolic transformations from an exported program.
 - Running end-to-end bound propagation with `ublb()`.
 - A practical Monte-Carlo soundness check.

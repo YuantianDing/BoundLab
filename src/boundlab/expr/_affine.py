@@ -32,6 +32,16 @@ class AffineSum(Expr):
         ops: List of EinsumOp operators (convenience view).
     """
 
+    def __new__(cls, *pairs: tuple, const=None, **_kw):
+        if cls is not AffineSum:
+            # ConstVal (and other subclasses) construct themselves directly.
+            return object.__new__(cls)
+        if len(pairs) == 0 or all(isinstance(child, ConstVal) for _, child in pairs):
+            # All-constant result → return a ConstVal shell;
+            # AffineSum.__init__ will populate .constant, and we sync .value below.
+            return object.__new__(ConstVal)
+        return object.__new__(AffineSum)
+    
     def __init__(self, *pairs: tuple, const=None):
         """Construct an AffineSum.
 
@@ -127,9 +137,22 @@ class ConstVal(AffineSum):
     absorbed via eager contraction.
     """
 
-    def __init__(self, value: torch.Tensor, name: str | None = None):
-        super().__init__(const=value)
-        self.value = value
+    def __init__(self, value=None, name=None, *_pairs, const=None):
+        # Three call patterns:
+        # 1. ConstVal(tensor[, name])         — direct construction
+        # 2. ConstVal(const=tensor)           — from AffineSum(const=x), no pairs
+        # 3. ConstVal((op,ch), ..., const=x)  — from AffineSum(*pairs, const=x),
+        #                                       all-ConstVal children; value is
+        #                                       the first pair tuple, _pairs are the rest
+        if isinstance(value, tuple) or _pairs:
+            # Pattern 3: routed from AffineSum with pairs
+            all_pairs = ((value,) + _pairs) if value is not None else _pairs
+            AffineSum.__init__(self, *all_pairs, const=const)
+        else:
+            # Pattern 1 or 2
+            actual = value if const is None else const
+            AffineSum.__init__(self, const=actual)
+        self.value = self.constant
         self.name = name
 
     def to_string(self) -> str:

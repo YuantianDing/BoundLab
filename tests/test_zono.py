@@ -16,6 +16,11 @@ import boundlab.zono as zono
 
 # ---- helpers ----------------------------------------------------------------
 
+def _export(model: nn.Module, in_shape: list[int]):
+    """Export *model* to a pre-autograd GraphModule."""
+    return torch.export.export(model, (torch.zeros(in_shape),))
+
+
 _relu_handler = zono.interpret.dispatcher["relu"]
 
 
@@ -193,7 +198,7 @@ def test_interpreter_single_linear():
     model = nn.Linear(4, 3)
     center_val = torch.randn(4)
 
-    op = zono.interpret(model)
+    op = zono.interpret(_export(model, [4]))
     y = op(_make_input(center_val))
     ub, lb = y.ublb()
 
@@ -217,7 +222,7 @@ def test_interpreter_linear_relu_sound():
     model = nn.Sequential(nn.Linear(4, 5), nn.ReLU())
     center_val = torch.randn(4)
 
-    op = zono.interpret(model)
+    op = zono.interpret(_export(model, [4]))
     y = op(_make_input(center_val))
     ub, lb = y.ublb()
 
@@ -236,7 +241,7 @@ def test_interpreter_two_layer_sound():
     )
     center_val = torch.randn(4)
 
-    op = zono.interpret(model)
+    op = zono.interpret(_export(model, [4]))
     y = op(_make_input(center_val))
     ub, lb = y.ublb()
 
@@ -296,7 +301,7 @@ def test_interpreter_deeper_network_sound(seed: int):
     )
     center_val = torch.randn(5)
 
-    op = zono.interpret(model)
+    op = zono.interpret(_export(model, [5]))
     y = op(_make_input(center_val))
     ub, lb = y.ublb()
 

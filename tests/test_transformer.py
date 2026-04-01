@@ -26,6 +26,11 @@ import boundlab.prop as prop
 import boundlab.zono as zono
 
 
+def _export(model: nn.Module, in_shape: list[int]):
+    """Export *model* to a pre-autograd GraphModule."""
+    return torch.export.export(model, (torch.zeros(in_shape),))
+
+
 # ---- helpers ----------------------------------------------------------------
 
 def _make_input(center_val: torch.Tensor, scale: float = 1.0):
@@ -100,8 +105,8 @@ def test_linear_attention_sound():
 
     pr = cProfile.Profile()
     pr.enable()
-    op = zono.interpret(model)
-    
+    op = zono.interpret(_export(model, [seq_len, d_model]))
+
     x_expr = _make_input(center_val, scale=scale)
     y_expr = op(x_expr)
     ub, lb = y_expr.ublb()
@@ -281,7 +286,7 @@ def test_softmax_attention_sound():
     center_val = torch.randn(seq_len, d_model) * 0.3
     scale = 0.05  # very small perturbation for softmax stability
 
-    op = zono.interpret(model)
+    op = zono.interpret(_export(model, [seq_len, d_model]))
     x_expr = _make_input(center_val, scale=scale)
     y_expr = op(x_expr)
     ub, lb = y_expr.ublb()
@@ -316,7 +321,7 @@ def test_interpreter_tanh_ffn_sound():
     model.eval()
     center_val = torch.randn(4)
 
-    op = zono.interpret(model)
+    op = zono.interpret(_export(model, [4]))
     x_expr = _make_input(center_val)
     y_expr = op(x_expr)
     ub, lb = y_expr.ublb()

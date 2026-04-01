@@ -14,6 +14,6 @@ vnn_to_onnx
 ## Choosing an Example
 
 - Start with {doc}`manual_bounds` to learn expression and bound APIs.
-- Continue with {doc}`interpreter_mlp` to verify an `nn.Sequential` model.
+- Continue with {doc}`interpreter_mlp` to verify an exported MLP graph.
 - Use {doc}`softmax_attention` for transformer-style operations (`matmul`, `softmax`).
 - Use {doc}`vnn_to_onnx` to export a BoundLab verification pipeline to ONNX.

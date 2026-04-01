@@ -330,8 +330,11 @@ class SumOp(LinearOp):
         return SumOp(*(op.sum_output() for op in self.ops))
     
     def jacobian(self):
-        return sum(op.jacobian() for op in self.ops)
-        
+        jacs = [op.jacobian() for op in self.ops]
+        if any(j is NotImplemented for j in jacs):
+            return NotImplemented
+        return sum(jacs)
+
 
 class ScalarOp(LinearOp):
     """A LinearOp that scales its input by a scalar factor."""

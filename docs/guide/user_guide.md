@@ -53,25 +53,32 @@ print("max width:", (ub - lb).max().item())
 
 ### Zonotope Interpreter (`boundlab.zono.interpret`)
 
-`zono.interpret(model)` returns a callable that maps input expressions to output expressions.
+`zono.interpret(program_or_graph_module)` returns a callable that maps input
+expressions to output expressions. Interpreters accept
+`torch.export.ExportedProgram` or `torch.fx.GraphModule` inputs, not raw
+`nn.Module`.
 
 ```python
+import torch
 from torch import nn
 import boundlab.zono as zono
 
 model = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4))
-op = zono.interpret(model)
+exported = torch.export.export(model, (torch.randn(8),))
+op = zono.interpret(exported)
 y = op(x)
 ub, lb = y.ublb()
 ```
 
-Under the hood, BoundLab traces your model using `torch.fx` and dispatches each operation to registered handlers.
+Under the hood, BoundLab dispatches each operation in the exported/FX graph to
+registered handlers.
 
 ## Working Patterns
 
-### Pattern 1: Module-level interpretation (recommended)
+### Pattern 1: Exported-program interpretation (recommended)
 
-Use `zono.interpret(model)` for end-to-end model flows. This is the simplest way to get started.
+Use `zono.interpret(exported_program)` for end-to-end model flows. This is the
+simplest way to get started.
 
 ```python
 import torch
@@ -82,7 +89,8 @@ import boundlab.zono as zono
 model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
 x = expr.ConstVal(torch.randn(4)) + 0.1 * expr.LpEpsilon([4])
 
-op = zono.interpret(model)
+exported = torch.export.export(model, (torch.randn(4),))
+op = zono.interpret(exported)
 y = op(x)
 ub, lb = y.ublb()
 ```

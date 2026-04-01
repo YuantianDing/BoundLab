@@ -2,23 +2,25 @@
 
 This page explains how zonotope interpretation works for neural network architectures.
 
-## `zono.interpret(model)`
+## `zono.interpret(program_or_graph_module)`
 
 `boundlab.zono.interpret` is an `Interpreter` configured with zonotope handlers.
+It accepts exported IR (`torch.export.ExportedProgram`) or
+`torch.fx.GraphModule` inputs, not raw `nn.Module`.
 
 Usage:
 
 ```python
 import boundlab.zono as zono
 
-op = zono.interpret(model)
+op = zono.interpret(program_or_graph_module)
 y_expr = op(x_expr)
 ub, lb = y_expr.ublb()
 ```
 
 Workflow:
 
-1. Trace model graph (`torch.fx` for `nn.Module`).
+1. Prepare exported/FX graph IR from your model.
 2. Dispatch each node by op name/module/method.
 3. Build output expression(s) in the zonotope abstract domain.
 
@@ -81,7 +83,8 @@ import boundlab.zono as zono
 model = nn.Sequential(nn.Linear(4, 6), nn.ReLU(), nn.Linear(6, 3))
 x = expr.ConstVal(torch.randn(4)) + 0.1 * expr.LpEpsilon([4])
 
-op = zono.interpret(model)
+exported = torch.export.export(model, (torch.randn(4),))
+op = zono.interpret(exported)
 y = op(x)
 ub, lb = y.ublb()
 ```

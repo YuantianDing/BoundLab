@@ -35,7 +35,8 @@ seq_len, d_model = 2, 3
 x_center = torch.randn(seq_len, d_model) * 0.2
 x = expr.ConstVal(x_center) + 0.05 * expr.LpEpsilon([seq_len, d_model])
 
-op = zono.interpret(model)
+exported = torch.export.export(model, (x_center,))
+op = zono.interpret(exported)
 y = op(x)
 ub, lb = y.ublb()
 

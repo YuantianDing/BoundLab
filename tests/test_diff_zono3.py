@@ -1,12 +1,16 @@
 """Tests for boundlab.diff.zono3 – differential zonotope verification.
 
 For soundness tests we:
-1. Build a triple ``(x, y, d)`` where x and y use independent epsilon symbols
-   and ``d = x - y``.
+1. Build a DiffExpr3 ``(x, y, d)`` where x and y use independent epsilon
+   symbols and ``d = x - y``.
 2. Run the triple through the network via ``diff.zono3.interpret``.
 3. Sample many concrete pairs ``(s1, s2)`` from the L∞ perturbation balls.
 4. Assert every concrete difference ``f(s1) - f(s2)`` lies within the computed
    bounds of the output diff component.
+
+Models are exported via ``torch.export.export`` before
+being passed to the interpreters, so all ``nn.Linear`` submodules are lowered
+to ``aten.linear.default`` call_function nodes.
 """
 
 import torch
@@ -15,7 +19,13 @@ from torch import nn
 
 import boundlab.expr as expr
 import boundlab.zono as zono
+from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
+
+
+def _export(model: nn.Module, in_shape: list[int]):
+    """Export *model* to a ``torch.export.ExportedProgram``."""
+    return torch.export.export(model, (torch.zeros(in_shape),))
 
 
 # =====================================================================
@@ -28,11 +38,11 @@ def _zonotope(center: torch.Tensor, scale: float = 1.0) -> expr.Expr:
     return expr.Add(expr.ConstVal(center), torch.full_like(center, scale) * e)
 
 
-def _make_triple(c1: torch.Tensor, c2: torch.Tensor, scale: float = 1.0):
-    """Triple ``(x, y, x-y)`` with independent eps for each input."""
+def _make_triple(c1: torch.Tensor, c2: torch.Tensor, scale: float = 1.0) -> DiffExpr3:
+    """DiffExpr3 ``(x, y, x-y)`` with independent eps for each input."""
     x = _zonotope(c1, scale)
     y = _zonotope(c2, scale)
-    return x, y, x - y
+    return DiffExpr3(x, y, x - y)
 
 
 def _sample_pairs(c1: torch.Tensor, c2: torch.Tensor, n: int = 2000, scale: float = 1.0):
@@ -86,10 +96,10 @@ def test_linear_diff_sound():
     b = torch.randn(3)
     c1, c2 = torch.randn(4), torch.randn(4)
 
-    x, y, d = _make_triple(c1, c2)
-    x_new = W @ x + expr.ConstVal(b)
-    y_new = W @ y + expr.ConstVal(b)
-    d_new = W @ d  # bias cancels
+    triple = _make_triple(c1, c2)
+    x_new = W @ triple.x + expr.ConstVal(b)
+    y_new = W @ triple.y + expr.ConstVal(b)
+    d_new = W @ triple.diff  # bias cancels
 
     s1, s2 = _sample_pairs(c1, c2)
     diffs = s1 @ W.T - s2 @ W.T  # bias cancels in difference
@@ -102,8 +112,8 @@ def test_linear_diff_exact():
     W = torch.randn(3, 4)
     c1, c2 = torch.randn(4), torch.randn(4)
 
-    x, y, d = _make_triple(c1, c2)
-    d_new = W @ d
+    triple = _make_triple(c1, c2)
+    d_new = W @ triple.diff
 
     d_ub, d_lb = d_new.ublb()
     delta = c1 - c2
@@ -120,13 +130,11 @@ def test_add_const_cancels_in_diff():
     c1, c2 = torch.randn(4), torch.randn(4)
     const = torch.randn(4)
 
-    x, y, d = _make_triple(c1, c2)
-    x_shifted = x + expr.ConstVal(const)
-    y_shifted = y + expr.ConstVal(const)
-    d_shifted = d  # diff unchanged
+    triple = _make_triple(c1, c2)
+    shifted = triple + expr.ConstVal(const)
 
-    d_ub_before, d_lb_before = d.ublb()
-    d_ub_after, d_lb_after = d_shifted.ublb()
+    d_ub_before, d_lb_before = triple.diff.ublb()
+    d_ub_after, d_lb_after = shifted.diff.ublb()
     assert torch.allclose(d_ub_before, d_ub_after, atol=1e-6)
     assert torch.allclose(d_lb_before, d_lb_after, atol=1e-6)
 
@@ -151,8 +159,8 @@ def test_relu_diff_dead_dead_is_zero():
     y = _const_zonotope(-3.0, 0.5)   # y ∈ [-3.5, -2.5] → dead
     d = x - y
 
-    _, _, d_new = _relu_diff_handler((x, y, d))
-    d_ub, d_lb = d_new.ublb()
+    out = _relu_diff_handler(DiffExpr3(x, y, d))
+    d_ub, d_lb = out.diff.ublb()
     assert torch.allclose(d_ub, torch.zeros(1), atol=1e-6)
     assert torch.allclose(d_lb, torch.zeros(1), atol=1e-6)
 
@@ -163,11 +171,11 @@ def test_relu_diff_active_active_passthrough():
     y = _const_zonotope(1.0, 0.5)   # y ∈ [0.5, 1.5] → active
     d = x - y
 
-    _, _, d_new = _relu_diff_handler((x, y, d))
+    out = _relu_diff_handler(DiffExpr3(x, y, d))
 
     # d_new should equal d; check bounds match
     d_ub_orig, d_lb_orig = d.ublb()
-    d_ub_new, d_lb_new = d_new.ublb()
+    d_ub_new, d_lb_new = out.diff.ublb()
     assert torch.allclose(d_ub_new, d_ub_orig, atol=1e-5)
     assert torch.allclose(d_lb_new, d_lb_orig, atol=1e-5)
 
@@ -176,13 +184,13 @@ def test_relu_diff_active_dead():
     """Case 3 (active, dead): relu(x) - relu(y) = x."""
     x = _const_zonotope(2.0, 0.5)   # active
     y = _const_zonotope(-2.0, 0.5)  # dead
-    d = x - y  # diff (not directly used for output, x is)
+    d = x - y
 
-    _, _, d_new = _relu_diff_handler((x, y, d))
+    out = _relu_diff_handler(DiffExpr3(x, y, d))
 
     # d_new should have same bounds as x
     x_ub, x_lb = x.ublb()
-    d_ub, d_lb = d_new.ublb()
+    d_ub, d_lb = out.diff.ublb()
     assert torch.allclose(d_ub, x_ub, atol=1e-5)
     assert torch.allclose(d_lb, x_lb, atol=1e-5)
 
@@ -193,11 +201,11 @@ def test_relu_diff_dead_active():
     y = _const_zonotope(2.0, 0.5)   # active
     d = x - y
 
-    _, _, d_new = _relu_diff_handler((x, y, d))
+    out = _relu_diff_handler(DiffExpr3(x, y, d))
 
     # d_new should have same bounds as -y
     y_ub, y_lb = y.ublb()
-    d_ub, d_lb = d_new.ublb()
+    d_ub, d_lb = out.diff.ublb()
     assert torch.allclose(d_ub, -y_lb, atol=1e-5)
     assert torch.allclose(d_lb, -y_ub, atol=1e-5)
 
@@ -211,12 +219,12 @@ def test_relu_diff_crossing_sound(seed: int):
     c2 = torch.rand(n) * 0.4 - 0.2
     scale = 0.8  # ensures crossing for most neurons
 
-    x, y, d = _make_triple(c1, c2, scale)
-    _, _, d_new = _relu_diff_handler((x, y, d))
+    triple = _make_triple(c1, c2, scale)
+    out = _relu_diff_handler(triple)
 
     s1, s2 = _sample_pairs(c1, c2, scale=scale, n=3000)
     diffs = torch.relu(s1) - torch.relu(s2)
-    _check_d_sound(d_new, diffs)
+    _check_d_sound(out.diff, diffs)
 
 
 # =====================================================================
@@ -229,14 +237,14 @@ def test_interpreter_linear_diff_sound():
     model = nn.Linear(4, 3)
     c1, c2 = torch.randn(4), torch.randn(4)
 
-    op = diff_interpret(model)
-    x, y, d = _make_triple(c1, c2)
-    _, _, d_out = op((x, y, d))
+    op = diff_interpret(_export(model, [4]))
+    triple = _make_triple(c1, c2)
+    out = op(triple)
 
     s1, s2 = _sample_pairs(c1, c2)
     with torch.no_grad():
         diffs = model(s1) - model(s2)
-    _check_d_sound(d_out, diffs)
+    _check_d_sound(out.diff, diffs)
 
 
 def test_interpreter_relu_mlp_diff_sound():
@@ -245,14 +253,14 @@ def test_interpreter_relu_mlp_diff_sound():
     model = nn.Sequential(nn.Linear(4, 5), nn.ReLU(), nn.Linear(5, 3))
     c1, c2 = torch.randn(4), torch.randn(4)
 
-    op = diff_interpret(model)
-    x, y, d = _make_triple(c1, c2)
-    _, _, d_out = op((x, y, d))
+    op = diff_interpret(_export(model, [4]))
+    triple = _make_triple(c1, c2)
+    out = op(triple)
 
     s1, s2 = _sample_pairs(c1, c2)
     with torch.no_grad():
         diffs = model(s1) - model(s2)
-    _check_d_sound(d_out, diffs)
+    _check_d_sound(out.diff, diffs)
 
 
 @pytest.mark.parametrize("seed", [30, 31, 32])
@@ -267,14 +275,14 @@ def test_interpreter_deep_mlp_diff_sound(seed: int):
     )
     c1, c2 = torch.randn(5), torch.randn(5)
 
-    op = diff_interpret(model)
-    x, y, d = _make_triple(c1, c2)
-    _, _, d_out = op((x, y, d))
+    op = diff_interpret(_export(model, [5]))
+    triple = _make_triple(c1, c2)
+    out = op(triple)
 
     s1, s2 = _sample_pairs(c1, c2, n=2500)
     with torch.no_grad():
         diffs = model(s1) - model(s2)
-    _check_d_sound(d_out, diffs, tol=2e-5)
+    _check_d_sound(out.diff, diffs, tol=2e-5)
 
 
 def test_diff_tighter_than_independent():
@@ -286,6 +294,7 @@ def test_diff_tighter_than_independent():
     """
     torch.manual_seed(40)
     model = nn.Sequential(nn.Linear(4, 5), nn.ReLU(), nn.Linear(5, 3))
+    gm = _export(model, [4])
 
     c1 = torch.randn(4)
     c2 = c1 + 0.2 * torch.randn(4)  # nearby center
@@ -296,12 +305,12 @@ def test_diff_tighter_than_independent():
     y = expr.Add(expr.ConstVal(c2), shared_eps)
     d = x - y  # = ConstVal(c1 - c2), shared noise cancels exactly
 
-    op_diff = diff_interpret(model)
-    _, _, d_out = op_diff((x, y, d))
-    diff_width = d_out.ub() - d_out.lb()
+    op_diff = diff_interpret(gm)
+    out = op_diff(DiffExpr3(x, y, d))
+    diff_width = out.diff.ub() - out.diff.lb()
 
     # Naive: treat x and y as independent zonotopes, subtract bound intervals
-    op_std = zono.interpret(model)
+    op_std = zono.interpret(gm)
     y1 = op_std(expr.Add(expr.ConstVal(c1), expr.LpEpsilon([4])))
     y2 = op_std(expr.Add(expr.ConstVal(c2), expr.LpEpsilon([4])))
     naive_width = (y1.ub() - y2.lb()) - (y1.lb() - y2.ub())
@@ -312,22 +321,20 @@ def test_diff_tighter_than_independent():
 
 
 # =====================================================================
-# Fallback: non-triple input uses standard interpreter
+# Fallback: non-DiffExpr3 input uses standard interpreter
 # =====================================================================
 
 def test_fallback_linear_matches_std():
     """Plain Expr through diff interpreter matches standard zono interpreter."""
     torch.manual_seed(50)
     model = nn.Linear(4, 3)
+    gm = _export(model, [4])
     c = torch.randn(4)
     e = expr.LpEpsilon([4])
     x = expr.Add(expr.ConstVal(c), e)
 
-    op_diff = diff_interpret(model)
-    op_std = zono.interpret(model)
-
-    y_diff = op_diff(x)
-    y_std = op_std(x)
+    y_diff = diff_interpret(gm)(x)
+    y_std = zono.interpret(gm)(x)
 
     assert torch.allclose(y_diff.ub(), y_std.ub(), atol=1e-6)
     assert torch.allclose(y_diff.lb(), y_std.lb(), atol=1e-6)
@@ -337,15 +344,13 @@ def test_fallback_relu_mlp_matches_std():
     """Plain Expr through diff ReLU MLP matches standard zono interpreter."""
     torch.manual_seed(51)
     model = nn.Sequential(nn.Linear(4, 5), nn.ReLU(), nn.Linear(5, 3))
+    gm = _export(model, [4])
     c = torch.randn(4)
     e = expr.LpEpsilon([4])
     x = expr.Add(expr.ConstVal(c), e)
 
-    op_diff = diff_interpret(model)
-    op_std = zono.interpret(model)
-
-    y_diff = op_diff(x)
-    y_std = op_std(x)
+    y_diff = diff_interpret(gm)(x)
+    y_std = zono.interpret(gm)(x)
 
     assert torch.allclose(y_diff.ub(), y_std.ub(), atol=1e-5)
     assert torch.allclose(y_diff.lb(), y_std.lb(), atol=1e-5)
