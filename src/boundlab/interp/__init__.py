@@ -48,7 +48,7 @@ class Interpreter(Generic[E]):
 
     def __call__(
         self, model: torch.export.ExportedProgram | torch.fx.GraphModule
-    ) -> Callable[..., E | tuple[E, ...]]:
+    ) -> Callable[..., E]:
         """Build an expression-level interpreter for an exported model.
 
         Parameters

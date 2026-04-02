@@ -41,7 +41,7 @@ op = diff_interpret(exported)
 c = torch.randn(4)
 x = expr.ConstVal(c) + 0.1 * expr.LpEpsilon([4])
 
-out = op(x, x)   # DiffLinear takes one concrete input; pass it twice
+out = op(x)
 
 # After ReLU the output is promoted to DiffExpr3.
 assert isinstance(out, DiffExpr3)
@@ -193,7 +193,7 @@ op = diff_interpret(exported)
 
 c = torch.randn(6)
 x = expr.ConstVal(c) + 0.3 * expr.LpEpsilon([6])
-out = op(x, x)
+out = op(x)
 d_ub, d_lb = out.diff.ublb()
 
 s = c + 0.3 * (torch.rand(3000, 6) * 2 - 1)

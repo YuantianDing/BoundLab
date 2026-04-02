@@ -485,7 +485,7 @@ def test_diff_linear_same_weights_diff_is_zero():
 
     c = torch.randn(4)
     x = _zonotope(c)
-    out = op(x, x)
+    out = op(x)
     assert isinstance(out, DiffExpr2)
     # Concrete diff f1(s) - f2(s) is always zero since weights are identical.
     # The zonotope bound of out.x - out.y may not be tight (that's what DiffExpr3 is for),
@@ -507,7 +507,7 @@ def test_diff_linear_diff_sound():
 
     c = torch.randn(4)
     x = _zonotope(c)
-    out = op(x, x)
+    out = op(x)
     assert isinstance(out, DiffExpr2)
 
     d = out.x - out.y
@@ -528,7 +528,7 @@ def test_diff_linear_width_less_than_independent():
 
     c = torch.randn(4)
     z = _zonotope(c)
-    out = op(z, z)
+    out = op(z)
     paired_width = (out.x - out.y).bound_width()
 
     # Naive: bound each output independently
@@ -552,7 +552,7 @@ def test_diff_linear_relu_sound():
 
     c = torch.randn(5)
     z = _zonotope(c)
-    out = op(z, z)
+    out = op(z)
     # After ReLU the DiffExpr2 should be promoted to DiffExpr3
     assert isinstance(out, DiffExpr3)
 
@@ -573,7 +573,7 @@ def test_diff_linear_full_mlp_sound():
 
     c = torch.randn(4)
     z = _zonotope(c)
-    out = op(z, z)
+    out = op(z)
     assert isinstance(out, DiffExpr3)
 
     s = c + (torch.rand(2000, 4) * 2 - 1)
@@ -594,7 +594,7 @@ def test_diff_linear_parametric_sound(seed: int):
 
     c = torch.randn(6)
     z = _zonotope(c, scale=0.5)
-    out = op(z, z)
+    out = op(z)
 
     s = c + (torch.rand(2000, 6) * 2 - 1) * 0.5
     with torch.no_grad():
@@ -812,7 +812,7 @@ def test_multi_diff_linear_chain_sound():
 
     c = torch.randn(5)
     z = _zonotope(c, scale=0.3)
-    out = op(z, z)
+    out = op(z)
     # After ReLU following DiffLinear the output is promoted to DiffExpr3
     assert isinstance(out, DiffExpr3)
 
@@ -845,7 +845,7 @@ def test_multi_diff_linear_chain_tighter_than_naive():
 
     c = torch.randn(4)
     z = _zonotope(c, scale=0.5)
-    out = op(z, z)
+    out = op(z)
     assert isinstance(out, DiffExpr3)
     paired_width = out.diff.bound_width()
 
@@ -922,7 +922,7 @@ def test_diff_linear_deep_relu_sound():
 
     c = torch.randn(5)
     z = _zonotope(c, scale=0.2)
-    out = op(z, z)
+    out = op(z)
     assert isinstance(out, DiffExpr3)
 
     s = c + (torch.rand(1500, 5) * 2 - 1) * 0.2
@@ -1072,7 +1072,7 @@ def test_diff_linear_bias_difference_only():
 
     c = torch.randn(4)
     z = _zonotope(c)
-    out = op(z, z)
+    out = op(z)
     assert isinstance(out, DiffExpr2)
 
     # The concrete diff f1(s) - f2(s) = b1 - b2 for any input s.
@@ -1137,7 +1137,7 @@ def test_diff_linear_different_output_sizes_same_width():
 
     c = torch.randn(4)
     z = _zonotope(c, scale=0.5)
-    out = op(z, z)
+    out = op(z)
     assert isinstance(out, DiffExpr3)
 
     d_ub, d_lb = out.diff.ublb()
