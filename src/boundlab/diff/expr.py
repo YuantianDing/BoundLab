@@ -147,9 +147,6 @@ class DiffExpr2:
     # ------------------------------------------------------------------
 
     def __getitem__(self, indices):
-        # Plain int: tuple-unpacking (e.g. from getitem nodes in torch.export graph).
-        if isinstance(indices, int):
-            return (self.x, self.y)[indices]
         return DiffExpr2(self.x[indices], self.y[indices])
 
     def scatter(self, indices, output_shape):
@@ -422,3 +419,5 @@ class DiffExpr3:
 
     def diag(self, diagonal=0):
         return self._map_all(lambda e: e.diag(diagonal))
+
+__all__ = ["DiffExpr2", "DiffExpr3"]

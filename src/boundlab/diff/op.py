@@ -27,10 +27,10 @@ _lib.define("diff_pair(Tensor x, Tensor y) -> Tensor")
 _lib.impl("diff_pair", lambda x, _: x, "CPU")
 _lib.impl("diff_pair", lambda x, _: x, "CUDA")
 
-# Shape/dtype inference for torch.export tracing (torch 2.x)
-torch.library.impl_abstract("boundlab::diff_pair")(
-    lambda x, _: torch.empty_like(x)
-)
+# Shape/dtype inference for torch.export tracing.
+# `register_fake` is the current API; fall back to the legacy `impl_abstract`.
+_register_fake = getattr(torch.library, "register_fake", torch.library.impl_abstract)
+_register_fake("boundlab::diff_pair")(lambda x, _: torch.empty_like(x))
 
 
 # =====================================================================
@@ -82,6 +82,52 @@ def diff_pair(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 
 # =====================================================================
+# DiffLinear
+# =====================================================================
+
+import torch.nn as nn
+
+
+class DiffLinear(nn.Module):
+    """Two parallel linear layers whose outputs are paired via :func:`diff_pair`.
+
+    At the concrete-tensor level this is equivalent to running ``fc1(x)``
+    (``fc2``'s output is discarded at runtime via the ``diff_pair`` no-op).
+    When the model is exported and interpreted by the differential interpreter
+    (e.g. :data:`boundlab.diff.zono3.interpret`), the ``diff_pair`` node is
+    lifted into a :class:`~boundlab.diff.expr.DiffExpr2` that tracks both
+    branches simultaneously.
+
+    Args:
+        fc1: First linear layer.
+        fc2: Second linear layer; must have the same ``in_features``,
+             ``out_features``, and dtype as ``fc1``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from torch import nn
+    >>> from boundlab.diff.op import DiffLinear
+    >>> fc1 = nn.Linear(4, 3)
+    >>> fc2 = nn.Linear(4, 3)
+    >>> model = DiffLinear(fc1, fc2)
+    >>> out = model(torch.zeros(4))
+    >>> out.shape
+    torch.Size([3])
+    """
+
+    def __init__(self, fc1: nn.Linear, fc2: nn.Linear):
+        super().__init__()
+        assert fc1.in_features == fc2.in_features, "fc1 and fc2 must share in_features"
+        assert fc1.out_features == fc2.out_features, "fc1 and fc2 must share out_features"
+        self.fc1 = fc1
+        self.fc2 = fc2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return diff_pair(self.fc1(x), self.fc2(x))
+
+
+# =====================================================================
 # Interpreter handler (used by boundlab.diff.zono3.interpret)
 # =====================================================================
 
@@ -92,3 +138,5 @@ def diff_pair_handler(x, y) -> DiffExpr2:
     imported.
     """
     return DiffExpr2(x, y)
+
+__all__ = ["diff_pair", "DiffLinear"]
