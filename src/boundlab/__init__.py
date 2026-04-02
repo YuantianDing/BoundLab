@@ -27,4 +27,4 @@ __all__ = [
     "utils",
 ]
 
-from boundlab import expr, prop, zono, utils, poly, interp
+from boundlab import expr, prop, zono, utils, poly, interp, diff

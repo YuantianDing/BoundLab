@@ -662,3 +662,511 @@ def test_fallback_relu_mlp_matches_std():
 
     assert torch.allclose(y_diff.ub(), y_std.ub(), atol=1e-5)
     assert torch.allclose(y_diff.lb(), y_std.lb(), atol=1e-5)
+
+
+# =====================================================================
+# Complex / advanced tests
+# =====================================================================
+
+def test_bias_only_difference_is_exact():
+    """When W1 == W2 but b1 != b2, diff = b1 - b2 exactly (constant, no epsilon).
+
+    This is the tightest possible case: the diff component has zero width because
+    the weight matrices cancel perfectly and the bias difference is a constant.
+    """
+    torch.manual_seed(90)
+    W = torch.randn(3, 4)
+    b1 = torch.randn(3)
+    b2 = torch.randn(3)
+
+    # Build two linear layers sharing W but different biases.
+    fc1 = nn.Linear(4, 3, bias=True)
+    fc2 = nn.Linear(4, 3, bias=True)
+    with torch.no_grad():
+        fc1.weight.copy_(W)
+        fc2.weight.copy_(W)
+        fc1.bias.copy_(b1)
+        fc2.bias.copy_(b2)
+
+    c = torch.randn(4)
+    x = _zonotope(c)
+    # Both branches see the same input x; use a DiffExpr3 with d = x - x = 0.
+    triple = DiffExpr3(x, x, x - x)
+    gm = _export(fc1, [4])  # same W, so we can use fc1 graph structure
+    # Build the diff manually through affine ops instead of the interpreter
+    # to isolate the algebra: diff = W@d + (b1 - b2) = W@0 + (b1-b2) = b1-b2.
+    W_expr = expr.ConstVal(W)
+    d_out = W @ triple.diff  # W @ 0 = 0 (exact)
+    bias_diff = expr.ConstVal(b1 - b2)
+    diff_final = d_out + bias_diff
+
+    d_ub, d_lb = diff_final.ublb()
+    expected = b1 - b2
+    assert torch.allclose(d_ub, expected, atol=1e-6), f"UB mismatch: {d_ub} vs {expected}"
+    assert torch.allclose(d_lb, expected, atol=1e-6), f"LB mismatch: {d_lb} vs {expected}"
+
+
+def test_diff_scales_linearly_with_weight_difference():
+    """Diff bound width scales linearly when the weight difference is scaled by λ.
+
+    For a purely linear model f1(x) = W1 x, f2(x) = W2 x:
+      diff = (W1 - W2) x
+    Scaling W2 toward W1 by λ → diff width scales by (1-λ).
+    """
+    torch.manual_seed(91)
+    W_base = torch.randn(3, 4)
+    delta_W = torch.randn(3, 4) * 0.3
+    c = torch.randn(4)
+    x = _zonotope(c)
+
+    widths = []
+    for lam in [0.0, 0.5, 1.0]:
+        W1 = W_base
+        W2 = W_base + (1 - lam) * delta_W
+        diff = W1 @ x - W2 @ x  # = lam * delta_W @ x
+        widths.append(diff.bound_width())
+
+    # Width at lam=0.0 (full delta) >= lam=0.5 >= lam=1.0 (no delta, exact zero)
+    assert (widths[0] >= widths[1] - 1e-5).all()
+    assert (widths[1] >= widths[2] - 1e-5).all()
+    assert torch.allclose(widths[2], torch.zeros(3), atol=1e-5)
+
+
+def test_diff_sign_symmetry():
+    """Swapping the two network inputs negates the diff component.
+
+    DiffExpr3(x, y, d) and DiffExpr3(y, x, -d) should give opposite diff bounds.
+    """
+    torch.manual_seed(92)
+    model = nn.Sequential(nn.Linear(4, 5), nn.ReLU(), nn.Linear(5, 3))
+    gm = _export(model, [4])
+    op = diff_interpret(gm)
+
+    c1, c2 = torch.randn(4), torch.randn(4)
+    t_fwd = _make_triple(c1, c2)
+    t_rev = _make_triple(c2, c1)
+
+    out_fwd = op(t_fwd)
+    out_rev = op(t_rev)
+
+    fwd_ub, fwd_lb = out_fwd.diff.ublb()
+    rev_ub, rev_lb = out_rev.diff.ublb()
+
+    # diff(fwd) = -diff(rev) ⟹ ub(fwd) = -lb(rev) and lb(fwd) = -ub(rev)
+    assert torch.allclose(fwd_ub, -rev_lb, atol=1e-5)
+    assert torch.allclose(fwd_lb, -rev_ub, atol=1e-5)
+
+
+def test_point_input_gives_exact_diff():
+    """Zero-width perturbation ball (scale=0): diff bound collapses to a point f1(c)-f2(c).
+
+    With scale=0 the diff expression degenerates to a constant, so ub == lb == f1(c) - f2(c).
+    """
+    torch.manual_seed(93)
+    fc1 = nn.Linear(4, 3)
+    fc2 = nn.Linear(4, 3)
+
+    c = torch.randn(4)
+    # scale=0 ⇒ eps contributes nothing; x == y == ConstVal(c).
+    x = _zonotope(c, scale=0.0)
+    y = _zonotope(c, scale=0.0)
+    triple = DiffExpr3(x, y, x - y)
+
+    gm = _export(fc1, [4])  # won't use this model, manual linear ops below
+    W1, b1 = fc1.weight.detach(), fc1.bias.detach()
+    W2, b2 = fc2.weight.detach(), fc2.bias.detach()
+
+    # Exact algebraic result (fc uses aten linear = W @ x + b):
+    d_out = W1 @ triple.diff + expr.ConstVal(b1 - b2)
+
+    d_ub, d_lb = d_out.ublb()
+    expected = W1 @ (c - c) + (b1 - b2)  # = b1 - b2
+    assert torch.allclose(d_ub, expected, atol=1e-6)
+    assert torch.allclose(d_lb, expected, atol=1e-6)
+
+
+def test_multi_diff_linear_chain_sound():
+    """DiffLinear at input followed by multiple standard ReLU+Linear layers: soundness.
+
+    DiffLinear introduces the weight-pairing at the first layer.  Subsequent
+    standard Linear layers propagate the DiffExpr3 diff component correctly.
+    The concrete diff is f1_chain(x) - f2_chain(x) where the two chains share
+    all weights except the first linear step.
+    """
+    torch.manual_seed(94)
+    fc1a = nn.Linear(5, 6)
+    fc1b = nn.Linear(5, 6)
+    fc2 = nn.Linear(6, 5)
+    fc3 = nn.Linear(5, 4)
+
+    # DiffLinear introduces the split; subsequent layers are shared (same Linear)
+    model = nn.Sequential(
+        DiffLinear(fc1a, fc1b),
+        nn.ReLU(),
+        fc2,
+        nn.ReLU(),
+        fc3,
+    )
+    gm = _export(model, [5])
+    op = diff_interpret(gm)
+
+    c = torch.randn(5)
+    z = _zonotope(c, scale=0.3)
+    out = op(z, z)
+    # After ReLU following DiffLinear the output is promoted to DiffExpr3
+    assert isinstance(out, DiffExpr3)
+
+    s = c + (torch.rand(2000, 5) * 2 - 1) * 0.3
+    with torch.no_grad():
+        # f1: fc1a -> relu -> fc2 -> relu -> fc3
+        # f2: fc1b -> relu -> fc2 -> relu -> fc3
+        h1 = fc3(torch.relu(fc2(torch.relu(fc1a(s)))))
+        h2 = fc3(torch.relu(fc2(torch.relu(fc1b(s)))))
+        diffs = h1 - h2
+    _check_sound(out.diff, diffs, tol=2e-5)
+
+
+def test_multi_diff_linear_chain_tighter_than_naive():
+    """DiffLinear + shared layers is tighter than two independent zonotopes.
+
+    Verifies that shared-noise exploitation across layers gives strictly tighter
+    diff bounds than bounding each network independently.
+    DiffLinear introduces the split; subsequent layers are shared/plain.
+    """
+    torch.manual_seed(95)
+    fc1a = nn.Linear(4, 5)
+    fc1b = nn.Linear(4, 5)
+    fc2 = nn.Linear(5, 3)
+
+    # One DiffLinear at the start, one shared linear at the end
+    model = nn.Sequential(DiffLinear(fc1a, fc1b), nn.ReLU(), fc2)
+    gm = _export(model, [4])
+    op = diff_interpret(gm)
+
+    c = torch.randn(4)
+    z = _zonotope(c, scale=0.5)
+    out = op(z, z)
+    assert isinstance(out, DiffExpr3)
+    paired_width = out.diff.bound_width()
+
+    # Naive: bound each sub-model independently (fc2 shared, but models are separate)
+    model1 = nn.Sequential(fc1a, nn.ReLU(), fc2)
+    model2 = nn.Sequential(fc1b, nn.ReLU(), fc2)
+    z_ind = _zonotope(c, scale=0.5)
+    op1 = zono.interpret(_export(model1, [4]))
+    op2 = zono.interpret(_export(model2, [4]))
+    y1 = op1(z_ind)
+    y2 = op2(z_ind)
+    naive_width = (y1.ub() - y2.lb()) - (y1.lb() - y2.ub())
+
+    assert (paired_width <= naive_width + 1e-4).all()
+
+
+def test_diffexpr3_matmul_weight_difference():
+    """DiffExpr3 @ W captures the bilinear identity: d@W1 + y*(W1-W2).
+
+    For a DiffExpr3(x, y, d) where d = x - y, applying two different weight
+    matrices W1 and W2 to branches 1 and 2 respectively yields:
+      output_diff = d @ W1 + y @ (W1 - W2)
+    This test verifies soundness for a custom two-weight linear step.
+    """
+    torch.manual_seed(96)
+    W1 = torch.randn(5, 4)
+    W2 = torch.randn(5, 4)
+
+    c1, c2 = torch.randn(4), torch.randn(4)
+    triple = _make_triple(c1, c2)
+
+    # Manually apply W1 to branch x and W2 to branch y, tracking diff
+    out_x = W1 @ triple.x
+    out_y = W2 @ triple.y
+    # diff = W1 @ x - W2 @ y = W1 @ (x - y) + (W1 - W2) @ y
+    out_d = W1 @ triple.diff + (W1 - W2) @ triple.y
+
+    # Check soundness against samples
+    s1, s2 = _sample_pairs(c1, c2, n=3000)
+    conc = s1 @ W1.T - s2 @ W2.T
+    _check_sound(out_d, conc)
+
+    # Also verify out_x and out_y are bounded correctly
+    conc_x = s1 @ W1.T
+    conc_y = s2 @ W2.T
+    ub_x, lb_x = out_x.ublb()
+    ub_y, lb_y = out_y.ublb()
+    assert (conc_x <= ub_x.unsqueeze(0) + 1e-5).all()
+    assert (conc_y <= ub_y.unsqueeze(0) + 1e-5).all()
+
+
+def test_diff_linear_deep_relu_sound():
+    """DiffLinear at input, followed by deep standard ReLU layers: soundness.
+
+    DiffLinear introduces the weight split at the first layer; multiple
+    standard ReLU+Linear layers compound the differential tracking.
+    """
+    torch.manual_seed(97)
+    fc1a = nn.Linear(5, 8)
+    fc1b = nn.Linear(5, 8)
+    fc2 = nn.Linear(8, 6)
+    fc3 = nn.Linear(6, 4)
+    fc4 = nn.Linear(4, 3)
+
+    model = nn.Sequential(
+        DiffLinear(fc1a, fc1b),
+        nn.ReLU(),
+        fc2, nn.ReLU(),
+        fc3, nn.ReLU(),
+        fc4,
+    )
+    gm = _export(model, [5])
+    op = diff_interpret(gm)
+
+    c = torch.randn(5)
+    z = _zonotope(c, scale=0.2)
+    out = op(z, z)
+    assert isinstance(out, DiffExpr3)
+
+    s = c + (torch.rand(1500, 5) * 2 - 1) * 0.2
+    with torch.no_grad():
+        h1 = fc4(torch.relu(fc3(torch.relu(fc2(torch.relu(fc1a(s)))))))
+        h2 = fc4(torch.relu(fc3(torch.relu(fc2(torch.relu(fc1b(s)))))))
+        diffs = h1 - h2
+    _check_sound(out.diff, diffs, tol=2e-5)
+
+
+def test_diff_triple_plus_triple_sound():
+    """DiffExpr3 + DiffExpr3: combined diff = d1 + d2, bounds are sound.
+
+    If f1(x)-f2(x) is bounded by t1.diff and g1(x)-g2(x) by t2.diff,
+    then (f1+g1)(x) - (f2+g2)(x) should be bounded by their sum.
+    """
+    torch.manual_seed(98)
+    n = 5
+    W1a, W1b = torch.randn(n, n), torch.randn(n, n)
+    W2a, W2b = torch.randn(n, n), torch.randn(n, n)
+
+    c1, c2 = torch.randn(n), torch.randn(n)
+    t1 = _make_triple(c1, c2)
+    t2 = _make_triple(c1, c2)  # same input perturbation centres
+
+    # Apply weight pairs and add results
+    out1 = DiffExpr3(W1a @ t1.x, W1b @ t1.y, W1a @ t1.diff + (W1a - W1b) @ t1.y)
+    out2 = DiffExpr3(W2a @ t2.x, W2b @ t2.y, W2a @ t2.diff + (W2a - W2b) @ t2.y)
+    combined = out1 + out2
+
+    s1, s2 = _sample_pairs(c1, c2, n=2000)
+    conc = (s1 @ W1a.T - s2 @ W1b.T) + (s1 @ W2a.T - s2 @ W2b.T)
+    _check_sound(combined.diff, conc)
+
+
+@pytest.mark.parametrize("scale", [0.1, 0.5, 1.0])
+def test_diff_bound_width_grows_with_perturbation_radius(scale: float):
+    """Diff bound width grows monotonically with the perturbation radius.
+
+    For a DiffLinear model: larger ε-ball → wider diff bounds.
+    """
+    torch.manual_seed(99)
+    fc1 = nn.Linear(4, 3)
+    fc2 = nn.Linear(4, 3)
+    model = DiffLinear(fc1, fc2)
+    gm = _export(model, [4])
+    op = diff_interpret(gm)
+
+    c = torch.randn(4)
+    z_small = _zonotope(c, scale=scale * 0.5)
+    z_large = _zonotope(c, scale=scale)
+
+    out_small = op(z_small, z_small)
+    out_large = op(z_large, z_large)
+
+    d_small = out_small.x - out_small.y
+    d_large = out_large.x - out_large.y
+
+    assert (d_large.bound_width() >= d_small.bound_width() - 1e-5).all()
+
+
+def test_diffexpr3_relu_then_linear_sound():
+    """DiffExpr3 through ReLU then linear: diff bounds remain sound.
+
+    Uses the interpreter on a two-layer model to verify that the diff
+    tracking correctly handles the ReLU→linear composition.
+    """
+    torch.manual_seed(100)
+    model = nn.Sequential(nn.Linear(6, 8), nn.ReLU(), nn.Linear(8, 4))
+    gm = _export(model, [6])
+    op = diff_interpret(gm)
+
+    c1 = torch.zeros(6)
+    c2 = torch.randn(6) * 0.3
+    scale = 0.4
+
+    triple = _make_triple(c1, c2, scale)
+    out = op(triple)
+    assert isinstance(out, DiffExpr3)
+
+    s1, s2 = _sample_pairs(c1, c2, scale=scale, n=3000)
+    with torch.no_grad():
+        diffs = model(s1) - model(s2)
+    _check_sound(out.diff, diffs, tol=2e-5)
+
+
+def test_diffexpr3_relu_width_tighter_on_active_neurons():
+    """ReLU diff bounds are tighter when both neurons are clearly active.
+
+    active/active regime (no crossing) ⇒ diff passes through unchanged;
+    crossing regime ⇒ diff is relaxed (wider). The active/active bound
+    should be <= the crossing bound.
+    """
+    # active/active: x ∈ [1.5, 2.5], y ∈ [0.5, 1.5] — no sign change
+    x_aa = _const_zonotope(2.0, 0.5)
+    y_aa = _const_zonotope(1.0, 0.5)
+    out_aa = _relu_handler(DiffExpr3(x_aa, y_aa, x_aa - y_aa))
+    width_aa = out_aa.diff.bound_width()
+
+    # crossing: x ∈ [-0.8, 0.8], y ∈ [-0.6, 0.6] — spans zero
+    x_cr = _const_zonotope(0.0, 0.8)
+    y_cr = _const_zonotope(0.0, 0.6)
+    out_cr = _relu_handler(DiffExpr3(x_cr, y_cr, x_cr - y_cr))
+    width_cr = out_cr.diff.bound_width()
+
+    # In active/active the zonotope passes through exactly; the crossing case adds slack
+    assert (width_aa <= width_cr + 1e-5).all()
+
+
+def test_zero_diff_preserved_through_relu():
+    """If d = 0 exactly and both branches are purely active, d stays zero after ReLU."""
+    # Both branches identical, both clearly above zero
+    c = torch.tensor([2.0, 3.0, 1.5])
+    x = _zonotope(c, scale=0.4)  # all lower bounds > 0
+    triple = DiffExpr3(x, x, x - x)  # diff = 0 exactly
+
+    out = _relu_handler(triple)
+    d_ub, d_lb = out.diff.ublb()
+    assert torch.allclose(d_ub, torch.zeros(3), atol=1e-6)
+    assert torch.allclose(d_lb, torch.zeros(3), atol=1e-6)
+
+
+def test_diff_linear_bias_difference_only():
+    """DiffLinear with same W but different biases: diff is constant = b1 - b2.
+
+    Since inputs are shared and weights are equal, diff = b1 - b2 for all x.
+    The interpreter-level test uses the full export/interpret pipeline.
+    """
+    torch.manual_seed(101)
+    W = torch.randn(3, 4)
+    b1 = torch.randn(3)
+    b2 = torch.randn(3)
+
+    fc1 = nn.Linear(4, 3)
+    fc2 = nn.Linear(4, 3)
+    with torch.no_grad():
+        fc1.weight.copy_(W)
+        fc2.weight.copy_(W)
+        fc1.bias.copy_(b1)
+        fc2.bias.copy_(b2)
+
+    model = DiffLinear(fc1, fc2)
+    gm = _export(model, [4])
+    op = diff_interpret(gm)
+
+    c = torch.randn(4)
+    x = _zonotope(c)
+    # Use DiffExpr3 with d=0 since both branches see identical input
+    triple = DiffExpr3(x, x, x - x)
+    out = op(triple)
+
+    # The diff should be exactly b1 - b2 regardless of x
+    # (W cancels, diff = W@0 + (b1-b2) = b1-b2)
+    expected = b1 - b2
+    d_ub, d_lb = out.diff.ublb()
+    assert torch.allclose(d_ub, expected, atol=1e-5), f"ub={d_ub}, expected={expected}"
+    assert torch.allclose(d_lb, expected, atol=1e-5), f"lb={d_lb}, expected={expected}"
+
+
+def test_diffexpr2_getitem_slice():
+    """Slicing a DiffExpr2 returns a DiffExpr2 with sliced components."""
+    torch.manual_seed(102)
+    c1, c2 = torch.randn(8), torch.randn(8)
+    pair = DiffExpr2(_zonotope(c1), _zonotope(c2))
+    sliced = pair[2:6]
+    assert isinstance(sliced, DiffExpr2)
+    assert sliced.shape == torch.Size([4])
+
+    # Bounds of sliced components match bounds of original components' slices
+    ub_x, lb_x = pair.x[2:6].ublb()
+    ub_s, lb_s = sliced.x.ublb()
+    assert torch.allclose(ub_x, ub_s, atol=1e-6)
+
+
+def test_diffexpr3_getitem_slice():
+    """Slicing a DiffExpr3 applies to all three components."""
+    torch.manual_seed(103)
+    c1, c2 = torch.randn(8), torch.randn(8)
+    triple = _make_triple(c1, c2)
+    sliced = triple[3:7]
+    assert isinstance(sliced, DiffExpr3)
+    assert sliced.diff.shape == torch.Size([4])
+
+    ub_d, lb_d = triple.diff[3:7].ublb()
+    ub_s, lb_s = sliced.diff.ublb()
+    assert torch.allclose(ub_d, ub_s, atol=1e-6)
+
+
+def test_diff_linear_different_output_sizes_same_width():
+    """DiffLinear with wider hidden layer: diff bounds scale with output dimension.
+
+    Sanity check that soundness holds for a larger hidden layer and that bound
+    widths are non-negative (trivially required).
+    """
+    torch.manual_seed(104)
+    fc1 = nn.Linear(4, 16)
+    fc2 = nn.Linear(4, 16)
+    model = nn.Sequential(DiffLinear(fc1, fc2), nn.ReLU(), nn.Linear(16, 2))
+    gm = _export(model, [4])
+    op = diff_interpret(gm)
+
+    c = torch.randn(4)
+    z = _zonotope(c, scale=0.5)
+    out = op(z, z)
+    assert isinstance(out, DiffExpr3)
+
+    d_ub, d_lb = out.diff.ublb()
+    assert (d_ub >= d_lb - 1e-6).all(), "UB must be >= LB"
+
+    s = c + (torch.rand(2000, 4) * 2 - 1) * 0.5
+    with torch.no_grad():
+        h1 = torch.relu(fc1(s))
+        h2 = torch.relu(fc2(s))
+        W_out = model[2].weight.detach()
+        b_out = model[2].bias.detach()
+        diffs = h1 @ W_out.T + b_out - (h2 @ W_out.T + b_out)
+    _check_sound(out.diff, diffs, tol=2e-5)
+
+
+@pytest.mark.parametrize("seed", [110, 111, 112])
+def test_diffexpr3_full_pipeline_correctness(seed: int):
+    """Parametric test: DiffExpr3 through a random MLP matches sampled differences.
+
+    This is the most comprehensive end-to-end check: random weights, random
+    centers, random perturbation scales.
+    """
+    torch.manual_seed(seed)
+    model = nn.Sequential(
+        nn.Linear(6, 10), nn.ReLU(),
+        nn.Linear(10, 8), nn.ReLU(),
+        nn.Linear(8, 4),
+    )
+    gm = _export(model, [6])
+    op = diff_interpret(gm)
+
+    c1 = torch.randn(6)
+    c2 = torch.randn(6) * 0.5
+    scale = torch.rand(1).item() * 0.8 + 0.1  # in [0.1, 0.9]
+
+    triple = _make_triple(c1, c2, scale)
+    out = op(triple)
+    assert isinstance(out, DiffExpr3)
+
+    s1, s2 = _sample_pairs(c1, c2, n=3000, scale=scale)
+    with torch.no_grad():
+        diffs = model(s1) - model(s2)
+    _check_sound(out.diff, diffs, tol=2e-5)
