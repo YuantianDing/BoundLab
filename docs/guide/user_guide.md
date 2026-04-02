@@ -336,6 +336,55 @@ To add a new nonlinear operator in the zonotope domain:
 3. Add dispatcher entries for both function and module forms if needed.
 4. Add soundness tests (sample-based checks are a good baseline).
 
+## Differential Verification (`boundlab.diff.zono3`)
+
+Standard zonotope verification bounds each network independently and then
+subtracts the interval, which can be very loose when two networks are
+similar.  `boundlab.diff.zono3` tracks the triple `(x, y, diff)` jointly,
+exploiting shared input noise and cancellations in affine layers to get
+tighter bounds on `f₁(x) − f₂(x)`.
+
+### Quick example
+
+```python
+import torch
+from torch import nn
+
+import boundlab.expr as expr
+from boundlab.diff.expr import DiffExpr3
+from boundlab.diff.op import DiffLinear
+from boundlab.diff.zono3 import interpret as diff_interpret
+
+fc1, fc2 = nn.Linear(4, 8), nn.Linear(4, 8)
+model = nn.Sequential(DiffLinear(fc1, fc2), nn.ReLU(), nn.Linear(8, 3))
+exported = torch.export.export(model, (torch.randn(4),))
+op = diff_interpret(exported)
+
+c = torch.randn(4)
+x = expr.ConstVal(c) + 0.1 * expr.LpEpsilon([4])
+out = op(x, x)   # returns DiffExpr3 after the first ReLU
+
+d_ub, d_lb = out.diff.ublb()
+print("max |diff|:", d_ub.abs().max().item())
+```
+
+### Key types
+
+| Type | Purpose |
+|---|---|
+| `DiffExpr2(x, y)` | Pair of branches; produced by `diff_pair_handler`. |
+| `DiffExpr3(x, y, diff)` | Triple with explicit difference expression; output of nonlinear handlers. |
+| `DiffLinear(fc1, fc2)` | `nn.Module` that pairs two linear layers via `diff_pair`. |
+
+### Input options for `diff_interpret`
+
+- Pass a **`DiffExpr3`** directly when you have two separate zonotopes.
+- Pass **`DiffLinear`** in the model for a single shared-input scenario.
+- Pass a plain **`Expr`** to use `diff_interpret` as a drop-in replacement
+  for `zono.interpret` (identical results, no overhead).
+
+For a full explanation, see {doc}`diff_zono3_api`.
+
 ## Where To Go Next
 
 - See {doc}`../examples/index` for complete scripts.

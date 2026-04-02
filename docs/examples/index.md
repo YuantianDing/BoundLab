@@ -9,11 +9,13 @@ manual_bounds
 interpreter_mlp
 softmax_attention
 vnn_to_onnx
+diff_verification
 ```
 
 ## Choosing an Example
 
 - Start with {doc}`manual_bounds` to learn expression and bound APIs.
 - Continue with {doc}`interpreter_mlp` to verify an exported MLP graph.
-- Use {doc}`softmax_attention` for transformer-style operations (`matmul`, `softmax`).
-- Use {doc}`vnn_to_onnx` to export a BoundLab verification pipeline to ONNX.
+- {doc}`softmax_attention` covers transformer-style operations (`matmul`, `softmax`).
+- {doc}`vnn_to_onnx` shows how to export a BoundLab verification pipeline to ONNX.
+- {doc}`diff_verification` demonstrates certifying bounds on the *difference* between two networks.

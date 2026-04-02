@@ -12,4 +12,5 @@ expr_api
 linearop_api
 propagation_api
 zono_interpret_api
+diff_zono3_api
 ```
