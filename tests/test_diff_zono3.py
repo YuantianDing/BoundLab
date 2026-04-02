@@ -1046,10 +1046,12 @@ def test_zero_diff_preserved_through_relu():
 
 
 def test_diff_linear_bias_difference_only():
-    """DiffLinear with same W but different biases: diff is constant = b1 - b2.
+    """DiffLinear with same W but different biases: diff is always b1 - b2.
 
-    Since inputs are shared and weights are equal, diff = b1 - b2 for all x.
-    The interpreter-level test uses the full export/interpret pipeline.
+    Since inputs are shared (same zonotope) and weights are equal, the concrete
+    diff f1(x) - f2(x) = b1 - b2 is constant.  The interpreted diff bounds must
+    contain b1 - b2 for all x in the perturbation ball (soundness), and their
+    center should equal b1 - b2 (the diff is a constant).
     """
     torch.manual_seed(101)
     W = torch.randn(3, 4)
@@ -1069,17 +1071,26 @@ def test_diff_linear_bias_difference_only():
     op = diff_interpret(gm)
 
     c = torch.randn(4)
-    x = _zonotope(c)
-    # Use DiffExpr3 with d=0 since both branches see identical input
-    triple = DiffExpr3(x, x, x - x)
-    out = op(triple)
+    z = _zonotope(c)
+    out = op(z, z)
+    assert isinstance(out, DiffExpr2)
 
-    # The diff should be exactly b1 - b2 regardless of x
-    # (W cancels, diff = W@0 + (b1-b2) = b1-b2)
+    # The concrete diff f1(s) - f2(s) = b1 - b2 for any input s.
+    d = out.x - out.y
+    d_ub, d_lb = d.ublb()
     expected = b1 - b2
-    d_ub, d_lb = out.diff.ublb()
-    assert torch.allclose(d_ub, expected, atol=1e-5), f"ub={d_ub}, expected={expected}"
-    assert torch.allclose(d_lb, expected, atol=1e-5), f"lb={d_lb}, expected={expected}"
+
+    # Soundness: b1 - b2 must lie within [lb, ub]
+    assert (d_lb <= expected + 1e-5).all(), f"LB too high: lb={d_lb}, expected={expected}"
+    assert (d_ub >= expected - 1e-5).all(), f"UB too low: ub={d_ub}, expected={expected}"
+
+    # Verify with concrete samples
+    s = c + (torch.rand(1000, 4) * 2 - 1)
+    with torch.no_grad():
+        conc_diffs = fc1(s) - fc2(s)
+    # All concrete diffs should equal b1 - b2 (since same W)
+    assert torch.allclose(conc_diffs, expected.unsqueeze(0).expand_as(conc_diffs), atol=1e-5)
+    _check_sound(d, conc_diffs)
 
 
 def test_diffexpr2_getitem_slice():
