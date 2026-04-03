@@ -161,5 +161,7 @@ def matmul_handler(A, B):
         return A @ B  # Expr.__matmul__(Tensor)
     elif isinstance(A, torch.Tensor) and isinstance(B, Expr):
         return A @ B  # Tensor.__matmul__ → Expr.__rmatmul__(Tensor)
-    else:
+    elif isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor):
         return torch.matmul(A, B)
+    else:
+        return A @ B

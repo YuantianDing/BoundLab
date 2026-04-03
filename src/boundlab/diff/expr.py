@@ -8,20 +8,6 @@ from boundlab import expr
 from boundlab.expr._core import Expr
 
 
-def _const_value(e: Expr) -> torch.Tensor | None:
-    """Return the concrete tensor if *e* is a pure constant expression, else None.
-
-    Works for :class:`~boundlab.expr.ConstVal` and any :class:`~boundlab.expr.AffineSum`
-    that has no symbolic children.
-    """
-    assert isinstance(e, expr.AffineSum), "Expected an AffineSum or ConstVal"
-    children = getattr(e, "children", ())
-    constant = getattr(e, "constant", None)
-    if not children and constant is not None:
-        return constant
-    return None
-
-
 @dataclasses.dataclass
 class DiffExpr2:
     """A pair of expressions ``(x, y)`` for two-network differential tracking.
@@ -38,6 +24,14 @@ class DiffExpr2:
 
     def _map(self, fn):
         return DiffExpr2(fn(self.x), fn(self.y))
+    
+    def get_const(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        x = self.x.get_const()
+        if x is not None:
+            y = self.y.get_const()
+            if y is not None:
+                return x, y
+        return None
 
     # ------------------------------------------------------------------
     # Arithmetic
@@ -78,26 +72,22 @@ class DiffExpr2:
         if isinstance(other, (int, float, torch.Tensor)):
             return DiffExpr2(self.x * other, self.y * other)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
-                return DiffExpr2(self.x * v, self.y * v)
+            if t := other.get_const():
+                return DiffExpr2(self.x * t, self.y * t)
+            elif tensors := self.get_const():
+                return DiffExpr2(other * tensors[0], other * tensors[1])
         if isinstance(other, DiffExpr2):
-            vx, vy = _const_value(other.x), _const_value(other.y)
-            if vx is not None and vy is not None:
-                return DiffExpr2(self.x * vx, self.y * vy)
+            if tensors := self.get_const():
+                return DiffExpr2(other.x * tensors[0], other.y * tensors[1])
+            elif tensors := other.get_const():
+                return DiffExpr2(self.x * tensors[0], self.y * tensors[1])
         return NotImplemented
 
     def __rmul__(self, other):
         if isinstance(other, (int, float, torch.Tensor)):
             return DiffExpr2(other * self.x, other * self.y)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
-                return DiffExpr2(v * self.x, v * self.y)
-        if isinstance(other, DiffExpr2):
-            vx, vy = _const_value(other.x), _const_value(other.y)
-            if vx is not None and vy is not None:
-                return DiffExpr2(vx * self.x, vy * self.y)
+            return self.__mul__(other)
         return NotImplemented
 
     def __truediv__(self, other):
@@ -109,38 +99,36 @@ class DiffExpr2:
         if isinstance(other, torch.Tensor):
             return DiffExpr2(self.x @ other, self.y @ other)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
-                return DiffExpr2(self.x @ v, self.y @ v)
-        if isinstance(other, DiffExpr3):
-            # self is constant weight pair (W1, W2); other is input triple (x, y, d)
-            # W1@x − W2@y = W1@d + (W1−W2)@y
-            wx, wy = _const_value(self.x), _const_value(self.y)
-            if wx is not None and wy is not None:
-                return DiffExpr3(
-                    wx @ other.x,
-                    wy @ other.y,
-                    wx @ other.diff + (wx - wy) @ other.y,
-                )
+            if t := other.get_const():
+                return DiffExpr2(self.x @ t, self.y @ t)
+            elif tensors := self.get_const():
+                return DiffExpr2(tensors[0] @ other, tensors[1] @ other)
+        if isinstance(other, DiffExpr2):
+            if tensors := self.get_const():
+                return DiffExpr2(tensors[0] @ other.x, self.y @ tensors[1] @ other.y)
+            elif tensors := other.get_const():
+                return DiffExpr2(self.x @ tensors[0], self.y @ tensors[1])
         return NotImplemented
 
     def __rmatmul__(self, other):
         if isinstance(other, torch.Tensor):
             return DiffExpr2(other @ self.x, other @ self.y)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
-                return DiffExpr2(v @ self.x, v @ self.y)
-        if isinstance(other, DiffExpr3):
-            # other is input triple (x, y, d); self is constant weight pair (W1, W2)
-            # x@W1 − y@W2 = d@W1 + y@(W1−W2)
-            wx, wy = _const_value(self.x), _const_value(self.y)
-            if wx is not None and wy is not None:
-                return DiffExpr3(
-                    other.x @ wx,
-                    other.y @ wy,
-                    other.diff @ wx + other.y @ (wx - wy),
-                )
+            if t := other.get_const():
+                return DiffExpr2(t @ self.x, t @ self.y)
+            elif tensors := self.get_const():
+                print(tensors)
+                return DiffExpr2(other @ tensors[0], other @ tensors[1])
+        # if isinstance(other, DiffExpr3):
+        #     # other is input triple (x, y, d); self is constant weight pair (W1, W2)
+        #     # x@W1 − y@W2 = d@W1 + y@(W1−W2)
+        #     wx, wy = _const_value(self.x), _const_value(self.y)
+        #     if wx is not None and wy is not None:
+        #         return DiffExpr3(
+        #             other.x @ wx,
+        #             other.y @ wy,
+        #             other.diff @ wx + other.y @ (wx - wy),
+        #         )
         return NotImplemented
 
     # ------------------------------------------------------------------
@@ -285,17 +273,15 @@ class DiffExpr3:
         if isinstance(other, (int, float, torch.Tensor)):
             return self._map_all(lambda e: e * other)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
+            if v := other.get_const():
                 return self._map_all(lambda e: e * v)
         if isinstance(other, DiffExpr2):
-            vx, vy = _const_value(other.x), _const_value(other.y)
-            if vx is not None and vy is not None:
+            if tensors := self.get_const():
                 # Bilinear diff identity: x*vx − y*vy = diff*vx + y*(vx − vy)
                 return DiffExpr3(
-                    self.x * vx,
-                    self.y * vy,
-                    self.diff * vx + self.y * (vx - vy),
+                    self.x * tensors[0],
+                    self.y * tensors[1],
+                    self.diff * tensors[0] + self.y * (tensors[0] - tensors[1]),
                 )
         return NotImplemented
 
@@ -303,16 +289,14 @@ class DiffExpr3:
         if isinstance(other, (int, float, torch.Tensor)):
             return self._map_all(lambda e: other * e)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
+            if v := other.get_const():
                 return self._map_all(lambda e: v * e)
         if isinstance(other, DiffExpr2):
-            vx, vy = _const_value(other.x), _const_value(other.y)
-            if vx is not None and vy is not None:
+            if tensors := other.get_const():
                 return DiffExpr3(
-                    vx * self.x,
-                    vy * self.y,
-                    vx * self.diff + (vx - vy) * self.y,
+                    tensors[0] * self.x,
+                    tensors[1] * self.y,
+                    tensors[0] * self.diff + (tensors[0] - tensors[1]) * self.y,
                 )
         return NotImplemented
 
@@ -325,18 +309,16 @@ class DiffExpr3:
         if isinstance(other, torch.Tensor):
             return self._map_all(lambda e: e @ other)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
+            if v := other.get_const():
                 return self._map_all(lambda e: e @ v)
         if isinstance(other, DiffExpr2):
             # self is input triple (x, y, d); other is constant weight pair (W1, W2)
             # x@W1 − y@W2 = d@W1 + y@(W1−W2)
-            wx, wy = _const_value(other.x), _const_value(other.y)
-            if wx is not None and wy is not None:
+            if tensors := other.get_const():
                 return DiffExpr3(
-                    self.x @ wx,
-                    self.y @ wy,
-                    self.diff @ wx + self.y @ (wx - wy),
+                    self.x @ tensors[0],
+                    self.y @ tensors[1],
+                    self.diff @ tensors[0] + self.y @ (tensors[0] - tensors[1]),
                 )
         return NotImplemented
 
@@ -344,18 +326,16 @@ class DiffExpr3:
         if isinstance(other, torch.Tensor):
             return self._map_all(lambda e: other @ e)
         if isinstance(other, Expr):
-            v = _const_value(other)
-            if v is not None:
+            if v := other.get_const():
                 return self._map_all(lambda e: v @ e)
         if isinstance(other, DiffExpr2):
             # other is constant weight pair (W1, W2); self is input triple (x, y, d)
             # W1@x − W2@y = W1@d + (W1−W2)@y
-            wx, wy = _const_value(other.x), _const_value(other.y)
-            if wx is not None and wy is not None:
+            if tensors := other.get_const():
                 return DiffExpr3(
-                    wx @ self.x,
-                    wy @ self.y,
-                    wx @ self.diff + (wx - wy) @ self.y,
+                    tensors[0] @ self.x,
+                    tensors[1] @ self.y,
+                    tensors[0] @ self.diff + (tensors[0] - tensors[1]) @ self.y,
                 )
         return NotImplemented
 

@@ -159,3 +159,9 @@ class ConstVal(AffineSum):
         if self.name is not None:
             return f"#const {self.name}"
         return f"#const <{self.id:X}>"
+    
+    def get_const(self):
+        if self.value is None:
+            return 0
+        else:
+            return self.value

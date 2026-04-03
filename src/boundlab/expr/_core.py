@@ -341,6 +341,14 @@ class Expr:
         """Compute the width of the bounds for this expression."""
         from boundlab import prop
         return prop.bound_width(self)
+    
+    def get_const(self):
+        """Return the concrete tensor if *self* is a pure constant expression, else None.
+
+        Works for :class:`~boundlab.expr.ConstVal` and any :class:`~boundlab.expr.AffineSum`
+        that has no symbolic children.
+        """
+        return None
 
 
 def expr_pretty_print(expr: Expr, indent: int = 0) -> str:

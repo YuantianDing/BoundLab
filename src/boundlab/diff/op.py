@@ -124,7 +124,12 @@ class DiffLinear(nn.Module):
         self.fc2 = fc2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return diff_pair(self.fc1(x), self.fc2(x))
+        weight = diff_pair(self.fc1.weight, self.fc2.weight)
+        assert (self.fc1.bias is not None) == (self.fc2.bias is not None), "fc1 and fc2 must both have bias or both have no bias"
+        if self.fc1.bias is not None:
+            return x @ weight.t() + diff_pair(self.fc1.bias, self.fc2.bias)
+        else:
+            return x @ weight.t()
 
 
 # =====================================================================
