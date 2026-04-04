@@ -13,11 +13,13 @@ torch.Size([2])
 
 from __future__ import annotations
 
+from importlib import import_module
+
 __version__ = "0.1.0"
 
 __all__ = [
     "__version__",
-    "linearop"
+    "linearop",
     "expr",
     "prop",
     "interp",
@@ -27,4 +29,9 @@ __all__ = [
     "utils",
 ]
 
-from boundlab import expr, prop, zono, utils, poly, interp, diff
+def __getattr__(name: str):
+    if name in __all__ and name != "__version__":
+        module = import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

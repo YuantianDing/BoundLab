@@ -73,6 +73,8 @@ suppress_warnings = ["toc.not_included"]
 
 # Mock imports for dependencies not available during doc build
 autodoc_mock_imports = [
+    "beartype",
+    "beartype.roar",
     "torch",
     "torch._subclasses",
     "torch._subclasses.fake_tensor",
@@ -80,6 +82,7 @@ autodoc_mock_imports = [
     "torchtyping",
     "atomicx",
     "sortedcontainers",
+    "onnx_ir",
 ]
 
 # Napoleon settings (for Google/NumPy style docstrings)

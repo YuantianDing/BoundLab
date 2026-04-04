@@ -10,7 +10,7 @@ Examples
 """
 
 import string
-from typing import Callable, Literal, Sequence, TypeAlias, TypeVar
+from typing import Callable, Literal, Sequence, TypeAlias, TypeVar, Union
 
 from torch import nn
 import onnx_ir as ir
@@ -44,8 +44,8 @@ def merge_name(name1, op: str, name2) -> str | None:
 
 def onnx_export(
         f: Callable[..., torch.Tensor] | nn.Module,
-        args: tuple[torch.Size | list[int], ...],
-        kwargs: dict[str, torch.Size | list[int]] = {},
+        args: tuple[Union[torch.Size, list[int]], ...],
+        kwargs: dict[str, Union[torch.Size, list[int]]] = {},
         input_names: Sequence[str] | None = None,
         output_names: Sequence[str] | None = None,
     ) -> ir.Model:

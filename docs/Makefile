@@ -15,6 +15,7 @@ clean:
 	rm -rf api/generated
 
 html:
+	rm -rf api/generated
 	@$(SPHINXBUILD) -b html "$(SOURCEDIR)" "$(BUILDDIR)/html" $(SPHINXOPTS) $(O)
 
 livehtml:

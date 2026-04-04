@@ -9,7 +9,7 @@ previous design.
 """
 
 import sys
-from typing import Literal, override
+from typing import Literal
 
 import torch
 
@@ -247,6 +247,5 @@ class ConstVal(AffineSum):
             return ConstVal(other.get_const() @ self.get_const())
         return super().__rmatmul__(other)
     
-    @override
     def _apply_op(self, op):
         return ConstVal(op.forward(self.get_const()))
