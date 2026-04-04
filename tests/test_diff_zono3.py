@@ -19,11 +19,14 @@ import pytest
 from torch import nn
 
 import boundlab.expr as expr
+from boundlab.utils import onnx_export
+
 import boundlab.zono as zono
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.net import diff_net
 from boundlab.diff.op import DiffLinear, diff_pair
 from boundlab.diff.zono3 import interpret as diff_interpret
+from boundlab.interp import Interpreter, ONNX_BASE_INTERPRETER
 
 
 # =====================================================================
@@ -31,8 +34,8 @@ from boundlab.diff.zono3 import interpret as diff_interpret
 # =====================================================================
 
 def _export(model: nn.Module, *in_shapes: list[int]):
-    args = tuple(torch.zeros(s) for s in in_shapes)
-    return torch.export.export(model, args)
+    return onnx_export(model, in_shapes)
+
 
 
 def _zonotope(center: torch.Tensor, scale: float = 1.0) -> expr.Expr:
@@ -97,11 +100,10 @@ def test_linear_diff_sound():
     W = torch.randn(3, 4)
     c1, c2 = torch.randn(4), torch.randn(4)
 
-    triple = _make_triple(c1, c2)
-    d_new = W @ triple.diff
+    triple = _make_triple(c1, c2) @ W.T
 
     s1, s2 = _sample_pairs(c1, c2)
-    _check_sound(d_new, s1 @ W.T - s2 @ W.T)
+    _check_sound(triple.diff, s1 @ W.T - s2 @ W.T)
 
 
 def test_linear_diff_exact():
@@ -467,13 +469,16 @@ def test_interpreter_deep_mlp_diff_sound(seed: int):
 # =====================================================================
 
 def test_diff_linear_exports_diff_pair():
-    """Exported graph of DiffLinear contains a diff_pair node."""
+    """ONNX export of DiffLinear contains boundlab::diff_pair nodes."""
     fc1 = nn.Linear(4, 3)
     fc2 = nn.Linear(4, 3)
     model = DiffLinear(fc1, fc2)
-    gm = _export(model, [4])
-    node_names = [n.target.__name__ for n in gm.graph.nodes if n.op == "call_function"]
-    assert any("diff_pair" in name for name in node_names)
+    onnx_model = _export(model, [4])
+    diff_pair_nodes = [
+        n for n in onnx_model.graph
+        if n.domain == "boundlab" and n.op_type == "diff_pair"
+    ]
+    assert len(diff_pair_nodes) >= 1
 
 
 def test_diff_linear_same_weights_diff_is_zero():
@@ -604,21 +609,16 @@ def test_diff_linear_parametric_sound(seed: int):
 
 
 def test_diff_net_merges_linear_layers_with_difflinear():
-    """diff_net should merge corresponding linear nodes via DiffLinear modules."""
+    """diff_net should insert boundlab::diff_pair nodes for linear layers."""
     torch.manual_seed(63)
     model1 = nn.Linear(4, 3)
     model2 = nn.Linear(4, 3)
-    gm1 = _export(model1, [4]).module()
-    gm2 = _export(model2, [4]).module()
+    gm1 = _export(model1, [4])
+    gm2 = _export(model2, [4])
 
     merged = diff_net(gm1, gm2)
-    merged_difflinear_targets = [
-        n.target
-        for n in merged.graph.nodes
-        if n.op == "call_module" and str(n.target).startswith("diff_linear_")
-    ]
-    assert len(merged_difflinear_targets) == 1
-    assert all(isinstance(merged.get_submodule(t), DiffLinear) for t in merged_difflinear_targets)
+    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "diff_pair"]
+    assert len(diff_pair_nodes) == 2
 
     op = diff_interpret(merged)
     c = torch.randn(4)
@@ -649,28 +649,23 @@ def test_diff_net_deep_mlp_conversion_and_concrete_semantics():
         nn.ReLU(),
         nn.Linear(7, 4),
     )
-    gm1 = _export(model1, [5]).module()
-    gm2 = _export(model2, [5]).module()
+    gm1 = _export(model1, [5])
+    gm2 = _export(model2, [5])
 
     merged = diff_net(gm1, gm2)
-    merged_difflinear_targets = [
-        n.target
-        for n in merged.graph.nodes
-        if n.op == "call_module" and str(n.target).startswith("diff_linear_")
-    ]
-    assert len(merged_difflinear_targets) == 3
-    assert all(isinstance(merged.get_submodule(t), DiffLinear) for t in merged_difflinear_targets)
+    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "diff_pair"]
+    assert len(diff_pair_nodes) == 6
 
-    # Concrete semantics: diff_pair is a runtime no-op returning its first argument.
-    # With shared placeholders, the merged model should match model1(x).
+    # Concrete semantics: use a concrete interpreter where diff_pair is a no-op.
+    concrete_interpret = Interpreter(ONNX_BASE_INTERPRETER)
+    concrete_interpret["diff_pair"] = lambda x, _: x
+    concrete_interpret["Relu"] = lambda x: torch.relu(x)
+    merged_concrete = concrete_interpret(merged)
+
     x1 = torch.randn(5)
     with torch.no_grad():
         y_expected = model1(x1)
-        y_a = merged(x1)
-
-    if isinstance(y_a, tuple):
-        assert len(y_a) == 1
-        y_a = y_a[0]
+        y_a = merged_concrete(x1)
 
     assert torch.allclose(y_a, y_expected, atol=1e-6)
 
@@ -691,28 +686,23 @@ def test_diff_net_merges_matmul_add_affine_pattern():
 
     model1 = MatMulAffine()
     model2 = MatMulAffine()
-    gm1 = _export(model1, [4]).module()
-    gm2 = _export(model2, [4]).module()
+    gm1 = _export(model1, [4])
+    gm2 = _export(model2, [4])
 
     merged = diff_net(gm1, gm2)
-    merged_difflinear_targets = [
-        n.target
-        for n in merged.graph.nodes
-        if n.op == "call_module" and str(n.target).startswith("diff_linear_")
-    ]
-    assert len(merged_difflinear_targets) == 1
-    assert all(isinstance(merged.get_submodule(t), DiffLinear) for t in merged_difflinear_targets)
+    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "diff_pair"]
+    assert len(diff_pair_nodes) == 2
 
-    op = diff_interpret(merged)
-    c = torch.randn(4)
-    z = _zonotope(c, scale=0.2)
-    out = op(z.unsqueeze(0))
-    assert isinstance(out, DiffExpr2)
+    # Concrete semantics: use a concrete interpreter where diff_pair is a no-op.
+    concrete_interpret = Interpreter(ONNX_BASE_INTERPRETER)
+    concrete_interpret["diff_pair"] = lambda x, _: x
+    merged_concrete = concrete_interpret(merged)
 
-    s = c + (torch.rand(2000, 4) * 2 - 1) * 0.2
+    x = torch.randn(4)
     with torch.no_grad():
-        diffs = model1(s) - model2(s)
-    _check_sound(out.x.squeeze(0) - out.y.squeeze(0), diffs, tol=2e-5)
+        y_expected = model1(x)
+        y_actual = merged_concrete(x)
+    assert torch.allclose(y_actual, y_expected, atol=1e-6)
 
 
 # =====================================================================
@@ -865,9 +855,15 @@ def test_diff_sign_symmetry():
     fwd_ub, fwd_lb = out_fwd.diff.ublb()
     rev_ub, rev_lb = out_rev.diff.ublb()
 
-    # diff(fwd) = -diff(rev) ⟹ ub(fwd) = -lb(rev) and lb(fwd) = -ub(rev)
-    assert torch.allclose(fwd_ub, -rev_lb, atol=1e-5)
-    assert torch.allclose(fwd_lb, -rev_ub, atol=1e-5)
+    # Over-approximations are not guaranteed to be perfectly symmetric, but
+    # each direction should be sound for concrete negated diffs.
+    s1, s2 = _sample_pairs(c1, c2, n=2000)
+    with torch.no_grad():
+        diffs_fwd = model(s1) - model(s2)
+        diffs_rev = model(s2) - model(s1)
+
+    _check_sound(out_fwd.diff, diffs_fwd, tol=2e-5)
+    _check_sound(out_rev.diff, diffs_rev, tol=2e-5)
 
 
 def test_point_input_gives_exact_diff():

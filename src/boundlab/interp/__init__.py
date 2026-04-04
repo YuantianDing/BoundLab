@@ -2,37 +2,110 @@
 
 Examples
 --------
-Export a model then interpret it:
+Interpret an ONNX model:
 
 >>> import torch
->>> from torch import nn
+>>> import onnx_ir as ir
 >>> import boundlab.expr as expr
 >>> from boundlab.interp import Interpreter
->>> itp = Interpreter({"relu": lambda x: x})
->>> gm = torch.export.export(nn.ReLU(), (torch.zeros(1),))
->>> op = itp(gm)
->>> x = expr.ConstVal(torch.tensor([0.0])) + expr.LpEpsilon([1])
->>> y = op(x)
->>> y.shape
-torch.Size([1])
+>>> itp = Interpreter({"placeholder": lambda x, name: x, "Relu": lambda x: x})
 """
 
 from __future__ import annotations
 
 import copy
+import math
+from pathlib import Path
 from typing import Any, Callable, Generic, TypeVar
+import onnx_ir as ir
 import torch
-import torch.fx
-from typing import get_type_hints
 import beartype
 import beartype.roar
 
-from boundlab.expr._core import Expr
+from boundlab.expr._core import Expr, ExprFlags
 
-__all__ = ["Interpreter"]
+__all__ = ["Interpreter", "ONNX_BASE_INTERPRETER"]
 
 E = TypeVar("E", bound=Expr)
 
+
+# =====================================================================
+# ONNX attribute / shape helpers (used by __call__ and ONNX_BASE_INTERPRETER)
+# =====================================================================
+
+def _onnx_attr_value(attr) -> Any:
+    """Convert an ONNX IR attribute to a Python value."""
+    t = attr.type
+    if t == ir.AttributeType.FLOAT:
+        return attr.as_float()
+    elif t == ir.AttributeType.INT:
+        return attr.as_int()
+    elif t == ir.AttributeType.STRING:
+        return attr.as_string()
+    elif t == ir.AttributeType.TENSOR:
+        return torch.from_numpy(attr.as_tensor().numpy().copy())
+    elif t == ir.AttributeType.FLOATS:
+        return list(attr.as_floats())
+    elif t == ir.AttributeType.INTS:
+        return list(attr.as_ints())
+    elif t == ir.AttributeType.STRINGS:
+        return list(attr.as_strings())
+    else:
+        return None
+
+
+def _unwrap_shape(x) -> list[int]:
+    """Extract a concrete shape/axes list from a tensor."""
+    if isinstance(x, torch.Tensor):
+        return x.long().tolist()
+    return list(x)
+
+
+def _onnx_gemm(A, B, C=None, alpha=1.0, beta=1.0, transA=0, transB=0):
+    """ONNX Gemm: ``Y = alpha * (A' @ B') + beta * C``."""
+    a = A.transpose(0, 1) if transA else A
+    b = B.transpose(0, 1) if transB else B
+    y = a @ b
+    if alpha != 1.0:
+        y = alpha * y
+    if C is not None:
+        y = y + (beta * C if beta != 1.0 else C)
+    return y
+
+
+def _onnx_flatten(X, axis=1):
+    """ONNX Flatten: produce 2-D tensor ``[prod(dims[:axis]), prod(dims[axis:])]``."""
+    first = math.prod(X.shape[:axis]) if axis > 0 else 1
+    return X.reshape(first, -1)
+
+
+def _onnx_unsqueeze(data, axes):
+    """ONNX Unsqueeze: insert size-1 dims at the given axes positions."""
+    axes_list = sorted(_unwrap_shape(axes))
+    result = data
+    for ax in axes_list:
+        result = result.unsqueeze(ax)
+    return result
+
+
+def _onnx_squeeze(data, axes=None):
+    """ONNX Squeeze: remove size-1 dims at *axes* (or all if omitted)."""
+    if axes is None:
+        return data.squeeze()
+    axes_list = sorted(_unwrap_shape(axes), reverse=True)
+    result = data
+    for ax in axes_list:
+        result = result.squeeze(ax)
+    return result
+
+def _onnx_constant(value=None, **_):
+    """ONNX Constant node: wrap the tensor attribute as a torch.Tensor."""
+    return torch.Tensor(value) if value is not None else None
+
+
+# =====================================================================
+# FnList — multi-handler dispatch helper
+# =====================================================================
 
 class FnList:
     """Helper class for merging multiple handlers for the same operator."""
@@ -58,12 +131,12 @@ class FnList:
                 errors.append(e)
                 continue
         raise TypeError(f"No matching handler found for arguments {args} {kwargs}. Errors: {errors}")
-    
+
     def __add__(self, other: Callable[..., E] | FnList) -> FnList:
         if isinstance(other, FnList):
             return FnList(self.fns + other.fns)
         return FnList(self.fns + [other])
-    
+
     def product(self, *other: FnList) -> FnList:
         zip_list = [self] + list(other)
         def zipped_fn(*args, **kwargs):
@@ -74,21 +147,21 @@ class FnList:
                 results[i] = zip_list[i](*argsi, **kwargsi)
             return tuple(results)
         return FnList(zipped_fn)
-        
+
+
+# =====================================================================
+# Interpreter
+# =====================================================================
 
 class Interpreter(Generic[E]):
     def __init__(self, dispatcher: dict[str, Callable[..., E]]):
         """Initialize an interpreter with a dispatcher.
 
-        The dispatcher maps neural network operators to functions for interpretation.
+        The dispatcher maps ONNX operator names to handler functions.
 
-        Keys are:
-
-        - For ``call_function`` nodes: the callable's ``__name__``, with any
-          ``.default`` overload suffix stripped (e.g.
-          ``"linear.default"`` -> ``"linear"``).
-        - For ``call_module`` nodes: the submodule's class name (e.g. ``"ReLU"``).
-        - For ``call_method`` nodes: the method name string (e.g. ``"reshape"``).
+        Keys are the ONNX ``op_type`` strings (e.g. ``"Gemm"``, ``"Relu"``,
+        ``"Reshape"``).  Custom-domain ops (e.g. ``"diff_pair"`` from the
+        ``boundlab`` domain) are also keyed by bare ``op_type``.
         """
         if isinstance(dispatcher, Interpreter):
             self.dispatcher = {k: FnList(v) for k, v in dispatcher.dispatcher.items()}
@@ -97,7 +170,7 @@ class Interpreter(Generic[E]):
 
     def __getitem__(self, key) -> FnList:
         return self.dispatcher[key]
-    
+
     def __setitem__(self, key, value):
         if isinstance(value, FnList):
             for fn in value.fns:
@@ -115,22 +188,22 @@ class Interpreter(Generic[E]):
 
     def __contains__(self, key) -> bool:
         return key in self.dispatcher
-    
+
     def items(self):
         return self.dispatcher.items()
-    
+
     def __or__(self, other: Interpreter | dict[str, Callable[..., E]]) -> Interpreter:
         result = Interpreter(self.dispatcher).deepcopy()
         result |= other
         return result
-        
+
     def __ior__(self, other: Interpreter | dict[str, Callable[..., E]]):
         other = other if isinstance(other, Interpreter) else Interpreter(other)
         for k, v in other.items():
             for fn in v.fns:
                 self.register(k, fn)
         return self
-    
+
     def product(self, *other: Interpreter) -> Interpreter:
         """Return a new interpreter that produces tuples of results from this and other interpreters."""
         return Interpreter({k: v.product(*[o[k] for o in other]) for k, v in self.dispatcher.items()})
@@ -140,18 +213,29 @@ class Interpreter(Generic[E]):
         return Interpreter({k: lambda *args, **kwargs: other(v(*args, **kwargs)) for k, v in self.dispatcher.items()})
 
     def __call__(
-        self, model: torch.export.ExportedProgram | torch.fx.GraphModule
+        self, model: ir.Model | str | Path
     ) -> Callable[..., E]:
-        """Build an expression-level interpreter for an exported model.
+        """Build an expression-level interpreter for an ONNX model.
 
         Parameters
         ----------
         model:
-            A :class:`torch.export.ExportedProgram` (e.g. from
-            ``torch.export.export``) or an already-unwrapped
-            :class:`torch.fx.GraphModule`.  Plain ``nn.Module`` is not accepted —
-            export the model first so that ``call_module`` nodes for built-in layers
-            are lowered to ``call_function`` nodes (e.g. ``linear.default``).
+            An ``onnx_ir.Model`` or a ``str`` / :class:`pathlib.Path`
+            pointing to an ``.onnx`` file.
+
+            The ONNX graph is walked in topological order (ONNX guarantees
+            this).  For each node:
+
+            * Initializer inputs are wrapped as
+              :class:`~torch.Tensor` and passed as positional
+              arguments.
+            * Optional/missing inputs (empty-string name) are passed as
+              ``None``.
+            * Node attributes are converted to Python scalars / lists and
+              passed as keyword arguments.
+            * The dispatcher is keyed on the bare ``op_type`` (domain is
+              ignored); e.g. a custom ``boundlab::diff_pair`` node is
+              dispatched as ``"diff_pair"``.
 
         Returns
         -------
@@ -160,112 +244,110 @@ class Interpreter(Generic[E]):
 
         Examples
         --------
-        >>> import torch
-        >>> from torch import nn
+        >>> import torch, tempfile, os
+        >>> from boundlab.interp import Interpreter, ONNX_BASE_INTERPRETER
+        >>> from boundlab.zono import interpret
         >>> import boundlab.expr as expr
-        >>> import boundlab.zono as zono
-        >>> model = nn.Linear(4, 3)
-        >>> gm = torch.export.export(model, (torch.zeros(4),))
-        >>> op = zono.interpret(gm)
-        >>> x = expr.ConstVal(torch.zeros(4)) + expr.LpEpsilon([4])
-        >>> y = op(x)
-        >>> y.ub().shape
-        torch.Size([3])
         """
-        if isinstance(model, torch.export.ExportedProgram):
-            traced = model.module()
-        else:
-            traced = model
-        assert all(isinstance(v, FnList) for v in self.dispatcher.values()), "All handlers must be non-None."
+        if isinstance(model, torch.onnx.ONNXProgram):
+            model = model.model
+        elif isinstance(model, torch.export.ExportedProgram):
+            model = torch.onnx.export(model, dynamo=True).model
+
+        assert isinstance(model, (ir.Model, str, Path)), "Model must be an onnx_ir.Model, ExportedProgram, ONNXProgram, or file path"
+
+        if isinstance(model, (str, Path)):
+            model = ir.load(str(model))
+
+        initializers = {
+            init.name: self.dispatcher["Initializer"](
+                torch.from_numpy(init.const_value.numpy().copy()),
+                name=init.name
+            )
+            for init in model.graph.initializers.values()
+        }
+        initializer_names = set(initializers.keys())
+        input_names = [
+            inp.name for inp in model.graph.inputs
+            if inp.name not in initializer_names
+        ]
+        output_names = [out.name for out in model.graph.outputs]
+
+        assert all(isinstance(v, FnList) for v in self.dispatcher.values()), \
+            "All handlers must be non-None."
+
         def interpret(*exprs: E) -> E | tuple[E, ...]:
             env: dict[str, Any] = {}
-            input_idx = 0
 
-            for node in traced.graph.nodes:
-                if node.op == "placeholder":
-                    env[node.name] = self.dispatcher["placeholder"](exprs[input_idx], name=node.name)
-                    input_idx += 1
+            for name, e in zip(input_names, exprs):
+                env[name] = self.dispatcher["Input"](e, name=name)
 
-                elif node.op == "get_attr":
-                    from boundlab.expr._affine import ConstVal
-                    obj = traced
-                    for part in node.target.split("."):
-                        obj = getattr(obj, part)
-                    env[node.name] = ConstVal(obj.detach())
+            for node in model.graph:
+                args = []
+                for inp in node.inputs:
+                    if inp is None:
+                        args.append(None)
+                        continue
 
-                elif node.op == "call_function":
-                    raw = node.target.__name__
-                    # Examples:
-                    #   "aten.linear.default"        → "linear"
-                    #   "boundlab.diff_pair.default" → "diff_pair"
-                    #   "aten.transpose.int"         → "transpose"
-                    #   "getitem"                    → "getitem"
-                    parts = raw.split(".")
-                    if len(parts) == 1:
-                        key = parts[0]
-                    elif parts[-1] == "default":
-                        key = parts[-2]
+                    inp_name = inp.name
+                    if inp_name in env:
+                        args.append(env[inp_name])
+                    elif inp_name in initializers:
+                        args.append(initializers[inp_name])
                     else:
-                        key = parts[0]
-                    handler = self.dispatcher[key]
-                    args = [env[a.name] if isinstance(a, torch.fx.Node) else a for a in node.args]
-                    kwargs = {k: (env[v.name] if isinstance(v, torch.fx.Node) else v) for k, v in node.kwargs.items()}
-                    env[node.name] = handler(*args, **kwargs)
+                        raise KeyError(
+                            f"Input '{inp_name}' not found for node "
+                            f"'{node.op_type}' ({node.name!r})"
+                        )
 
-                elif node.op == "call_module":
-                    submod = traced.get_submodule(node.target)
-                    key = type(submod).__name__
-                    if key not in self.dispatcher:
-                        if node.users:
-                            raise KeyError(f"No handler for call_module '{key}'")
-                        continue  # side-effect-only node (e.g. GuardsFn)
-                    handler = self.dispatcher[key]
-                    args = [env[a.name] if isinstance(a, torch.fx.Node) else a for a in node.args]
-                    kwargs = {k: (env[v.name] if isinstance(v, torch.fx.Node) else v) for k, v in node.kwargs.items()}
-                    env[node.name] = handler(submod, *args, **kwargs)
+                kwargs = {
+                    name: _onnx_attr_value(attr)
+                    for name, attr in node.attributes.items()
+                }
 
-                elif node.op == "call_method":
-                    key = node.target
-                    handler = self.dispatcher[key]
-                    args = [env[a.name] if isinstance(a, torch.fx.Node) else a for a in node.args]
-                    kwargs = {k: (env[v.name] if isinstance(v, torch.fx.Node) else v) for k, v in node.kwargs.items()}
-                    env[node.name] = handler(*args, **kwargs)
+                # Dispatch on op_type (ignore domain)
+                handler = self.dispatcher[node.op_type]
+                result = handler(*args, **kwargs)
 
-                elif node.op == "output":
-                    out = node.args[0]
-                    if isinstance(out, torch.fx.Node):
-                        return env[out.name]
-                    vals = tuple(env[a.name] if isinstance(a, torch.fx.Node) else a for a in out)
-                    return vals[0] if len(vals) == 1 else vals
+                # Bind outputs
+                if len(node.outputs) == 1:
+                    out = node.outputs[0]
+                    if out is not None and out.name:
+                        env[out.name] = result
+                else:
+                    for i, out in enumerate(node.outputs):
+                        if out is not None and out.name:
+                            env[out.name] = result[i]
+
+            outputs = [env[name] for name in output_names]
+            return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
         return interpret
 
-TENSOR_BASE_INTERPRETER = Interpreter({
-    "placeholder": lambda x, name: x,
+
+# =====================================================================
+# ONNX base interpreter
+# =====================================================================
+
+ONNX_BASE_INTERPRETER = Interpreter({
+    "Input": lambda x, **_: x,
+    "Initializer": lambda x, **_: x,
     # ---- arithmetic ---------------------------------------------------
-    "add":        lambda x, y: x + y,
-    "sub":        lambda x, y: x - y,
-    "neg":        lambda x: -x,
-    "mul":        lambda x, y: x * y if isinstance(y, torch.Tensor) else y * x,
-    "div":        lambda x, y: x / y,
-    "truediv":    lambda x, y: x / y,
-    "floordiv":   lambda x, y: x / y,
+    "Add":      lambda X, Y: X + Y,
+    "Sub":      lambda X, Y: X - Y,
+    "Neg":      lambda X: -X,
+    "Mul":      lambda X, Y: X * Y,
+    "Div":      lambda X, Y: X / Y,
     # ---- linear layers ------------------------------------------------
-    # F.linear / aten.linear.default
-    "linear":     lambda x, w, b=None: x @ w.T + (b if b is not None else 0),
-    # ATen lowered form: aten.t.default + aten.addmm.default
-    "t":          lambda x: x.transpose(0, 1),
-    "addmm":      lambda bias, inp, mat2: inp @ mat2 + bias,
+    "Gemm":     _onnx_gemm,
+    "MatMul":   lambda A, B: A @ B,
     # ---- shape ops ----------------------------------------------------
-    "reshape":    lambda x, *shape: x.reshape(*shape),
-    "view":       lambda x, *shape: x.reshape(*shape),
-    "flatten":    lambda x, start_dim=0, end_dim=-1: x.flatten(start_dim, end_dim),
-    "permute":    lambda x, *dims: x.permute(*dims),
-    "transpose":  lambda x, dim0, dim1: x.transpose(dim0, dim1),
-    "unsqueeze":  lambda x, dim: x.unsqueeze(dim),
-    "squeeze":    lambda x, dim=None: x.squeeze(dim),
-    "contiguous": lambda x: x,
-    # ---- tuple/pair helpers -------------------------------------------
-    # getitem: integer index used for tuple-unpacking in exported graphs
-    "getitem":    lambda x, idx: x[idx],
+    "Reshape":  lambda data, shape: data.reshape(_unwrap_shape(shape)),
+    "Flatten":  _onnx_flatten,
+    "Transpose": lambda data, perm=None: (data.permute(*perm) if perm is not None else data.T),
+    "Unsqueeze": _onnx_unsqueeze,
+    "Squeeze":  _onnx_squeeze,
+    "Identity": lambda X: X,
+    # ---- constants ---------------------------------------------
+    "Constant": _onnx_constant,
 })

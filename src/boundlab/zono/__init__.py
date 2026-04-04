@@ -23,12 +23,13 @@ import dataclasses
 import torch
 
 from boundlab import expr
+from boundlab.expr._affine import AffineSum
 from boundlab.expr._core import Expr
 from boundlab.expr._var import LpEpsilon
-from boundlab.interp import TENSOR_BASE_INTERPRETER, Interpreter
+from boundlab.interp import ONNX_BASE_INTERPRETER, Interpreter
 from boundlab.linearop import LinearOp
 
-interpret = Interpreter(TENSOR_BASE_INTERPRETER)
+interpret = Interpreter(ONNX_BASE_INTERPRETER)
 """Zonotope-based interpreter.
 
 Examples
@@ -85,20 +86,17 @@ from .exp import exp_linearizer
 from .reciprocal import reciprocal_linearizer
 from .tanh import tanh_linearizer
 
-# call_module handlers (mod is the nn.Module instance)
-interpret["ReLU"] = lambda _, x: interpret["relu"](x)
-interpret["Tanh"] = lambda _, x: interpret["tanh"](x)
+# ONNX activation handlers
+interpret["Relu"] = interpret["relu"]
+interpret["Tanh"] = interpret["tanh"]
 
 # Bilinear matmul handler (supports Expr @ Expr)
 from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
-interpret["matmul"] = matmul_handler
-interpret["bmm"] = matmul_handler
-interpret["mm"] = matmul_handler
+interpret["MatMul"] = matmul_handler
 
-# Softmax: both call_module (nn.Softmax) and ATen lowered (_softmax.default)
+# Softmax
 from .softmax import softmax_handler
-interpret["softmax"] = softmax_handler
-interpret["_softmax"] = lambda x, dim, _half_to_float=False: softmax_handler(x, dim=dim)
+interpret["Softmax"] = lambda X, axis=-1: softmax_handler(X, dim=axis)
 
 __all__ = [
     "interpret", "ZonoBounds",

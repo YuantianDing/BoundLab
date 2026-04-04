@@ -260,7 +260,8 @@ class EinsumOp(LinearOp):
         if self.is_full():
             return self.permute_for_output().tensor.view(self.output_shape + self.input_shape)
         else:
-            return NotImplemented
+            print(f"Warning: Jacobian is not efficiently available for non-full EinsumOp {self}. Consider using `jacobian_scatter` or `force_jacobian` instead.")
+            return self.force_jacobian()
             # raise NotImplementedError(f"Jacobian is only implemented for full EinsumOps: {self}")
         
     def abs(self) -> "LinearOp":

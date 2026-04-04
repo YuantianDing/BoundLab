@@ -126,7 +126,12 @@ class AffineSum(Expr):
 
     def to_string(self, *children_str: str) -> str:
         parts = [f"{op}({cs})" for op, cs in zip(self.children_dict.values(), children_str)]
+        if self.constant is not None:
+            parts.append(f"<Const>")
         return " + ".join(parts)
+    
+    def jacobian_ops_(self):
+        self.children_dict = {child: op.jacobian_op() for child, op in self.children_dict.items()}
 
 
 class ConstVal(AffineSum):

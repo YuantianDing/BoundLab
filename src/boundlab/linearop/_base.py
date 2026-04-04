@@ -114,6 +114,23 @@ class LinearOp:
             return SumOp(other, self)
         return NotImplemented
     
+    def jacobian_op(self) -> torch.Tensor:
+        """Materialize this LinearOp as an explicit Jacobian tensor.
+
+        Returns:
+            A tensor with shape ``[*output_shape, *input_shape]`` representing
+            the Jacobian of this LinearOp.
+        Notes:
+            This may be expensive in time and memory and is mainly intended for
+            debugging, validation, or rare paths that require explicit Jacobians.
+        """
+        from boundlab.linearop._einsum import EinsumOp
+        if isinstance(self, EinsumOp) and self.is_full():
+            return self
+        jac = self.jacobian()
+            
+        return EinsumOp.from_full(jac, len(self.input_shape))
+    
     def jacobian(self) -> torch.Tensor:
         """Return an explicit Jacobian tensor when efficiently available.
 
@@ -123,7 +140,8 @@ class LinearOp:
             ``NotImplemented`` for operators that only support implicit
             application.
         """
-        return NotImplemented
+        print(f"Warning: LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.")
+        return self.force_jacobian()
     
     def abs(self) -> "LinearOp":
         """Return a LinearOp representing the element-wise absolute value of this LinearOp."""
@@ -263,29 +281,15 @@ class ComposedOp(LinearOp):
     def jacobian(self):
         if self.input_shape.numel() >= self.output_shape.numel():
             jac = self.ops[0].jacobian()
-            if jac is not NotImplemented:
-                for op in self.ops[1:]:
-                    jac = op.vbackward(jac)
-                return jac
-            
-            jac = self.ops[-1].jacobian()
-            if jac is not NotImplemented:
-                for op in reversed(self.ops[:-1]):
-                    jac = op.vforward(jac)
-                return jac
+            for op in self.ops[1:]:
+                jac = op.vbackward(jac)
+            return jac
         elif self.output_shape.numel() > self.input_shape.numel():
             jac = self.ops[-1].jacobian()
-            if jac is not NotImplemented:
-                for op in reversed(self.ops[:-1]):
-                    jac = op.vforward(jac)
-                return jac
-            
-            jac = self.ops[0].jacobian()
-            if jac is not NotImplemented:
-                for op in self.ops[1:]:
-                    jac = op.vbackward(jac)
-                return jac
-        return NotImplemented
+            for op in reversed(self.ops[:-1]):
+                jac = op.vforward(jac)
+            return jac
+
 
 
 class SumOp(LinearOp):
@@ -337,8 +341,6 @@ class SumOp(LinearOp):
     
     def jacobian(self):
         jacs = [op.jacobian() for op in self.ops]
-        if any(j is NotImplemented for j in jacs):
-            return NotImplemented
         return sum(jacs)
 
 
@@ -355,15 +357,23 @@ class ScalarOp(LinearOp):
             self.flags |= LinearOpFlags.IS_NON_NEGATIVE
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.scalar == 1.0:
+            return x
         return self.scalar * x
 
     def backward(self, grad_output: torch.Tensor) -> torch.Tensor:
+        if self.scalar == 1.0:
+            return grad_output
         return self.scalar * grad_output
 
     def vforward(self, x):
+        if self.scalar == 1.0:
+            return x
         return self.scalar * x
 
     def vbackward(self, grad_output):
+        if self.scalar == 1.0:
+            return grad_output
         return self.scalar * grad_output
 
     def __str__(self):

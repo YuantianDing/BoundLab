@@ -1,288 +1,204 @@
-"""Build a paired FX graph for differential interpretation."""
+"""Build a paired ONNX model for differential interpretation.
+
+``diff_net`` merges two structurally-identical ONNX models by inserting
+``boundlab::diff_pair`` nodes that pair the weights from both networks before
+each shared ``Gemm`` layer.  At concrete-tensor runtime the model is
+equivalent to *net1*; when interpreted by
+:data:`~boundlab.diff.zono3.interpret`, the ``diff_pair`` nodes create
+:class:`~boundlab.diff.expr.DiffExpr2` expressions that propagate both
+branches through all subsequent operations.
+"""
 
 from __future__ import annotations
 
 import copy
+from itertools import zip_longest
+from pathlib import Path
 
-import torch
-import torch.fx
-from torch import nn
+import onnx_ir as ir
 
-from boundlab.diff.op import DiffLinear
+
+def _load_onnx(model) -> ir.Model:
+    """Load an ONNX model from a path or pass through an existing onnx_ir.Model."""
+    if isinstance(model, (str, Path)):
+        return ir.load(str(model))
+    if isinstance(model, ir.Model):
+        return model
+    raise TypeError(f"Expected path or onnx_ir.Model, got {type(model)}")
+
+
+def _value_ref(name: str) -> ir.Value:
+    return ir.Value(name=name)
+
+
+def _new_initializer(name: str, source: ir.Value) -> ir.Value:
+    return ir.Value(
+        name=name,
+        shape=copy.deepcopy(source.shape),
+        type=copy.deepcopy(source.type),
+        doc_string=source.doc_string,
+        const_value=copy.deepcopy(source.const_value),
+        metadata_props=copy.deepcopy(source.metadata_props),
+    )
+
+
+def _clone_node_detached(node: ir.Node) -> ir.Node:
+    return ir.Node(
+        node.domain,
+        node.op_type,
+        [(_value_ref(v.name) if v is not None else None) for v in node.inputs],
+        attributes={k: copy.deepcopy(v) for k, v in node.attributes.items()},
+        outputs=[ir.Value(name=v.name) for v in node.outputs],
+        overload=node.overload,
+        version=node.version,
+        name=node.name,
+        doc_string=node.doc_string,
+        metadata_props=copy.deepcopy(node.metadata_props),
+    )
+
+
+def _node_input_name(node: ir.Node, idx: int) -> str:
+    v = node.inputs[idx]
+    assert v is not None and v.name is not None
+    return v.name
 
 
 def diff_net(
-    net1: torch.fx.GraphModule,
-    net2: torch.fx.GraphModule,
-) -> torch.fx.GraphModule:
-    """Merge two structurally-identical GraphModules by pairing their linear layers.
+    net1: ir.Model | str | Path,
+    net2: ir.Model | str | Path,
+) -> ir.Model:
+    """Merge two structurally-identical ONNX models by pairing initializer inputs.
 
-    Returns a new :class:`~torch.fx.GraphModule` where every linear layer is
-    replaced by a :class:`~boundlab.diff.op.DiffLinear` that holds the weights
-    from both networks.  At runtime (concrete tensors) the module is equivalent
-    to *net1*.  When interpreted by
-    :data:`~boundlab.diff.zono3.interpret`, the ``DiffLinear`` nodes produce
-    :class:`~boundlab.diff.expr.DiffExpr2` expressions tracking both branches.
+    For each aligned node pair in ``net1``/``net2``, any input position where
+    both sides consume initializers is replaced by a shared
+    ``boundlab::diff_pair`` value in the merged graph. This generalizes beyond
+    affine operators (e.g. ``Gemm`` / ``MatMul``) to any operator that reads
+    parameters as initializers.
 
-    Handles two graph styles:
-
-    * **ATen-level** (from ``torch.export.export(...).module()``): identifies
-      ``aten.linear.default`` or the ``aten.t + aten.addmm`` decomposition and
-      replaces each group with a new ``call_module`` node targeting a
-      freshly-added ``DiffLinear`` submodule named ``"diff_linear_0"``,
-      ``"diff_linear_1"``, …
-    * **Module-level** (from ``onnx2torch.convert(...)``): identifies
-      ``call_module`` nodes whose submodule is ``nn.Linear`` and replaces each
-      with a ``call_module`` node targeting a freshly-added ``DiffLinear``
-      submodule (same naming scheme).
+    At concrete runtime, ``diff_pair`` is a no-op that returns branch-1 values
+    (net1 semantics). Under differential interpretation, the paired values are
+    lifted into :class:`~boundlab.diff.expr.DiffExpr2`.
 
     Parameters
     ----------
     net1, net2:
-        GraphModules with the same graph structure.
+        ONNX models with the same graph structure.  Each may be an
+        :class:`onnx_ir.Model`, a ``str``, or a :class:`pathlib.Path`.
 
     Returns
     -------
-    A merged :class:`~torch.fx.GraphModule`.
+    A merged :class:`onnx_ir.Model`.
 
     Examples
     --------
-    >>> import torch
-    >>> from torch import nn
     >>> from boundlab.diff.net import diff_net
-    >>> from boundlab.diff.op import DiffLinear
-    >>> m1 = nn.Linear(4, 3)
-    >>> m2 = nn.Linear(4, 3)
-    >>> gm1 = torch.export.export(m1, (torch.zeros(4),)).module()
-    >>> gm2 = torch.export.export(m2, (torch.zeros(4),)).module()
-    >>> merged = diff_net(gm1, gm2)
-    >>> dl_targets = [n.target for n in merged.graph.nodes if n.op == 'call_module' and str(n.target).startswith('diff_linear_')]
-    >>> len(dl_targets)
-    1
-    >>> isinstance(merged.get_submodule(dl_targets[0]), DiffLinear)
+    >>> from pathlib import Path
+    >>> nets = Path("compare/veridiff/examples/nets")
+    >>> merged = diff_net(nets / "single_layer_ref.onnx", nets / "single_layer_alt.onnx")
+    >>> any(n.domain == "boundlab" and n.op_type == "diff_pair" for n in merged.graph)
     True
     """
-    merged = copy.deepcopy(net1)
+    net1 = _load_onnx(net1)
+    net2 = _load_onnx(net2)
+    merged = net1.clone()
 
-    merged_groups = _find_linear_groups(merged)
-    net2_groups   = _find_linear_groups(net2)
+    # Build initializer dicts (name -> Value).
+    init1 = merged.graph.initializers
+    init2 = net2.graph.initializers
 
-    if merged_groups or net2_groups:
-        _pair_aten_linears(merged, merged_groups, net2, net2_groups)
-    else:
-        mod_merged = [n for n in merged.graph.nodes
-                      if n.op == "call_module"
-                      and isinstance(merged.get_submodule(n.target), nn.Linear)]
-        mod_net2   = [n for n in net2.graph.nodes
-                      if n.op == "call_module"
-                      and isinstance(net2.get_submodule(n.target), nn.Linear)]
-        _pair_module_linears(merged, mod_merged, net2, mod_net2)
+    # Align nodes by topological index.
+    nodes1 = list(merged.graph)
+    nodes2 = list(net2.graph)
+    if len(nodes1) != len(nodes2):
+        raise ValueError(
+            f"Networks have different numbers of nodes: {len(nodes1)} vs {len(nodes2)}"
+        )
 
-    merged.graph.eliminate_dead_code()
-    merged.recompile()
+    new_nodes: list[ir.Node] = []
+    new_initializer_entries: dict[str, ir.Value] = {}
+    # Cache: net2 initializer name -> cloned initializer name in merged model.
+    cloned_init2_name: dict[str, str] = {}
+    # Cache: (net1 init name, net2 init name) -> paired value name.
+    paired_name: dict[tuple[str, str], str] = {}
+
+    def _paired_input_value(name1: str, name2: str) -> ir.Value:
+        key = (name1, name2)
+        if key in paired_name:
+            return _value_ref(paired_name[key])
+
+        if name2 not in cloned_init2_name:
+            new_name = f"_diff_init2_{len(cloned_init2_name)}"
+            new_initializer_entries[new_name] = _new_initializer(new_name, init2[name2])
+            cloned_init2_name[name2] = new_name
+        else:
+            new_name = cloned_init2_name[name2]
+
+        out_name = f"_diff_paired_{len(paired_name)}"
+        paired_name[key] = out_name
+        new_nodes.append(
+            ir.Node(
+                "boundlab",
+                "diff_pair",
+                [_value_ref(name1), _value_ref(new_name)],
+                outputs=[ir.Value(name=out_name)],
+            )
+        )
+        return _value_ref(out_name)
+
+    for idx, (node, node2) in enumerate(zip(nodes1, nodes2)):
+        if node.op_type != node2.op_type or node.domain != node2.domain:
+            raise ValueError(
+                f"Node mismatch at index {idx}: "
+                f"({node.domain}::{node.op_type}) vs ({node2.domain}::{node2.op_type})"
+            )
+
+        if len(node.inputs) != len(node2.inputs):
+            raise ValueError(
+                f"Node input-arity mismatch at index {idx}: "
+                f"{len(node.inputs)} vs {len(node2.inputs)}"
+            )
+
+        remapped_inputs: list[ir.Value | None] = []
+        for inp1, inp2 in zip_longest(node.inputs, node2.inputs):
+            if inp1 is None:
+                remapped_inputs.append(None)
+                continue
+
+            name1 = inp1.name
+            # Keep original input when net2 optional input is missing.
+            if inp2 is None or inp2.name is None:
+                remapped_inputs.append(_value_ref(name1))
+                continue
+
+            name2 = inp2.name
+            if name1 in init1 and name2 in init2:
+                remapped_inputs.append(_paired_input_value(name1, name2))
+            else:
+                remapped_inputs.append(_value_ref(name1))
+
+        new_nodes.append(
+            ir.Node(
+                node.domain,
+                node.op_type,
+                remapped_inputs,
+                attributes={k: copy.deepcopy(v) for k, v in node.attributes.items()},
+                outputs=[ir.Value(name=o.name) for o in node.outputs],
+                overload=node.overload,
+                version=node.version,
+                name=node.name,
+                doc_string=node.doc_string,
+                metadata_props=copy.deepcopy(node.metadata_props),
+            )
+        )
+
+    # Rewrite graph in place on the cloned model.
+    merged.graph.remove(list(merged.graph), safe=False)
+    merged.graph.extend(new_nodes)
+    merged.graph.initializers.update(new_initializer_entries)
+    if paired_name:
+        merged.graph.opset_imports["boundlab"] = max(merged.graph.opset_imports.get("boundlab", 0), 1)
+        merged.opset_imports["boundlab"] = max(merged.opset_imports.get("boundlab", 0), 1)
     return merged
-
-
-# =====================================================================
-# Internal helpers
-# =====================================================================
-
-def _resolve_get_attr(gm: torch.fx.GraphModule, node) -> torch.Tensor | None:
-    """Return the tensor for a *get_attr* FX node, or ``None``."""
-    if not isinstance(node, torch.fx.Node) or node.op != "get_attr":
-        return None
-    obj = gm
-    for part in node.target.split("."):
-        obj = getattr(obj, part)
-    return obj.detach().clone()
-
-
-def _find_linear_groups(gm: torch.fx.GraphModule) -> list[tuple[str, torch.fx.Node]]:
-    """Return ``(kind, primary_node)`` pairs for each linear computation.
-
-    Supported patterns:
-
-    * ``"linear"``: ``aten.linear.default(input, weight, bias?)``
-    * ``"addmm"``: ``aten.addmm(bias, input, aten.t(weight))``
-    * ``"mv_add"``: ``aten.add(aten.mv(weight, input), bias)`` — used for 1-D inputs.
-    * ``"matmul_add"``: ``aten.add(aten.matmul(input, weight_t), bias)`` —
-      common in ONNX-exported affine layers where ``weight_t`` has shape
-      ``(in_features, out_features)``.
-    """
-    groups = []
-    mv_consumed: set[torch.fx.Node] = set()
-    matmul_consumed: set[torch.fx.Node] = set()
-
-    for n in gm.graph.nodes:
-        if n.op != "call_function":
-            continue
-
-        if n.target is torch.ops.aten.linear.default:
-            groups.append(("linear", n))
-
-        elif n.target is torch.ops.aten.addmm.default:
-            if len(n.args) >= 3:
-                weight_t = n.args[2]
-                if (isinstance(weight_t, torch.fx.Node)
-                        and weight_t.op == "call_function"
-                        and weight_t.target is torch.ops.aten.t.default):
-                    groups.append(("addmm", n))
-
-        elif n.target is torch.ops.aten.add.Tensor and len(n.args) >= 2:
-            # Detect:
-            # - aten.add(mv_node, bias_node) or aten.add(bias_node, mv_node)
-            # - aten.add(matmul_node, bias_node) or aten.add(bias_node, matmul_node)
-            a0, a1 = n.args[0], n.args[1]
-            mv_node = None
-            matmul_node = None
-            if (isinstance(a0, torch.fx.Node)
-                    and a0.op == "call_function"
-                    and a0.target is torch.ops.aten.mv.default
-                    and isinstance(a1, torch.fx.Node)
-                    and a1.op == "get_attr"):
-                mv_node = a0
-            elif (isinstance(a1, torch.fx.Node)
-                    and a1.op == "call_function"
-                    and a1.target is torch.ops.aten.mv.default
-                    and isinstance(a0, torch.fx.Node)
-                    and a0.op == "get_attr"):
-                mv_node = a1
-            if mv_node is not None and mv_node not in mv_consumed:
-                mv_consumed.add(mv_node)
-                groups.append(("mv_add", n))
-
-            if (isinstance(a0, torch.fx.Node)
-                    and a0.op == "call_function"
-                    and a0.target is torch.ops.aten.matmul.default
-                    and isinstance(a1, torch.fx.Node)
-                    and a1.op == "get_attr"):
-                matmul_node = a0
-            elif (isinstance(a1, torch.fx.Node)
-                    and a1.op == "call_function"
-                    and a1.target is torch.ops.aten.matmul.default
-                    and isinstance(a0, torch.fx.Node)
-                    and a0.op == "get_attr"):
-                matmul_node = a1
-            if matmul_node is not None and matmul_node not in matmul_consumed:
-                matmul_consumed.add(matmul_node)
-                groups.append(("matmul_add", n))
-
-    return groups
-
-
-def _extract_linear_params(
-    gm: torch.fx.GraphModule,
-    kind: str,
-    node: torch.fx.Node,
-) -> tuple:
-    """Return ``(input_node, weight_tensor, bias_tensor | None)``."""
-    if kind == "linear":
-        # aten.linear.default(input, weight, bias?)
-        input_node = node.args[0]
-        w = _resolve_get_attr(gm, node.args[1] if len(node.args) > 1 else None)
-        b = _resolve_get_attr(gm, node.args[2] if len(node.args) > 2 else None)
-    elif kind == "addmm":
-        # aten.addmm.default(bias, input, weight_t) where weight_t = aten.t(weight)
-        b = _resolve_get_attr(gm, node.args[0])
-        input_node = node.args[1]
-        weight_t_node = node.args[2]  # result of aten.t(weight)
-        w = _resolve_get_attr(gm, weight_t_node.args[0])
-    elif kind == "mv_add":
-        # mv_add: aten.add(aten.mv(weight, input), bias) or reversed
-        a0, a1 = node.args[0], node.args[1]
-        if (isinstance(a0, torch.fx.Node)
-                and a0.op == "call_function"
-                and a0.target is torch.ops.aten.mv.default):
-            mv_node, bias_node = a0, a1
-        else:
-            mv_node, bias_node = a1, a0
-        w = _resolve_get_attr(gm, mv_node.args[0])
-        input_node = mv_node.args[1]
-        b = _resolve_get_attr(gm, bias_node)
-    else:
-        # matmul_add: aten.add(aten.matmul(input, weight_t), bias) or reversed
-        # Here weight_t has shape (in_features, out_features), so transpose to
-        # match nn.Linear.weight shape (out_features, in_features).
-        a0, a1 = node.args[0], node.args[1]
-        if (isinstance(a0, torch.fx.Node)
-                and a0.op == "call_function"
-                and a0.target is torch.ops.aten.matmul.default):
-            matmul_node, bias_node = a0, a1
-        else:
-            matmul_node, bias_node = a1, a0
-        input_node = matmul_node.args[0]
-        w_t = _resolve_get_attr(gm, matmul_node.args[1])
-        w = None if w_t is None else w_t.transpose(0, 1)
-        b = _resolve_get_attr(gm, bias_node)
-    return input_node, w, b
-
-
-def _make_diff_linear(w1, b1, w2, b2) -> DiffLinear:
-    out_feat, in_feat = w1.shape
-    has_bias = b1 is not None and b2 is not None
-    fc1 = nn.Linear(in_feat, out_feat, bias=has_bias)
-    fc2 = nn.Linear(in_feat, out_feat, bias=has_bias)
-    with torch.no_grad():
-        fc1.weight.copy_(w1)
-        fc2.weight.copy_(w2)
-        if has_bias:
-            fc1.bias.copy_(b1)
-            fc2.bias.copy_(b2)
-    return DiffLinear(fc1, fc2)
-
-
-def _pair_aten_linears(
-    merged: torch.fx.GraphModule,
-    merged_groups: list,
-    net2: torch.fx.GraphModule,
-    net2_groups: list,
-) -> None:
-    """Replace ATen-level linear nodes with DiffLinear call_module nodes."""
-    if len(merged_groups) != len(net2_groups):
-        raise ValueError(
-            f"Networks have different numbers of linear layers: "
-            f"{len(merged_groups)} vs {len(net2_groups)}"
-        )
-    for i, ((kind1, mn), (kind2, n2)) in enumerate(zip(merged_groups, net2_groups)):
-        input_node, w1, b1 = _extract_linear_params(merged, kind1, mn)
-        _,          w2, b2 = _extract_linear_params(net2,   kind2, n2)
-
-        if w1 is None or w2 is None:
-            raise RuntimeError(f"Cannot resolve weight tensor for linear layer {i}")
-
-        dl = _make_diff_linear(w1, b1, w2, b2)
-        module_name = f"diff_linear_{i}"
-        merged.add_module(module_name, dl)
-
-        with merged.graph.inserting_before(mn):
-            new_node = merged.graph.call_module(module_name, args=(input_node,))
-        mn.replace_all_uses_with(new_node)
-        merged.graph.erase_node(mn)
-
-
-def _pair_module_linears(
-    merged: torch.fx.GraphModule,
-    merged_nodes: list,
-    net2: torch.fx.GraphModule,
-    net2_nodes: list,
-) -> None:
-    """Replace ``nn.Linear`` call_module nodes with DiffLinear call_module nodes."""
-    if len(merged_nodes) != len(net2_nodes):
-        raise ValueError(
-            f"Networks have different numbers of linear layers: "
-            f"{len(merged_nodes)} vs {len(net2_nodes)}"
-        )
-    for i, (mn, n2) in enumerate(zip(merged_nodes, net2_nodes)):
-        fc1 = copy.deepcopy(merged.get_submodule(mn.target))
-        fc2 = copy.deepcopy(net2.get_submodule(n2.target))
-        dl = DiffLinear(fc1, fc2)
-        module_name = f"diff_linear_{i}"
-        merged.add_module(module_name, dl)
-
-        with merged.graph.inserting_before(mn):
-            new_node = merged.graph.call_module(module_name, args=mn.args)
-        mn.replace_all_uses_with(new_node)
-        merged.graph.erase_node(mn)
 
 
 __all__ = ["diff_net"]

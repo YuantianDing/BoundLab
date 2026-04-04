@@ -42,7 +42,7 @@ import torch
 from boundlab.expr._core import Expr
 from boundlab.expr._affine import ConstVal
 from boundlab.expr._var import LpEpsilon
-from boundlab.interp import Interpreter
+from boundlab.interp import Interpreter  # noqa: F401
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.zono import ZonoBounds, interpret as std_interpret
 
@@ -162,27 +162,12 @@ def _register_linearizer(name: str):
 
 from . import relu as _relu  # noqa: E402  — registers "relu"
 
-interpret["ReLU"] = lambda _, x: interpret.dispatcher["relu"](x)
+# ONNX activation op name
+interpret["Relu"] = interpret["relu"]
 
-# diff_pair: converts paired tensors to DiffExpr2 during interpretation
+# diff_pair: converts paired tensors (from boundlab::diff_pair ONNX nodes) to DiffExpr2
 from boundlab.diff.op import diff_pair_handler  # noqa: E402
 interpret["diff_pair"] = diff_pair_handler
-
-def _difflinear_handler(mod, x):
-    w = DiffExpr2(ConstVal(mod.fc1.weight.detach()), ConstVal(mod.fc2.weight.detach())).transpose(0, 1)
-    y = x @ w
-    if mod.fc1.bias is None:
-        return y
-    b1 = ConstVal(mod.fc1.bias.detach())
-    b2 = ConstVal(mod.fc2.bias.detach())
-    # Expr arithmetic does not broadcast automatically; align bias rank to output rank.
-    while len(b1.shape) < len(y.shape):
-        b1 = b1.unsqueeze(0)
-        b2 = b2.unsqueeze(0)
-    return y + DiffExpr2(b1, b2)
-
-
-interpret |= {"DiffLinear": _difflinear_handler}
 
 from .relu import relu_linearizer  # noqa: E402, F401
 

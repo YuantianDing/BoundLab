@@ -15,6 +15,7 @@ import torch
 import torch.library
 
 from boundlab.diff.expr import DiffExpr2
+from boundlab.expr._affine import ConstVal
 
 
 # =====================================================================
@@ -42,8 +43,9 @@ def diff_pair(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
     This is a registered :mod:`torch.library` custom operator, so it is
     captured verbatim when the containing model is exported with
-    :func:`torch.export.export`.  At the concrete-tensor level it returns ``x``
-    unchanged (a no-op).
+    :func:`torch.export.export`. During :func:`torch.onnx.export`, it is lowered
+    to a custom-domain ONNX node ``boundlab::diff_pair``. At the
+    concrete-tensor level it returns ``x`` unchanged (a no-op).
 
     When the exported graph is run through a differential interpreter
     (e.g. :data:`boundlab.diff.zono3.interpret`) the ``diff_pair`` node is
@@ -78,6 +80,16 @@ def diff_pair(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     >>> any("diff_pair" in str(n.target) for n in gm.graph.nodes)
     True
     """
+    if torch.onnx.is_in_onnx_export():
+        # During ONNX export, emit an explicit custom-domain node so the
+        # resulting model preserves differential pairing semantics.
+        return torch.onnx.ops.symbolic(
+            "boundlab::diff_pair",
+            (x, y),
+            dtype=x.dtype,
+            shape=x.shape,
+            version=1,
+        )
     return torch.ops.boundlab.diff_pair(x, y)
 
 
@@ -142,6 +154,10 @@ def diff_pair_handler(x, y) -> DiffExpr2:
     Registered in :data:`boundlab.diff.zono3.interpret` when this module is
     imported.
     """
+    if isinstance(x, torch.Tensor):
+        x = ConstVal(x)
+    if isinstance(y, torch.Tensor):
+        y = ConstVal(y)
     return DiffExpr2(x, y)
 
 __all__ = ["diff_pair", "DiffLinear"]

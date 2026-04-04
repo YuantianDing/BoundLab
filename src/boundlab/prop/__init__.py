@@ -115,6 +115,7 @@ def ub(e: "Expr") -> torch.Tensor:
     >>> ub(x).shape
     torch.Size([1])
     """
+    e.jacobian_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 
@@ -190,6 +191,7 @@ def lb(e: "Expr") -> torch.Tensor:
     >>> lb(x).shape
     torch.Size([1])
     """
+    e.jacobian_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 
@@ -304,6 +306,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     >>> (u >= l).all().item()
     True
     """
+    e.jacobian_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 
@@ -379,7 +382,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
             child_weights = child_weights_exact
 
         if child_weights is None:
-            if (boundlab.expr.ExprFlags.SYMMETRIC_TO_0 in current.flags
+            if (current.flags & boundlab.expr.ExprFlags.SYMMETRIC_TO_0 != 0
                     and len(current.children) == 0):
                 # Leaf symmetric node: compute one-sided bound and reuse via ±
                 result = current.backward(weight, direction="<=")

@@ -172,6 +172,8 @@ class Expr:
         if isinstance(other, (int, float)):
             return AffineSum((ScalarOp(float(other), self.shape), self))
         if isinstance(other, torch.Tensor):
+            if other.dim() == 0:
+                return AffineSum((ScalarOp(float(other.item()), self.shape), self))
             return AffineSum((EinsumOp.from_hardmard(other, len(self.shape)), self))
         return NotImplemented
 
@@ -185,6 +187,8 @@ class Expr:
         if isinstance(other, (int, float)):
             return AffineSum((ScalarOp(float(other), self.shape), self))
         if isinstance(other, torch.Tensor):
+            if other.dim() == 0:
+                return AffineSum((ScalarOp(float(other.item()), self.shape), self))
             return AffineSum((EinsumOp.from_hardmard(other, len(self.shape)), self))
         return NotImplemented
 
@@ -193,10 +197,15 @@ class Expr:
         from boundlab.expr._affine import AffineSum, ConstVal
         if isinstance(other, ConstVal):
             other = other.value
+    
 
         if isinstance(other, (int, float)):
             return self * (1.0 / other)
         if isinstance(other, torch.Tensor):
+            if len(self.shape) == 0 and other.dim() > 0:
+                return self.expand(*list(other.shape)) * (1.0 / other)
+            if other.dim() > 0 and tuple(self.shape) != tuple(other.shape):
+                other = other.expand(*list(self.shape))
             return self * (1.0 / other)
         return NotImplemented
 
@@ -382,6 +391,10 @@ class Expr:
         that has no symbolic children.
         """
         return None
+    
+    def jacobian_ops_(self):
+        """Recursively compute Jacobian ops for affine expressions."""
+        pass
 
 
 def expr_pretty_print(expr: Expr, indent: int = 0) -> str:

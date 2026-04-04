@@ -24,11 +24,12 @@ from io import StringIO
 import boundlab.expr as expr
 import boundlab.prop as prop
 import boundlab.zono as zono
+from boundlab.utils import onnx_export
 
 
 def _export(model: nn.Module, in_shape: list[int]):
-    """Export *model* to a pre-autograd GraphModule."""
-    return torch.export.export(model, (torch.zeros(in_shape),))
+    """Export *model* to ONNX IR."""
+    return onnx_export(model, (in_shape,))
 
 
 # ---- helpers ----------------------------------------------------------------

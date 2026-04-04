@@ -22,8 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import onnx_ir
 import torch
-import onnx2torch
 
 import boundlab.expr as expr
 from boundlab.diff.net import diff_net
@@ -36,8 +36,7 @@ from boundlab.diff.expr import DiffExpr2, DiffExpr3
 # =====================================================================
 diff_interpret = Interpreter(_diff_interpret)
 diff_interpret |= {
-    "Softmax": lambda mod, x: x,
-    "_softmax": lambda x, dim, _half_to_float=False: x
+    "Softmax": lambda X, **_: X,
 }
 
 EXAMPLES_DIR = Path(__file__).parent / "examples"
@@ -75,30 +74,11 @@ def parse_vnnlib_input_bounds(path: Path) -> tuple[torch.Tensor, torch.Tensor]:
 # BoundLab computation
 # =====================================================================
 
-def _load_merged(net1_path: Path, net2_path: Path, sample_input: torch.Tensor):
-    """Load, merge, and return the diff interpreter for the two networks.
-
-    Tries module-level merge first (works when onnx2torch produces nn.Linear
-    submodules).  Falls back to re-exporting to ATen level so that the
-    ``aten.mv + aten.add`` or ``aten.addmm`` patterns can be detected.
-    """
-    m1 = onnx2torch.convert(str(net1_path))
-    m2 = onnx2torch.convert(str(net2_path))
-
-    # Module-level merge: works when onnx2torch exposes nn.Linear submodules
-    merged_mod = diff_net(m1, m2)
-    has_diff_linear = any(
-        n.op == "call_module" and str(n.target).startswith("diff_linear_")
-        for n in merged_mod.graph.nodes
-    )
-
-    if not has_diff_linear:
-        # Fall back to ATen-level: re-export both models and merge
-        gm1 = torch.export.export(m1, (sample_input,)).module()
-        gm2 = torch.export.export(m2, (sample_input,)).module()
-        merged_mod = diff_net(gm1, gm2)
-
-    return diff_interpret(merged_mod)
+def _load_merged(net1_path: Path, net2_path: Path):
+    """Merge the two ONNX networks and return a bound diff interpreter."""
+    merged = diff_net(net1_path, net2_path)
+    # onnx_ir.save(merged, "merged.onnx")
+    return diff_interpret(merged)
 
 
 def boundlab_distance_bound(
@@ -112,7 +92,7 @@ def boundlab_distance_bound(
     eps = expr.LpEpsilon(list(center.shape))
     z = expr.ConstVal(center) + half_width * eps
 
-    op = _load_merged(net1_path, net2_path, center)
+    op = _load_merged(net1_path, net2_path)
 
     # Some batched models (e.g. with Softmax(dim=1)) need 2-D input
     try:
@@ -199,24 +179,24 @@ CASES = [
         "net2": NETS_DIR / "2_80-1-0.1.onnx",
         "spec": SPECS_DIR / "sigma_0.1.vnnlib",
     },
-    {
-        "name": "MNIST relu-3-100 vs pruned5 (img 0)",
-        "net1": NETS_DIR / "mnist_relu_3_100.onnx",
-        "net2": NETS_DIR / "mnist_relu_3_100_pruned5.onnx",
-        "spec": SPECS_DIR / "mnist_0_local_15.vnnlib",
-    },
-    {
-        "name": "MNIST relu-3-100 vs pruned5 (img 7)",
-        "net1": NETS_DIR / "mnist_relu_3_100.onnx",
-        "net2": NETS_DIR / "mnist_relu_3_100_pruned5.onnx",
-        "spec": SPECS_DIR / "mnist_7_local_15.vnnlib",
-    },
-    {
-        "name": "ACAS Xu 1_1 vs pruned5",
-        "net1": NETS_DIR / "ACASXU_run2a_1_1_batch_2000.onnx",
-        "net2": NETS_DIR / "ACASXU_run2a_1_1_batch_2000_pruned5.onnx",
-        "spec": SPECS_DIR / "prop_1.vnnlib",
-    },
+    # {
+    #     "name": "MNIST relu-3-100 vs pruned5 (img 0)",
+    #     "net1": NETS_DIR / "mnist_relu_3_100.onnx",
+    #     "net2": NETS_DIR / "mnist_relu_3_100_pruned5.onnx",
+    #     "spec": SPECS_DIR / "mnist_0_local_15.vnnlib",
+    # },
+    # {
+    #     "name": "MNIST relu-3-100 vs pruned5 (img 7)",
+    #     "net1": NETS_DIR / "mnist_relu_3_100.onnx",
+    #     "net2": NETS_DIR / "mnist_relu_3_100_pruned5.onnx",
+    #     "spec": SPECS_DIR / "mnist_7_local_15.vnnlib",
+    # },
+    # {
+    #     "name": "ACAS Xu 1_1 vs pruned5",
+    #     "net1": NETS_DIR / "ACASXU_run2a_1_1_batch_2000.onnx",
+    #     "net2": NETS_DIR / "ACASXU_run2a_1_1_batch_2000_pruned5.onnx",
+    #     "spec": SPECS_DIR / "prop_1.vnnlib",
+    # },
 ]
 
 
@@ -232,13 +212,8 @@ def main():
         center, half_width = parse_vnnlib_input_bounds(spec)
 
         # BoundLab
-        try:
-            bl = boundlab_distance_bound(net1, net2, center, half_width)
-            bl_str = f"{bl:.6f}"
-        except Exception as e:
-            bl_str = f"ERR"
-            bl = None
-            print(f"  BoundLab error for {name}: {e}", file=sys.stderr)
+        bl = boundlab_distance_bound(net1, net2, center, half_width)
+        bl_str = f"{bl:.6f}"
 
         # VeriDiff
         vd = veridiff_distance_bound(net1, net2, spec)
