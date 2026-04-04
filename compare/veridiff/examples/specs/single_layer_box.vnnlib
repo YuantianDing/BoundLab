@@ -1,0 +1,8 @@
+; 2D box input around 0 with epsilon 0.1
+(declare-const X_0 Real)
+(declare-const X_1 Real)
+
+(assert (<= X_0 0.1))
+(assert (>= X_0 -0.1))
+(assert (<= X_1 0.1))
+(assert (>= X_1 -0.1))

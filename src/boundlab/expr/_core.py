@@ -109,7 +109,9 @@ class Expr:
     # ------------------------------------------------------------------
 
     def __add__(self, other):
-        from boundlab.expr._affine import AffineSum
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
         if isinstance(other, int) and other == 0:
             return self
         if isinstance(other, torch.Tensor):
@@ -122,7 +124,9 @@ class Expr:
         return NotImplemented
 
     def __radd__(self, other):
-        from boundlab.expr._affine import AffineSum
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
         if isinstance(other, int) and other == 0:
             return self
         if isinstance(other, torch.Tensor):
@@ -134,11 +138,14 @@ class Expr:
         return NotImplemented
 
     def __neg__(self):
-        from boundlab.expr._affine import AffineSum
+        from boundlab.expr._affine import AffineSum, ConstVal
         from boundlab.linearop import EinsumOp
         return AffineSum((ScalarOp(-1.0, self.shape), self))
 
     def __sub__(self, other):
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
         if isinstance(other, Expr):
             return self + (-other)
         if isinstance(other, torch.Tensor):
@@ -146,6 +153,9 @@ class Expr:
         return NotImplemented
 
     def __rsub__(self, other):
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
         if isinstance(other, Expr):
             return other + (-self)
         if isinstance(other, torch.Tensor):
@@ -154,7 +164,10 @@ class Expr:
 
     def __mul__(self, other):
         """Element-wise multiplication (no broadcast)."""
-        from boundlab.expr._affine import AffineSum
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
+            
         from boundlab.linearop import EinsumOp, ScalarOp
         if isinstance(other, (int, float)):
             return AffineSum((ScalarOp(float(other), self.shape), self))
@@ -164,7 +177,10 @@ class Expr:
 
     def __rmul__(self, other):
         """Element-wise multiplication (no broadcast)."""
-        from boundlab.expr._affine import AffineSum
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
+
         from boundlab.linearop import EinsumOp, ScalarOp
         if isinstance(other, (int, float)):
             return AffineSum((ScalarOp(float(other), self.shape), self))
@@ -174,6 +190,10 @@ class Expr:
 
     def __truediv__(self, other):
         """Division by a scalar or tensor."""
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
+
         if isinstance(other, (int, float)):
             return self * (1.0 / other)
         if isinstance(other, torch.Tensor):
@@ -182,7 +202,10 @@ class Expr:
 
     def __matmul__(self, other):
         """Matrix multiply: self @ other."""
-        from boundlab.expr._affine import AffineSum
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
+
         from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor) and len(other.shape) == 2:
             assert self.shape[-1] == other.shape[0], f"Inner dimension of self {self.shape} must match first dimension of other {other.shape} for matmul."
@@ -199,7 +222,10 @@ class Expr:
         - Tensor(m, k) @ Expr(k,)   → Expr(m,)      (matrix-vector)
         - Tensor(m, k) @ Expr(k, n) → Expr(m, n)     (matrix-matrix)
         """
-        from boundlab.expr._affine import AffineSum
+        from boundlab.expr._affine import AffineSum, ConstVal
+        if isinstance(other, ConstVal):
+            other = other.value
+            
         from boundlab.linearop import EinsumOp
         if isinstance(other, torch.Tensor) and len(other.shape) == 2:
             m, k = other.shape
@@ -237,6 +263,13 @@ class Expr:
     def transpose(self, dim0, dim1) -> "Expr":
         from boundlab.linearop import TransposeOp
         return self._apply_op(TransposeOp(self.shape, dim0, dim1))
+    
+    @property
+    def T(self) -> "Expr":
+        """Convenience for transpose of the last two dimensions."""
+        if len(self.shape) < 2:
+            raise ValueError(f"Cannot transpose last two dimensions of shape {self.shape} with less than 2 dims.")
+        return self.transpose(len(self.shape) - 2, len(self.shape) - 1)
 
     def flatten(self, start_dim=0, end_dim=-1) -> "Expr":
         from boundlab.linearop import FlattenOp

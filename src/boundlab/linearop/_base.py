@@ -250,9 +250,6 @@ class ComposedOp(LinearOp):
             return other
         return super().__rmatmul__(other)
     
-    def abs(self) -> "LinearOp":
-        return ComposedOp(*(op.abs() for op in self.ops))
-    
     def sum_input(self):
         ops = self.ops.copy()
         ops[-1] = ops[-1].sum_input()
@@ -264,18 +261,30 @@ class ComposedOp(LinearOp):
         return ComposedOp(*ops)
     
     def jacobian(self):
-        jac = self.ops[0].jacobian()
-        if jac is not NotImplemented:
-            for op in self.ops[1:]:
-                jac = op.vbackward(jac)
-            return jac
-        
-        jac = self.ops[-1].jacobian()
-        if jac is not NotImplemented:
-            for op in reversed(self.ops[:-1]):
-                jac = op.vforward(jac)
-            return jac
-
+        if self.input_shape.numel() >= self.output_shape.numel():
+            jac = self.ops[0].jacobian()
+            if jac is not NotImplemented:
+                for op in self.ops[1:]:
+                    jac = op.vbackward(jac)
+                return jac
+            
+            jac = self.ops[-1].jacobian()
+            if jac is not NotImplemented:
+                for op in reversed(self.ops[:-1]):
+                    jac = op.vforward(jac)
+                return jac
+        elif self.output_shape.numel() > self.input_shape.numel():
+            jac = self.ops[-1].jacobian()
+            if jac is not NotImplemented:
+                for op in reversed(self.ops[:-1]):
+                    jac = op.vforward(jac)
+                return jac
+            
+            jac = self.ops[0].jacobian()
+            if jac is not NotImplemented:
+                for op in self.ops[1:]:
+                    jac = op.vbackward(jac)
+                return jac
         return NotImplemented
 
 
@@ -319,9 +328,6 @@ class SumOp(LinearOp):
     def __rmatmul__(self, other):
         return super().__rmatmul__(other)
     
-    def abs(self) -> "LinearOp":
-        print(f"Warning: taking abs of a {self} may be loose; consider using abs on individual terms if possible.")
-        return SumOp(*(op.abs() for op in self.ops))
     
     def sum_input(self):
         return SumOp(*(op.sum_input() for op in self.ops))

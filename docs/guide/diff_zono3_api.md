@@ -277,7 +277,6 @@ print("Tighter?", (diff_width < naive_width).all().item())  # True
 - Only `relu` has a differential linearizer.  Other nonlinear ops (`tanh`,
   `exp`, `softmax`) fall back to the standard zonotope handler applied
   independently to each branch, which may be less tight.
-- `DiffLinear` can only be placed at the input boundary of a model.
 - The `diff` component in `DiffExpr2` is not explicitly tracked; call
   `out.x - out.y` to compute it, but be aware this loses the cancellation
   structure that `DiffExpr3.diff` preserves.

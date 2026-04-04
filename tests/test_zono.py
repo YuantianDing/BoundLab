@@ -21,7 +21,7 @@ def _export(model: nn.Module, in_shape: list[int]):
     return torch.export.export(model, (torch.zeros(in_shape),))
 
 
-_relu_handler = zono.interpret.dispatcher["relu"]
+_relu_handler = zono.interpret["relu"]
 
 
 def _sample_inputs(center: torch.Tensor, n: int = 2000) -> torch.Tensor:

@@ -148,14 +148,14 @@ def test_stack_dim1():
 # ---------------------------------------------------------------------------
 # ReLU linearizer
 # ---------------------------------------------------------------------------
-# Call the registered handler directly: zono.interpret.dispatcher["relu"]
+# Call the registered handler directly: zono.interpret["relu"]
 
 def test_relu_dead_neuron():
     # center=-2, eps in [-1,1] -> ub=-1 <= 0: dead neuron, output is 0
     center = expr.ConstVal(torch.tensor([-2.0]))
     eps = expr.LpEpsilon([1])
     x = center + eps
-    handler = zono.interpret.dispatcher["relu"]
+    handler = zono.interpret["relu"]
     result = handler(x)
     assert torch.allclose(result.ub(), torch.zeros(1), atol=1e-6)
     assert torch.allclose(result.lb(), torch.zeros(1), atol=1e-6)
@@ -166,7 +166,7 @@ def test_relu_active_neuron():
     center = expr.ConstVal(torch.tensor([2.0]))
     eps = expr.LpEpsilon([1])
     x = center + eps
-    handler = zono.interpret.dispatcher["relu"]
+    handler = zono.interpret["relu"]
     result = handler(x)
     assert torch.allclose(result.ub(), torch.tensor([3.0]), atol=1e-5)
     assert torch.allclose(result.lb(), torch.tensor([1.0]), atol=1e-5)
@@ -179,7 +179,7 @@ def test_relu_crossing_neuron():
     # ub = 0.5*1 + 0.25 + 0.25*1 = 1.0
     # lb = 0.5*(-1) + 0.25 + 0.25*(-1) = -0.5
     eps = expr.LpEpsilon([1])
-    handler = zono.interpret.dispatcher["relu"]
+    handler = zono.interpret["relu"]
     result = handler(eps)
     assert result.ub().item() == pytest.approx(1.0, abs=1e-5)
     assert result.lb().item() == pytest.approx(-0.5, abs=1e-5)

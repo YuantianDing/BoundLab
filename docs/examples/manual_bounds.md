@@ -22,7 +22,7 @@ b = torch.tensor([0.1, -0.3])
 y_lin = W @ x + expr.ConstVal(b)
 
 # Apply zonotope ReLU handler directly.
-relu = zono.interpret.dispatcher["relu"]
+relu = zono.interpret["relu"]
 y = relu(y_lin)
 
 ub, lb = y.ublb()

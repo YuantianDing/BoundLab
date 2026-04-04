@@ -143,7 +143,7 @@ ReLU handler:
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
 import boundlab.zono as zono
 
-relu_handler = diff_interpret.dispatcher["relu"]
+relu_handler = diff_interpret["relu"]
 
 def _pt(center, half):
     """Point zonotope: 1-d, center ± half."""

@@ -9,7 +9,7 @@ previous design.
 """
 
 import sys
-from typing import Literal
+from typing import Literal, override
 
 import torch
 
@@ -165,3 +165,83 @@ class ConstVal(AffineSum):
             return 0
         else:
             return self.value
+        
+    def __add__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(self.get_const() + other)
+        elif isinstance(other, ConstVal):
+            return ConstVal(self.get_const() + other.get_const())
+        return super().__add__(other)
+    
+    def __radd__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(other + self.get_const())
+        if isinstance(other, ConstVal):
+            return ConstVal(other.get_const() + self.get_const())
+        return super().__radd__(other)
+    
+    def __neg__(self):
+        return ConstVal(-self.get_const())
+    
+    def __sub__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(self.get_const() - other)
+        elif isinstance(other, ConstVal):
+            return ConstVal(self.get_const() - other.get_const())
+        return super().__sub__(other)
+    
+    def __rsub__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(other - self.get_const())
+        elif isinstance(other, ConstVal):
+            return ConstVal(other.get_const() - self.get_const())
+        return super().__rsub__(other)
+    
+    def __truediv__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(self.get_const() / other)
+        elif isinstance(other, ConstVal):
+            return ConstVal(self.get_const() / other.get_const())
+        return super().__truediv__(other)
+    
+    def __rtruediv__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(other / self.get_const())
+        elif isinstance(other, ConstVal):
+            return ConstVal(other.get_const() / self.get_const())
+        return super().__rtruediv__(other)
+    
+    def __abs__(self):
+        return ConstVal(abs(self.get_const()))
+        
+    def __mul__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(self.get_const() * other)
+        elif isinstance(other, ConstVal):
+            return ConstVal(self.get_const() * other.get_const())
+        return super().__mul__(other)
+    
+    def __rmul__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(other * self.get_const())
+        if isinstance(other, ConstVal):
+            return ConstVal(other.get_const() * self.get_const())
+        return super().__rmul__(other)
+
+    def __matmul__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(self.get_const() @ other)
+        elif isinstance(other, ConstVal):
+            return ConstVal(self.get_const() @ other.get_const())
+        return super().__matmul__(other)
+    
+    def __rmatmul__(self, other):
+        if isinstance(other, torch.Tensor):
+            return ConstVal(other @ self.get_const())
+        elif isinstance(other, ConstVal):
+            return ConstVal(other.get_const() @ self.get_const())
+        return super().__rmatmul__(other)
+    
+    @override
+    def _apply_op(self, op):
+        return ConstVal(op.forward(self.get_const()))

@@ -75,9 +75,7 @@ def _bounds_to_expr(bounds: ZonoBounds, inputs: list) -> Expr:
 # Interpreter
 # =====================================================================
 
-interpret = Interpreter[Expr | DiffExpr2 | DiffExpr3](
-    dict(std_interpret.dispatcher)
-)
+interpret = Interpreter[Expr | DiffExpr2 | DiffExpr3](std_interpret)
 """Differential-verification interpreter.
 
 Feed it a :class:`~boundlab.diff.expr.DiffExpr3` ``(x, y, d)`` where *x* and
@@ -131,7 +129,7 @@ def _register_linearizer(name: str):
     inputs fall back to the standard zonotope handler.
     """
     def decorator(linearizer):
-        std_handler = std_interpret.dispatcher[name]
+        std_handler = std_interpret[name]
 
         def handler(t: Expr | DiffExpr2 | DiffExpr3) -> Expr | DiffExpr2 | DiffExpr3:
             if isinstance(t, DiffExpr3):
@@ -153,7 +151,7 @@ def _register_linearizer(name: str):
                 )
             return std_handler(t)
 
-        interpret.dispatcher[name] = handler
+        interpret[name] = handler
         return linearizer
     return decorator
 
@@ -164,11 +162,27 @@ def _register_linearizer(name: str):
 
 from . import relu as _relu  # noqa: E402  — registers "relu"
 
-interpret.dispatcher["ReLU"] = lambda _, x: interpret.dispatcher["relu"](x)
+interpret["ReLU"] = lambda _, x: interpret.dispatcher["relu"](x)
 
 # diff_pair: converts paired tensors to DiffExpr2 during interpretation
 from boundlab.diff.op import diff_pair_handler  # noqa: E402
-interpret.dispatcher["diff_pair"] = diff_pair_handler
+interpret["diff_pair"] = diff_pair_handler
+
+def _difflinear_handler(mod, x):
+    w = DiffExpr2(ConstVal(mod.fc1.weight.detach()), ConstVal(mod.fc2.weight.detach())).transpose(0, 1)
+    y = x @ w
+    if mod.fc1.bias is None:
+        return y
+    b1 = ConstVal(mod.fc1.bias.detach())
+    b2 = ConstVal(mod.fc2.bias.detach())
+    # Expr arithmetic does not broadcast automatically; align bias rank to output rank.
+    while len(b1.shape) < len(y.shape):
+        b1 = b1.unsqueeze(0)
+        b2 = b2.unsqueeze(0)
+    return y + DiffExpr2(b1, b2)
+
+
+interpret |= {"DiffLinear": _difflinear_handler}
 
 from .relu import relu_linearizer  # noqa: E402, F401
 

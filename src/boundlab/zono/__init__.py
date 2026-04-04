@@ -25,10 +25,10 @@ import torch
 from boundlab import expr
 from boundlab.expr._core import Expr
 from boundlab.expr._var import LpEpsilon
-from boundlab.interp import Interpreter
+from boundlab.interp import TENSOR_BASE_INTERPRETER, Interpreter
 from boundlab.linearop import LinearOp
 
-interpret = Interpreter({})
+interpret = Interpreter(TENSOR_BASE_INTERPRETER)
 """Zonotope-based interpreter.
 
 Examples
@@ -70,82 +70,35 @@ def _register_linearizer(name: str):
             new_eps = LpEpsilon(bounds.error_coeffs.input_shape)
             result_expr = result_expr + bounds.error_coeffs(new_eps)
             return result_expr
-        interpret.dispatcher[name] = handler
+        interpret[name] = handler
         return linearizer
     return decorator
 
-
-# =====================================================================
-# Affine operator registrations
-# =====================================================================
-
-def _linear(x, w, b=None):
-    """aten.linear.default: weight and bias arrive as ConstVal from get_attr."""
-    assert isinstance(w, expr.ConstVal), "Expected weight to arrive as ConstVal"
-    assert b is None or isinstance(b, expr.ConstVal), "Expected bias to arrive as ConstVal or None"
-    return x @ w.value.T + (b.value if b is not None else 0)
-
-interpret.dispatcher.update({
-    # ---- arithmetic ---------------------------------------------------
-    "add":        lambda x, y: x + y,
-    "sub":        lambda x, y: x - y,
-    "neg":        lambda x: -x,
-    "mul":        lambda x, y: x * y if isinstance(y, torch.Tensor) else y * x,
-    "div":        lambda x, y: x / y,
-    "truediv":    lambda x, y: x / y,
-    "floordiv":   lambda x, y: x / y,
-    # ---- linear layers ------------------------------------------------
-    # F.linear / aten.linear.default
-    "linear":     _linear,
-    # ATen lowered form: aten.t.default + aten.addmm.default
-    "t":          lambda x: x.transpose(0, 1),
-    "addmm":      lambda bias, inp, mat2: (
-                      inp @ (mat2.value if isinstance(mat2, expr.ConstVal) else mat2)
-                      + (bias.value if isinstance(bias, expr.ConstVal) else bias)
-                  ),
-    # ---- shape ops ----------------------------------------------------
-    "reshape":    lambda x, *shape: x.reshape(*shape),
-    "view":       lambda x, *shape: x.reshape(*shape),
-    "flatten":    lambda x, start_dim=0, end_dim=-1: x.flatten(start_dim, end_dim),
-    "permute":    lambda x, *dims: x.permute(*dims),
-    "transpose":  lambda x, dim0, dim1: x.transpose(dim0, dim1),
-    "unsqueeze":  lambda x, dim: x.unsqueeze(dim),
-    "squeeze":    lambda x, dim=None: x.squeeze(dim),
-    "contiguous": lambda x: x,
-    # ---- tuple/pair helpers -------------------------------------------
-    # getitem: integer index used for tuple-unpacking in exported graphs
-    "getitem":    lambda x, idx: x[idx],
-})
 
 
 # =====================================================================
 # Import activation modules — each calls _register_linearizer
 # =====================================================================
 
-from . import relu as _relu            # registers "relu"
-from . import exp as _exp              # registers "exp"
-from . import reciprocal as _reciprocal  # registers "reciprocal"
-from . import tanh as _tanh            # registers "tanh"
-
-# call_module handlers (mod is the nn.Module instance)
-interpret.dispatcher["ReLU"]  = lambda _, x: interpret.dispatcher["relu"](x)
-interpret.dispatcher["Tanh"]  = lambda _, x: interpret.dispatcher["tanh"](x)
-
-# Bilinear matmul handler (supports Expr @ Expr)
-from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
-interpret.dispatcher["matmul"] = matmul_handler
-interpret.dispatcher["bmm"]    = matmul_handler
-interpret.dispatcher["mm"]     = matmul_handler
-
-# Softmax: both call_module (nn.Softmax) and ATen lowered (_softmax.default)
-from .softmax import softmax_handler
-interpret.dispatcher["softmax"]  = softmax_handler
-interpret.dispatcher["_softmax"] = lambda x, dim, _half_to_float=False: softmax_handler(x, dim=dim)
-
 from .relu import relu_linearizer
 from .exp import exp_linearizer
 from .reciprocal import reciprocal_linearizer
 from .tanh import tanh_linearizer
+
+# call_module handlers (mod is the nn.Module instance)
+interpret["ReLU"] = lambda _, x: interpret["relu"](x)
+interpret["Tanh"] = lambda _, x: interpret["tanh"](x)
+
+# Bilinear matmul handler (supports Expr @ Expr)
+from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
+interpret["matmul"] = matmul_handler
+interpret["bmm"] = matmul_handler
+interpret["mm"] = matmul_handler
+
+# Softmax: both call_module (nn.Softmax) and ATen lowered (_softmax.default)
+from .softmax import softmax_handler
+interpret["softmax"] = softmax_handler
+interpret["_softmax"] = lambda x, dim, _half_to_float=False: softmax_handler(x, dim=dim)
 
 __all__ = [
     "interpret", "ZonoBounds",

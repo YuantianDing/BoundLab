@@ -21,6 +21,7 @@ from torch import nn
 import boundlab.expr as expr
 import boundlab.zono as zono
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.net import diff_net
 from boundlab.diff.op import DiffLinear, diff_pair
 from boundlab.diff.zono3 import interpret as diff_interpret
 
@@ -37,7 +38,7 @@ def _export(model: nn.Module, *in_shapes: list[int]):
 def _zonotope(center: torch.Tensor, scale: float = 1.0) -> expr.Expr:
     """L∞ zonotope: center ± scale, with a fresh independent epsilon symbol."""
     e = expr.LpEpsilon(list(center.shape))
-    return expr.Add(expr.ConstVal(center), torch.full_like(center, scale) * e)
+    return center + scale * e
 
 
 def _make_triple(c1: torch.Tensor, c2: torch.Tensor, scale: float = 1.0) -> DiffExpr3:
@@ -346,7 +347,7 @@ def test_diffexpr3_getitem_int():
 # ReLU differential soundness (per-regime)
 # =====================================================================
 
-_relu_handler = diff_interpret.dispatcher["relu"]
+_relu_handler = diff_interpret["relu"]
 
 
 def test_relu_diff_dead_dead_is_zero():
@@ -600,6 +601,118 @@ def test_diff_linear_parametric_sound(seed: int):
     with torch.no_grad():
         diffs = model[2](torch.relu(fc1(s))) - model[2](torch.relu(fc2(s)))
     _check_sound(out.diff, diffs, tol=2e-5)
+
+
+def test_diff_net_merges_linear_layers_with_difflinear():
+    """diff_net should merge corresponding linear nodes via DiffLinear modules."""
+    torch.manual_seed(63)
+    model1 = nn.Linear(4, 3)
+    model2 = nn.Linear(4, 3)
+    gm1 = _export(model1, [4]).module()
+    gm2 = _export(model2, [4]).module()
+
+    merged = diff_net(gm1, gm2)
+    merged_difflinear_targets = [
+        n.target
+        for n in merged.graph.nodes
+        if n.op == "call_module" and str(n.target).startswith("diff_linear_")
+    ]
+    assert len(merged_difflinear_targets) == 1
+    assert all(isinstance(merged.get_submodule(t), DiffLinear) for t in merged_difflinear_targets)
+
+    op = diff_interpret(merged)
+    c = torch.randn(4)
+    z = _zonotope(c, scale=0.3)
+    out = op(z)
+    assert isinstance(out, DiffExpr2)
+
+    s = c + (torch.rand(2000, 4) * 2 - 1) * 0.3
+    with torch.no_grad():
+        diffs = model1(s) - model2(s)
+    _check_sound(out.x - out.y, diffs, tol=2e-5)
+
+
+def test_diff_net_deep_mlp_conversion_and_concrete_semantics():
+    """diff_net converts deep MLP linears and preserves concrete branch-1 behavior."""
+    torch.manual_seed(64)
+    model1 = nn.Sequential(
+        nn.Linear(5, 9),
+        nn.ReLU(),
+        nn.Linear(9, 7),
+        nn.ReLU(),
+        nn.Linear(7, 4),
+    )
+    model2 = nn.Sequential(
+        nn.Linear(5, 9),
+        nn.ReLU(),
+        nn.Linear(9, 7),
+        nn.ReLU(),
+        nn.Linear(7, 4),
+    )
+    gm1 = _export(model1, [5]).module()
+    gm2 = _export(model2, [5]).module()
+
+    merged = diff_net(gm1, gm2)
+    merged_difflinear_targets = [
+        n.target
+        for n in merged.graph.nodes
+        if n.op == "call_module" and str(n.target).startswith("diff_linear_")
+    ]
+    assert len(merged_difflinear_targets) == 3
+    assert all(isinstance(merged.get_submodule(t), DiffLinear) for t in merged_difflinear_targets)
+
+    # Concrete semantics: diff_pair is a runtime no-op returning its first argument.
+    # With shared placeholders, the merged model should match model1(x).
+    x1 = torch.randn(5)
+    with torch.no_grad():
+        y_expected = model1(x1)
+        y_a = merged(x1)
+
+    if isinstance(y_a, tuple):
+        assert len(y_a) == 1
+        y_a = y_a[0]
+
+    assert torch.allclose(y_a, y_expected, atol=1e-6)
+
+
+def test_diff_net_merges_matmul_add_affine_pattern():
+    """diff_net should pair ONNX-style ``aten.matmul + aten.add`` affine layers."""
+    torch.manual_seed(65)
+
+    class MatMulAffine(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # ONNX-style affine params: x @ w + b, with w shape (in, out)
+            self.w = nn.Parameter(torch.randn(4, 3))
+            self.b = nn.Parameter(torch.randn(3))
+
+        def forward(self, x):
+            return x @ self.w + self.b
+
+    model1 = MatMulAffine()
+    model2 = MatMulAffine()
+    gm1 = _export(model1, [4]).module()
+    gm2 = _export(model2, [4]).module()
+
+    merged = diff_net(gm1, gm2)
+    merged_difflinear_targets = [
+        n.target
+        for n in merged.graph.nodes
+        if n.op == "call_module" and str(n.target).startswith("diff_linear_")
+    ]
+    assert len(merged_difflinear_targets) == 1
+    assert all(isinstance(merged.get_submodule(t), DiffLinear) for t in merged_difflinear_targets)
+
+    op = diff_interpret(merged)
+    c = torch.randn(4)
+    z = _zonotope(c, scale=0.2)
+    out = op(z.unsqueeze(0))
+    assert isinstance(out, DiffExpr2)
+
+    s = c + (torch.rand(2000, 4) * 2 - 1) * 0.2
+    with torch.no_grad():
+        diffs = model1(s) - model2(s)
+    _check_sound(out.x.squeeze(0) - out.y.squeeze(0), diffs, tol=2e-5)
 
 
 # =====================================================================
@@ -862,6 +975,44 @@ def test_multi_diff_linear_chain_tighter_than_naive():
     assert (paired_width <= naive_width + 1e-4).all()
 
 
+def test_multiple_difflinear_small_difference_sound():
+    """Two DiffLinear layers with small branch deltas are empirically sound."""
+    torch.manual_seed(97)
+
+    fc1a = nn.Linear(4, 6)
+    fc1b = copy.deepcopy(fc1a)
+    fc2a = nn.Linear(6, 5)
+    fc2b = copy.deepcopy(fc2a)
+
+    # Keep the inter-network deltas intentionally small.
+    with torch.no_grad():
+        fc1b.weight.add_(1e-3 * torch.randn_like(fc1b.weight))
+        fc1b.bias.add_(1e-3 * torch.randn_like(fc1b.bias))
+        fc2b.weight.add_(1e-3 * torch.randn_like(fc2b.weight))
+        fc2b.bias.add_(1e-3 * torch.randn_like(fc2b.bias))
+
+    model = nn.Sequential(
+        DiffLinear(fc1a, fc1b),
+        nn.ReLU(),
+        DiffLinear(fc2a, fc2b),
+        nn.ReLU(),
+        nn.Linear(5, 3),
+    )
+    gm = _export(model, [4])
+    op = diff_interpret(gm)
+
+    c = torch.randn(4)
+    z = _zonotope(c, scale=0.1)
+    out = op(z)
+    assert isinstance(out, DiffExpr3)
+
+    s = c + (torch.rand(2500, 4) * 2 - 1) * 0.1
+    with torch.no_grad():
+        head = model[4]
+        diffs = head(torch.relu(fc2a(torch.relu(fc1a(s))))) - head(torch.relu(fc2b(torch.relu(fc1b(s)))))
+    _check_sound(out.diff, diffs, tol=5e-5)
+
+
 def test_diffexpr3_matmul_weight_difference():
     """DiffExpr3 @ W captures the bilinear identity: d@W1 + y*(W1-W2).
 
@@ -904,16 +1055,17 @@ def test_diff_linear_deep_relu_sound():
     standard ReLU+Linear layers compound the differential tracking.
     """
     torch.manual_seed(97)
-    fc1a = nn.Linear(5, 8)
-    fc1b = nn.Linear(5, 8)
-    fc2 = nn.Linear(8, 6)
+    fc1a = nn.Linear(5, 8, bias=False)
+    fc1b = nn.Linear(5, 8, bias=False)
+    fc2a = nn.Linear(8, 6, bias=False)
+    fc2b = nn.Linear(8, 6, bias=False)
     fc3 = nn.Linear(6, 4)
     fc4 = nn.Linear(4, 3)
 
     model = nn.Sequential(
         DiffLinear(fc1a, fc1b),
         nn.ReLU(),
-        fc2, nn.ReLU(),
+        DiffLinear(fc2a, fc2b), nn.ReLU(),
         fc3, nn.ReLU(),
         fc4,
     )
@@ -927,11 +1079,40 @@ def test_diff_linear_deep_relu_sound():
 
     s = c + (torch.rand(1500, 5) * 2 - 1) * 0.2
     with torch.no_grad():
-        h1 = fc4(torch.relu(fc3(torch.relu(fc2(torch.relu(fc1a(s)))))))
-        h2 = fc4(torch.relu(fc3(torch.relu(fc2(torch.relu(fc1b(s)))))))
+        h1 = fc4(torch.relu(fc3(torch.relu(fc2a(torch.relu(fc1a(s)))))))
+        h2 = fc4(torch.relu(fc3(torch.relu(fc2b(torch.relu(fc1b(s)))))))
         diffs = h1 - h2
     _check_sound(out.diff, diffs, tol=2e-5)
 
+def test_diff_linear_deep_relu_sound2():
+    """DiffLinear at input, followed by deep standard ReLU layers: soundness.
+
+    DiffLinear introduces the weight split at the first layer; multiple
+    standard ReLU+Linear layers compound the differential tracking.
+    """
+    torch.manual_seed(97)
+    fc1a = nn.Linear(5, 8)
+    fc1b = nn.Linear(5, 8)
+
+    model = nn.Sequential(
+        DiffLinear(fc1a, fc1b),
+        nn.ReLU(),
+    )
+    gm = _export(model, [5])
+    op = diff_interpret(gm)
+
+    c = torch.randn(5)
+    n = 0.001 * torch.randn(5)
+    z1 = c + 0.1 * expr.LpEpsilon([5])
+    z2 = z1 + n
+    out = op(DiffExpr3(z1, z2, n))
+    assert isinstance(out, DiffExpr3)
+
+    with torch.no_grad():
+        h1 = torch.relu(fc1a(c))
+        h2 = torch.relu(fc1b(c + n))
+        diffs = h1 - h2
+    _check_sound(out.diff, diffs, tol=2e-5)
 
 def test_diff_triple_plus_triple_sound():
     """DiffExpr3 + DiffExpr3: combined diff = d1 + d2, bounds are sound.

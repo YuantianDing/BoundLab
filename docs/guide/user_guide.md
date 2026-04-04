@@ -109,7 +109,7 @@ W = torch.randn(3, 8)
 b = torch.randn(3)
 
 y = W @ x + expr.ConstVal(b)
-y = zono.interpret.dispatcher["relu"](y)
+y = zono.interpret["relu"](y)
 ub, lb = y.ublb()
 ```
 
@@ -141,7 +141,7 @@ import boundlab.expr as expr
 import boundlab.zono as zono
 
 x = expr.ConstVal(torch.tensor([1.0, -0.5])) + expr.LpEpsilon([2])
-y = zono.interpret.dispatcher["relu"](x)
+y = zono.interpret["relu"](x)
 print(y)
 ```
 

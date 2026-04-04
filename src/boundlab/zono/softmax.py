@@ -64,8 +64,8 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
 
     # Import the registered handlers from the zonotope interpreter
     from . import interpret
-    exp_handler = interpret.dispatcher["exp"]
-    reciprocal_handler = interpret.dispatcher["reciprocal"]
+    exp_handler = interpret["exp"]
+    reciprocal_handler = interpret["reciprocal"]
 
     # Apply exp element-wise
     exp_x = exp_handler(x_shifted)

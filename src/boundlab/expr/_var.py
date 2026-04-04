@@ -68,21 +68,23 @@ class LpEpsilon(Expr):
         from boundlab.linearop import LinearOp
         if direction == "==":
             return None
-        try:
-            if self.p == math.inf:
+        if self.p == math.inf:
+            try:
                 result = weights.abs().sum_input()
                 assert len(result.input_shape) == 0 and result.output_shape == weights.output_shape
                 result = result.jacobian()
                 assert result.shape == weights.output_shape
                 return (result if direction == "<=" else -result, [])
-        except NotImplementedError:
-            jac = weights.jacobian()
-            if jac is NotImplemented:
-                print(f"Warning: LpEpsilon backward received weight op {weights}. Calling `force_jacobian` to materialize it, which may be inefficient.")
-                jac = weights.force_jacobian()
-            input_dims = list(range(len(weights.output_shape), len(weights.output_shape) + len(weights.input_shape)))
-            result = jac.norm(p=self.q, dim=input_dims)
-            return (result if direction == "<=" else -result, [])
+            except NotImplementedError:
+                pass
+        
+        jac = weights.jacobian()
+        if jac is NotImplemented:
+            print(f"Warning: LpEpsilon backward received weight op {weights}. Calling `force_jacobian` to materialize it, which may be inefficient.")
+            jac = weights.force_jacobian()
+        input_dims = list(range(len(weights.output_shape), len(weights.output_shape) + len(weights.input_shape)))
+        result = jac.norm(p=self.q, dim=input_dims)
+        return (result if direction == "<=" else -result, [])
         
 
     def to_string(self) -> str:
