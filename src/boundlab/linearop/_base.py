@@ -99,22 +99,25 @@ class LinearOp:
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose another LinearOp with this one (other ∘ self)."""
         if isinstance(other, LinearOp):
+            # print(f"Warning: Failed to fuse(@) LinearOps: {other} @ {self}, returning a ComposedOp. Consider implementing __matmul__ for these LinearOp types for better performance.")
             return ComposedOp(other, self)
         return NotImplemented
 
     def __add__(self, other: "LinearOp") -> "LinearOp":
         """Add this LinearOp to another."""
         if isinstance(other, LinearOp):
+            print(f"Warning: Failed to fuse(+) LinearOps: {self} + {other}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.")
             return SumOp(self, other)
         return NotImplemented
 
     def __radd__(self, other: "LinearOp") -> "LinearOp":
         """Add another LinearOp to this one."""
         if isinstance(other, LinearOp):
+            print(f"Warning: Failed to fuse LinearOps: {other} + {self}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.")
             return SumOp(other, self)
         return NotImplemented
     
-    def jacobian_op(self) -> torch.Tensor:
+    def einsum_op(self) -> "EinsumOp":
         """Materialize this LinearOp as an explicit Jacobian tensor.
 
         Returns:
@@ -125,7 +128,7 @@ class LinearOp:
             debugging, validation, or rare paths that require explicit Jacobians.
         """
         from boundlab.linearop._einsum import EinsumOp
-        if isinstance(self, EinsumOp) and self.is_full():
+        if isinstance(self, EinsumOp):
             return self
         jac = self.jacobian()
             
@@ -156,6 +159,14 @@ class LinearOp:
     def sum_output(self) -> "LinearOp":
         """Return a LinearOp that sums over the output dimensions, if supported."""
         raise NotImplementedError(f"LinearOp {self} doesn't implement the sum_output method.")
+        
+    def norm_input(self, p=1) -> "LinearOp":
+        """Return a LinearOp that computes the norm over the input dimensions, if supported."""
+        raise NotImplementedError(f"LinearOp {self} doesn't implement the norm_input method.")
+    
+    def norm_output(self, p=1) -> "LinearOp":
+        """Return a LinearOp that computes the norm over the output dimensions, if supported."""
+        raise NotImplementedError(f"LinearOp {self} doesn't implement the norm_output method.")
     
     def __neg__(self):
         """Return the negation of this LinearOp."""
@@ -349,8 +360,7 @@ class ScalarOp(LinearOp):
 
     def __init__(self, scalar: float, input_shape: torch.Size, name=None):
         self.scalar = scalar
-        if name is not None:
-            self.name = name
+        self.name = name
         super().__init__(input_shape, input_shape)
 
         if scalar >= 0:
@@ -377,7 +387,7 @@ class ScalarOp(LinearOp):
         return self.scalar * grad_output
 
     def __str__(self):
-        return self.name if hasattr(self, "name") else f"{self.scalar}"
+        return self.name if self.name is not None else f"{self.scalar}"
 
     def __mul__(self, other: float) -> "ScalarOp":
         if isinstance(other, (int, float)):
@@ -408,7 +418,7 @@ class ScalarOp(LinearOp):
     def __add__(self, other):
         if isinstance(other, ScalarOp):
             return ScalarOp(self.scalar + other.scalar, self.input_shape)
-        return super().__add__(other)
+        return NotImplemented
 
     def __radd__(self, other):
         if isinstance(other, ScalarOp):

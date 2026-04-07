@@ -1,8 +1,26 @@
 # BoundLab User Guide
 
+Welcome to BoundLab. If you want rigorous output bounds for neural networks
+under input perturbations, this guide will help you go from first run to
+practical workflows quickly.
+
+## Start Here
+
+Use this page as the practical overview, then go deeper as needed:
+
+1. Read **Mental Model** to understand what BoundLab computes.
+2. Follow **Pattern 1** to run your first exported-model bound analysis.
+3. Use **Inspecting Expressions and Operators** when debugging.
+
+If you are new to verification, you can still be productive here. You only need
+basic PyTorch experience to get started.
+
 ## Mental Model
 
-BoundLab computes sound bounds on neural network outputs under input perturbations.
+BoundLab computes sound output intervals for uncertain inputs.
+In plain terms: you define a "center input + allowed perturbation", and BoundLab
+tracks that uncertainty through the network without sampling.
+
 The workflow has three steps:
 
 1. **Build** a symbolic expression representing the uncertain input.

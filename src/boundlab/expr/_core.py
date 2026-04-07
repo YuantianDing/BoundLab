@@ -392,8 +392,8 @@ class Expr:
         """
         return None
     
-    def jacobian_ops_(self):
-        """Recursively compute Jacobian ops for affine expressions."""
+    def simplify_ops_(self):
+        """Recursively compute simplified ops for affine expressions."""
         pass
 
 

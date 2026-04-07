@@ -24,7 +24,7 @@ from io import StringIO
 import boundlab.expr as expr
 import boundlab.prop as prop
 import boundlab.zono as zono
-from boundlab.utils import onnx_export
+from boundlab.interp.onnx import onnx_export
 
 
 def _export(model: nn.Module, in_shape: list[int]):

@@ -66,7 +66,7 @@ def _register_linearizer(name: str):
             assert all(w.shape == e.shape for w, e in zip(bounds.input_weights, exprs)), \
                 "Input weights must match the shapes of the input expressions."
             # Apply slopes to input expressions
-            result_expr = sum(w * e for w, e in zip(bounds.input_weights, exprs) if w != 0) + bounds.bias
+            result_expr = sum(w * e for w, e in zip(bounds.input_weights, exprs) if w is not 0) + bounds.bias
             # Introduce a fresh noise symbol for the approximation error
             new_eps = LpEpsilon(bounds.error_coeffs.input_shape)
             result_expr = result_expr + bounds.error_coeffs(new_eps)

@@ -13,9 +13,12 @@ When a :class:`~boundlab.interp.Interpreter` processes an exported graph, the
 
 import torch
 import torch.library
+import onnxscript
+from onnxscript import opset18 as _opset18
 
 from boundlab.diff.expr import DiffExpr2
 from boundlab.expr._affine import ConstVal
+from boundlab.interp.onnx import register_onnx_translation
 
 
 # =====================================================================
@@ -32,6 +35,28 @@ _lib.impl("diff_pair", lambda x, _: x, "CUDA")
 # `register_fake` is the current API; fall back to the legacy `impl_abstract`.
 _register_fake = getattr(torch.library, "register_fake", torch.library.impl_abstract)
 _register_fake("boundlab::diff_pair")(lambda x, _: torch.empty_like(x))
+
+
+# =====================================================================
+# ONNX translation for diff_pair
+# =====================================================================
+
+@onnxscript.script()
+def _diff_pair_onnx_sentinel(x: onnxscript.FLOAT, y: onnxscript.FLOAT) -> onnxscript.FLOAT:
+    """Sentinel onnxscript function: stand-in for boundlab::diff_pair during ONNX export.
+
+    After export, ``onnx_export`` replaces every ``_diff_pair_onnx_sentinel``
+    node with a proper ``boundlab::diff_pair`` custom node.
+    """
+    return _opset18.Identity(x)
+
+
+register_onnx_translation(
+    torch.ops.boundlab.diff_pair.default,
+    _diff_pair_onnx_sentinel,
+    domain="boundlab",
+    op_type="diff_pair",
+)
 
 
 # =====================================================================

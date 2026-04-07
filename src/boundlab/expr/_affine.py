@@ -130,8 +130,8 @@ class AffineSum(Expr):
             parts.append(f"<Const>")
         return " + ".join(parts)
     
-    def jacobian_ops_(self):
-        self.children_dict = {child: op.jacobian_op() for child, op in self.children_dict.items()}
+    def simplify_ops_(self):
+        self.children_dict = {child: op.einsum_op() for child, op in self.children_dict.items()}
 
 
 class ConstVal(AffineSum):

@@ -34,8 +34,7 @@ def tanh_linearizer(expr: Expr) -> ZonoBounds:
     >>> b.bias.shape
     torch.Size([1])
     """
-    lb = expr.lb()
-    ub = expr.ub()
+    ub, lb = expr.ublb()
     output_shape = ub.shape
 
     degen = torch.abs(ub - lb) < 1e-12

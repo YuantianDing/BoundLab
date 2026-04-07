@@ -115,7 +115,6 @@ def ub(e: "Expr") -> torch.Tensor:
     >>> ub(x).shape
     torch.Size([1])
     """
-    e.jacobian_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 
@@ -191,7 +190,6 @@ def lb(e: "Expr") -> torch.Tensor:
     >>> lb(x).shape
     torch.Size([1])
     """
-    e.jacobian_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 
@@ -306,7 +304,6 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     >>> (u >= l).all().item()
     True
     """
-    e.jacobian_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 

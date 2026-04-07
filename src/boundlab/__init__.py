@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from importlib import import_module
 
+import torch
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -35,3 +37,6 @@ def __getattr__(name: str):
         globals()[name] = module
         return module
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+torch.backends.opt_einsum.enabled = True
+torch.backends.opt_einsum.strategy = "optimal"

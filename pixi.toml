@@ -25,6 +25,7 @@ opt-einsum = ">=3.3"
 [feature.dev.dependencies]
 pytest = ">=7.0"
 pytest-cov = ">=4.0"
+pyinstrument = ">=4.0"
 
 [feature.docs.pypi-dependencies]
 sphinx = ">=7.0"

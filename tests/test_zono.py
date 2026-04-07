@@ -13,7 +13,7 @@ from torch import nn
 
 import boundlab.expr as expr
 import boundlab.zono as zono
-from boundlab.utils import onnx_export
+from boundlab.interp.onnx import onnx_export
 
 # ---- helpers ----------------------------------------------------------------
 

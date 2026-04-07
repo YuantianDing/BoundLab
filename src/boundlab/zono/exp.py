@@ -33,8 +33,7 @@ def exp_linearizer(expr: Expr) -> ZonoBounds:
     >>> b.bias.shape
     torch.Size([1])
     """
-    lb = expr.lb()
-    ub = expr.ub()
+    ub, lb = expr.ublb()
     output_shape = ub.shape
 
     lb_c = torch.clamp(lb, -30, 30)

@@ -190,9 +190,20 @@ class EinsumOp(LinearOp):
         if isinstance(other, LinearOp):
             return other.__radd__(self)
         return NotImplemented
+    
+    @staticmethod
+    def from_scalar(scalarop: ScalarOp) -> "EinsumOp":
+        """Convert a ScalarOp to an EinsumOp."""
+        tensor = torch.tensor(scalarop.scalar).expand(scalarop.input_shape)
+        return EinsumOp.from_hardmard(tensor, n_input_dims=tensor.dim(), name=scalarop.name)
+
 
     def __radd__(self, other: "LinearOp") -> "LinearOp":
         """Add another LinearOp to this EinsumOp."""
+        if isinstance(other, ScalarOp):
+            if other.scalar == 0.0:
+                return self
+            other = EinsumOp.from_scalar(other)
         if isinstance(other, EinsumOp):
             self0 = self.permute_for_output()
             other0 = other.permute_for_output()
@@ -205,7 +216,7 @@ class EinsumOp(LinearOp):
                 out = other.jacobian_scatter(self.permute_for_output().tensor)
                 return EinsumOp.from_full(out, len(self.input_dims), name=merge_name(self, "+", other))
             print(f"Warning: Adding EinsumOps with different input/output dims: {self0} + {other0}. This needs `force_jacobian`.")
-            return EinsumOp.from_full(SumOp(self, other).force_jacobian(), len(self.input_dims), name=merge_name(self, "+", other))
+            return EinsumOp.from_full(SumOp(self, other).jacobian(), len(self.input_dims), name=merge_name(self, "+", other))
         if isinstance(other, LinearOp):
             return super().__radd__(other)
         return NotImplemented
@@ -297,6 +308,27 @@ class EinsumOp(LinearOp):
         new_input_dims = [tensor_dims_input_id.index(p) for p in self.input_dims]
         new_output_dims = []
         return EinsumOp(new_tensor, new_input_dims, new_output_dims, name=f"{self}.sum_output()" if hasattr(self, "name") else None)
+
+    def norm_input(self, p=1):
+        """Return a LinearOp that computes the norm over the input dimensions of this EinsumOp."""
+        if p % 2 == 0:
+            tensor0 = self.tensor.pow(p)
+        else:
+            if p == 1:
+                tensor0 = self.tensor.abs()
+            else:
+                tensor0 = self.tensor.abs().pow(p)
+        op = EinsumOp(tensor0, self.input_dims, self.output_dims).sum_input()
+        return EinsumOp(op.tensor.pow(1/p), op.input_dims, op.output_dims, name=f"{self}.norm_input(p={p})" if hasattr(self, "name") else None)
+        
+    def norm_output(self, p=1):
+        """Return a LinearOp that computes the norm over the output dimensions of this EinsumOp."""
+        if p % 2 == 0:
+            tensor0 = self.tensor.pow(p)
+        else:
+            tensor0 = self.tensor.abs().pow(p)
+        op = EinsumOp(tensor0, self.input_dims, self.output_dims).sum_output()
+        return EinsumOp(op.tensor.pow(1/p), op.input_dims, op.output_dims, name=f"{self}.norm_output(p={p})" if hasattr(self, "name") else None)
 
     def jacobian_scatter(self, src: torch.Tensor) -> torch.Tensor:
         """Accumulate this operator's Jacobian into ``src`` efficiently.
