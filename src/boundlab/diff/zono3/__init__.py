@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from boundlab.diff import expr
+from boundlab.utils import not0
+
 r"""Triple-Zonotope-Based Abstract Interpretation for Differential Verification
 
 This module provides zonotope transformations for computing over-approximations
@@ -37,6 +42,8 @@ Build a :class:`~boundlab.diff.expr.DiffExpr3` and propagate it through a model:
 (torch.Size([3]), torch.Size([3]))
 """
 
+import dataclasses
+
 import torch
 
 from boundlab.expr._core import Expr
@@ -44,31 +51,89 @@ from boundlab.expr._affine import ConstVal
 from boundlab.expr._var import LpEpsilon
 from boundlab.interp import Interpreter  # noqa: F401
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.linearop._base import LinearOp
 from boundlab.zono import ZonoBounds, interpret as std_interpret
 
 
 # =====================================================================
-# Expression builder
+# Expression builders
 # =====================================================================
 
-def _bounds_to_expr(bounds: ZonoBounds, inputs: list) -> Expr:
-    """Build an :class:`~boundlab.expr.Expr` from *bounds* and its input expressions."""
-    expr_sum = None
-    for w, e in zip(bounds.input_weights, inputs):
+def _apply_weights(weights, inputs) -> Expr | None:
+    """Return the weighted sum of inputs, skipping zero weights. Returns None if all zero."""
+    result = None
+    for w, e in zip(weights, inputs):
         if isinstance(w, int) and w == 0:
             continue
-        if isinstance(w, torch.Tensor) and not w.any():
-            continue
         term = w * e
-        expr_sum = term if expr_sum is None else expr_sum + term
-
-    result = (ConstVal(bounds.bias) if expr_sum is None else expr_sum + bounds.bias)
-
-    if bounds.error_coeffs is not None:
-        new_eps = LpEpsilon(bounds.error_coeffs.input_shape)
-        result = result + bounds.error_coeffs(new_eps)
-
+        result = term if result is None else result + term
     return result
+
+
+def _build_triple_from_dzb(
+    dzb: "DiffZonoBounds",
+    xs: list[Expr],
+    ys: list[Expr],
+    ds: list[Expr],
+) -> DiffExpr3:
+    """Build a :class:`~boundlab.diff.expr.DiffExpr3` from *dzb*, sharing epsilon variables.
+
+    *xs*, *ys*, *ds* are parallel lists — one entry per input to the
+    nonlinearity (length 1 for unary ops, 2 for binary, etc.).
+    ``x_bounds.input_weights[i]`` is applied to ``xs[i]``, and so on.
+
+    The fresh epsilon introduced for ``x_bounds.error_coeffs`` (``eps_x``) is
+    reused verbatim in ``diff_x_error(eps_x)``, and likewise for ``eps_y``.
+    This makes the diff expression track ``x_output − y_output`` **exactly**
+    for neurons handled by the cases 1–8 path (no extra approximation error),
+    yielding tighter bounds — especially for L2 perturbations and multi-layer
+    networks where the shared epsilon structure cancels downstream.
+    """
+    # Build x expression; capture the fresh eps_x for reuse in diff.
+    x_sum = _apply_weights(dzb.x_bounds.input_weights, xs)
+    x_result = ConstVal(dzb.x_bounds.bias) if x_sum is None else x_sum + dzb.x_bounds.bias
+    eps_x = None
+    if dzb.x_bounds.error_coeffs is not None:
+        eps_x = LpEpsilon(dzb.x_bounds.error_coeffs.input_shape)
+        x_result = x_result + dzb.x_bounds.error_coeffs(eps_x)
+
+    # Build y expression; capture the fresh eps_y for reuse in diff.
+    y_sum = _apply_weights(dzb.y_bounds.input_weights, ys)
+    y_result = ConstVal(dzb.y_bounds.bias) if y_sum is None else y_sum + dzb.y_bounds.bias
+    eps_y = None
+    if dzb.y_bounds.error_coeffs is not None:
+        eps_y = LpEpsilon(dzb.y_bounds.error_coeffs.input_shape)
+        y_result = y_result + dzb.y_bounds.error_coeffs(eps_y)
+
+    # Build diff expression, reusing eps_x and eps_y.
+    d_result = ConstVal(dzb.diff_bounds.bias)
+
+    if dzb.diff_x_weights != 0:
+        s = _apply_weights(dzb.diff_x_weights, xs)
+        if s is not None:
+            d_result = d_result + s
+
+    if dzb.diff_y_weights != 0:
+        s = _apply_weights(dzb.diff_y_weights, ys)
+        if s is not None:
+            d_result = d_result + s
+
+    d_in = _apply_weights(dzb.diff_bounds.input_weights, ds)
+    if d_in is not None:
+        d_result = d_result + d_in
+
+    # Shared errors: same eps variables as x_result and y_result.
+    if eps_x is not None and not0(dzb.diff_x_error):
+        d_result = d_result + dzb.diff_x_error(eps_x)
+    if eps_y is not None and not0(dzb.diff_y_error):
+        d_result = d_result + dzb.diff_y_error(eps_y)
+
+    # Fresh diff-only error (e.g. case-9 triangle relaxation on d directly).
+    if dzb.diff_bounds.error_coeffs is not None:
+        eps_d = LpEpsilon(dzb.diff_bounds.error_coeffs.input_shape)
+        d_result = d_result + dzb.diff_bounds.error_coeffs(eps_d)
+
+    return DiffExpr3(x_result, y_result, d_result)
 
 
 # =====================================================================
@@ -109,6 +174,20 @@ interpretation:
 torch.Size([3])
 """
 
+@dataclasses.dataclass
+class DiffZonoBounds:
+    x_bounds: ZonoBounds
+    y_bounds: ZonoBounds
+
+    diff_bounds: ZonoBounds
+
+    diff_x_error: LinearOp
+    diff_x_weights: list[torch.Tensor | 0] | 0
+    
+    diff_y_error: LinearOp
+    diff_y_weights: list[torch.Tensor | 0] | 0
+
+
 
 # =====================================================================
 # Lineariser registration
@@ -117,39 +196,41 @@ torch.Size([3])
 def _register_linearizer(name: str):
     """Register a differential lineariser for a non-linear activation.
 
-    The decorated function receives ``(x, y, d)`` — the unpacked components of a
-    :class:`~boundlab.diff.expr.DiffExpr3` — and returns a **triple**
-    ``(x_bounds, y_bounds, d_bounds)`` of :class:`~boundlab.zono.ZonoBounds`.
+    The decorated function receives ``(xs, ys, ds)`` — three parallel lists of
+    :class:`~boundlab.expr.Expr`, one entry per input to the nonlinearity —
+    and returns a :class:`DiffZonoBounds`.
 
-    ``d_bounds.input_weights`` must have three entries ``[w_x, w_y, w_d]``
-    (use the integer ``0`` to skip a term).
+    For unary activations (relu, tanh, …) each list has length 1.  For binary
+    operations each list has length 2, with ``xs[i]`` / ``ys[i]`` / ``ds[i]``
+    being the *i*-th input's x-network, y-network, and diff components
+    respectively.
 
-    For :class:`~boundlab.diff.expr.DiffExpr2` inputs the standard handler is
-    applied independently to each component. Plain :class:`~boundlab.expr.Expr`
-    inputs fall back to the standard zonotope handler.
+    ``diff_bounds.input_weights[i]`` is the weight applied to ``ds[i]``;
+    ``diff_x_weights[i]`` / ``diff_y_weights[i]`` are the weights applied to
+    ``xs[i]`` / ``ys[i]``.  ``diff_x_error`` / ``diff_y_error`` are applied to
+    the **same** epsilon variables introduced for ``x_bounds`` / ``y_bounds``,
+    enabling exact diff tracking for cases where no fresh error is needed.
+
+    All inputs must be :class:`~boundlab.diff.expr.DiffExpr3` or
+    :class:`~boundlab.diff.expr.DiffExpr2`; if none are, the call falls back to
+    the standard zonotope handler.  :class:`~boundlab.diff.expr.DiffExpr2`
+    inputs have their diff synthesised as ``x − y``.
     """
     def decorator(linearizer):
         std_handler = std_interpret[name]
 
-        def handler(t: Expr | DiffExpr2 | DiffExpr3) -> Expr | DiffExpr2 | DiffExpr3:
-            if isinstance(t, DiffExpr3):
-                x, y, d = t.x, t.y, t.diff
-                x_bounds, y_bounds, d_bounds = linearizer(x, y, d)
-                return DiffExpr3(
-                    _bounds_to_expr(x_bounds, [x]),
-                    _bounds_to_expr(y_bounds, [y]),
-                    _bounds_to_expr(d_bounds, [x, y, d]),
-                )
-            if isinstance(t, DiffExpr2):
-                x, y = t.x, t.y, 
-                d = x - y
-                x_bounds, y_bounds, d_bounds = linearizer(x, y, d)
-                return DiffExpr3(
-                    _bounds_to_expr(x_bounds, [x]),
-                    _bounds_to_expr(y_bounds, [y]),
-                    _bounds_to_expr(d_bounds, [x, y, d]),
-                )
-            return std_handler(t)
+        def handler(*args):
+            if not any(isinstance(a, (DiffExpr3, DiffExpr2)) for a in args):
+                return std_handler(*args)
+            xs, ys, ds = [], [], []
+            for a in args:
+                if isinstance(a, DiffExpr3):
+                    xs.append(a.x); ys.append(a.y); ds.append(a.diff)
+                elif isinstance(a, DiffExpr2):
+                    xs.append(a.x); ys.append(a.y); ds.append(a.x - a.y)
+                else:
+                    xs.append(a); ys.append(a); ds.append(expr.ConstVal(None))  # constant: diff is 0
+            return _build_triple_from_dzb(linearizer(xs, ys, ds), xs, ys, ds)
 
         interpret[name] = handler
         return linearizer
@@ -173,6 +254,7 @@ from .relu import relu_linearizer  # noqa: E402, F401
 
 __all__ = [
     "interpret",
+    "DiffZonoBounds",
     "relu_linearizer",
     "_register_linearizer",
 ]

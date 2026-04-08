@@ -93,7 +93,7 @@ def diff_net(
     --------
     >>> from boundlab.diff.net import diff_net
     >>> from pathlib import Path
-    >>> nets = Path("compare/veridiff/examples/nets")
+    >>> nets = Path("compare/verydiff/examples/nets")
     >>> merged = diff_net(nets / "single_layer_ref.onnx", nets / "single_layer_alt.onnx")
     >>> any(n.domain == "boundlab" and n.op_type == "diff_pair" for n in merged.graph)
     True
@@ -171,7 +171,7 @@ def diff_net(
                 continue
 
             name2 = inp2.name
-            if name1 in init1 and name2 in init2:
+            if name1 in init1 and name2 in init2 and init1:
                 remapped_inputs.append(_paired_input_value(name1, name2))
             else:
                 remapped_inputs.append(_value_ref(name1))

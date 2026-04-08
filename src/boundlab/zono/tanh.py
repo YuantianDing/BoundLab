@@ -3,11 +3,8 @@
 Implements the DeepT minimal-area relaxation for hyperbolic tangent.
 """
 
-from ast import expr
-
 import torch
 
-from boundlab.expr._core import Expr
 from boundlab.linearop._base import LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._indices import SetIndicesOp
@@ -16,7 +13,7 @@ from . import ZonoBounds, _register_linearizer
 
 
 @_register_linearizer("tanh")
-def tanh_linearizer(expr: Expr) -> ZonoBounds:
+def tanh_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Minimal-area tanh relaxation (DeepT, Section 4.4).
 
     y = lambda*x + mu + beta*eps_new
@@ -30,11 +27,11 @@ def tanh_linearizer(expr: Expr) -> ZonoBounds:
     >>> import boundlab.expr as expr
     >>> from boundlab.zono.tanh import tanh_linearizer
     >>> x = expr.ConstVal(torch.tensor([0.0])) + expr.LpEpsilon([1])
-    >>> b = tanh_linearizer(x)
+    >>> ub, lb = x.ublb()
+    >>> b = tanh_linearizer(ub, lb)
     >>> b.bias.shape
     torch.Size([1])
     """
-    ub, lb = expr.ublb()
     output_shape = ub.shape
 
     degen = torch.abs(ub - lb) < 1e-12
@@ -51,6 +48,6 @@ def tanh_linearizer(expr: Expr) -> ZonoBounds:
     beta = torch.where(degen, torch.zeros_like(beta), torch.abs(beta))
 
     # Build ZonoBounds
-    error_op = EinsumOp.from_hardmard(beta, len(expr.shape))
+    error_op = EinsumOp.from_hardmard(beta, len(ub.shape))
 
     return ZonoBounds(bias=mu, error_coeffs=error_op, input_weights=[slope])

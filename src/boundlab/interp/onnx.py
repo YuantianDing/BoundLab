@@ -112,10 +112,11 @@ def _apply_sentinel_fixups(model: ir.Model) -> None:
 
 def onnx_export(
     f: Callable[..., torch.Tensor] | nn.Module,
-    args: tuple[Union[torch.Size, list[int]], ...],
+    args: tuple[Union[torch.Size, list[int], torch.Tensor], ...],
     kwargs: dict[str, Union[torch.Size, list[int]]] = {},
     input_names: Sequence[str] | None = None,
     output_names: Sequence[str] | None = None,
+    optimize: bool = None,
 ) -> ir.Model:
     """Export a PyTorch function or module to an ONNX IR model.
 
@@ -148,15 +149,15 @@ def onnx_export(
         class Wrapper(nn.Module):
             def forward(self, *args, **kwargs):
                 return f(*args, **kwargs)
-        f = Wrapper().eval()
+        mod = Wrapper().eval()
     else:
-        f = f.eval()
-    args_tensor = tuple(torch.zeros(s) for s in args)
+        mod = f.eval()
+    args_tensor = tuple(x if isinstance(x, torch.Tensor) else torch.zeros(x) for x in args)
     with FakeTensorMode(
         allow_non_fake_inputs=True,
         shape_env=ShapeEnv(allow_dynamic_output_shape_ops=True),
     ):
-        program = torch.export.export(f, args_tensor)
+        program = torch.export.export(mod, args_tensor)
     # Determine which registered custom ops appear in the FX graph so we can
     # verify they survive into the ONNX output after fixups.
     registered_targets = set(_ONNX_CUSTOM_TABLE)
@@ -170,7 +171,7 @@ def onnx_export(
         program,
         args=(),
         export_params=True,
-        optimize=not _ONNX_CUSTOM_TABLE,
+        optimize=optimize or (not fx_custom_ops),
         custom_translation_table=dict(_ONNX_CUSTOM_TABLE) if _ONNX_CUSTOM_TABLE else None,
         input_names=input_names,
         output_names=output_names,

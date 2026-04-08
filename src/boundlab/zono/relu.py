@@ -1,7 +1,5 @@
 import torch
 
-from boundlab.expr._core import Expr
-from boundlab.linearop import LinearOp
 from boundlab.linearop._base import LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._indices import SetIndicesOp
@@ -10,7 +8,7 @@ from . import ZonoBounds, _register_linearizer
 
 
 @_register_linearizer("relu")
-def relu_linearizer(expr: Expr) -> ZonoBounds:
+def relu_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Triangle relaxation of ReLU for zonotope abstract interpretation.
 
     For each neuron with input bounds [lb, ub]:
@@ -23,7 +21,6 @@ def relu_linearizer(expr: Expr) -> ZonoBounds:
       error = -ub * lb / (2 * (ub - lb)).
     """
 
-    ub, lb = expr.ublb()
     output_shape = ub.shape
     dead   = ub <= 0
     active = lb >= 0
@@ -42,5 +39,5 @@ def relu_linearizer(expr: Expr) -> ZonoBounds:
     # hardmard_op = EinsumOp.from_hardmard(cross_coeffs, 1)
     # hardmard_op.flags |= LinearOpFlags.IS_NON_NEGATIVE
     cross_val = torch.where(cross, cross_val, torch.zeros_like(ub))
-    hardmard_op = EinsumOp.from_hardmard(cross_val, len(expr.shape))
+    hardmard_op = EinsumOp.from_hardmard(cross_val, len(ub.shape))
     return ZonoBounds(bias=bias, error_coeffs=hardmard_op, input_weights=[slope])

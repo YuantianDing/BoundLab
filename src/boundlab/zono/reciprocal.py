@@ -5,7 +5,6 @@ Implements the DeepT minimal-area relaxation for the reciprocal function (1/x).
 
 import torch
 
-from boundlab.expr._core import Expr
 from boundlab.linearop._base import LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._indices import SetIndicesOp
@@ -14,7 +13,7 @@ from . import ZonoBounds, _register_linearizer
 
 
 @_register_linearizer("reciprocal")
-def reciprocal_linearizer(expr: Expr) -> ZonoBounds:
+def reciprocal_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Minimal-area reciprocal relaxation (DeepT, Section 4.6).
 
     Assumes input is strictly positive. Clamps lower bound to 1e-9.
@@ -25,11 +24,11 @@ def reciprocal_linearizer(expr: Expr) -> ZonoBounds:
     >>> import boundlab.expr as expr
     >>> from boundlab.zono.reciprocal import reciprocal_linearizer
     >>> x = expr.ConstVal(torch.tensor([2.0])) + 0.1 * expr.LpEpsilon([1])
-    >>> b = reciprocal_linearizer(x)
+    >>> ub, lb = x.ublb()
+    >>> b = reciprocal_linearizer(ub, lb)
     >>> b.bias.shape
     torch.Size([1])
     """
-    ub, lb = expr.ublb()
     output_shape = ub.shape
 
     # Clamp to positive
@@ -56,5 +55,5 @@ def reciprocal_linearizer(expr: Expr) -> ZonoBounds:
     mu = torch.where(degen, 1.0 / lb, mu)
     beta = torch.where(degen, torch.zeros_like(beta), torch.abs(beta))
     
-    error_op = EinsumOp.from_hardmard(beta, len(expr.shape))
+    error_op = EinsumOp.from_hardmard(beta, len(ub.shape))
     return ZonoBounds(bias=mu, error_coeffs=error_op, input_weights=[slope])

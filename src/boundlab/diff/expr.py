@@ -275,7 +275,7 @@ class DiffExpr3:
             if (v := other.get_const()) is not None:
                 return self._map_all(lambda e: e * v)
         if isinstance(other, DiffExpr2):
-            if (tensors := self.get_const()) is not None:
+            if (tensors := other.get_const()) is not None:
                 # Bilinear diff identity: x*vx − y*vy = diff*vx + y*(vx − vy)
                 return DiffExpr3(
                     self.x * tensors[0],

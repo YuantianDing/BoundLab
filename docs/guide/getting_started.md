@@ -46,7 +46,7 @@ model = nn.Sequential(
 x_center = torch.randn(4)
 
 # Build symbolic input: x = center + eps, where eps_i in [-1, 1].
-x_expr = expr.ConstVal(x_center) + expr.LpEpsilon([4])
+x_expr = x_center + expr.LpEpsilon([4])
 
 # Export first, then build an abstract interpreter and propagate bounds.
 exported = torch.export.export(model, (x_center,))

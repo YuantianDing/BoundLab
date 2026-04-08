@@ -28,6 +28,8 @@ from boundlab.expr._core import Expr
 from boundlab.expr._var import LpEpsilon
 from boundlab.interp import ONNX_BASE_INTERPRETER, Interpreter
 from boundlab.linearop import LinearOp
+from boundlab.linearop._einsum import EinsumOp
+from boundlab.utils import not0
 
 interpret = Interpreter(ONNX_BASE_INTERPRETER)
 """Zonotope-based interpreter.
@@ -57,16 +59,21 @@ class ZonoBounds:
     bias: torch.Tensor # The bias term of the zonotope
     error_coeffs: LinearOp
     input_weights: list[torch.Tensor | 0]  # Hadamard product weights of the input terms
+    
+    def __post_init__(self):
+        if isinstance(self.error_coeffs, torch.Tensor):
+            self.error_coeffs = EinsumOp.from_hardmard(self.error_coeffs, len(self.bias.shape))
 
 
 def _register_linearizer(name: str):
     def decorator(linearizer: callable):
         def handler(*exprs: Expr) -> Expr:
-            bounds = linearizer(*exprs)
+            ubs_lbs = [e.ublb() for e in exprs]
+            bounds = linearizer(*[t for ub, lb in ubs_lbs for t in (ub, lb)])
             assert all(w.shape == e.shape for w, e in zip(bounds.input_weights, exprs)), \
                 "Input weights must match the shapes of the input expressions."
             # Apply slopes to input expressions
-            result_expr = sum(w * e for w, e in zip(bounds.input_weights, exprs) if w is not 0) + bounds.bias
+            result_expr = sum(w * e for w, e in zip(bounds.input_weights, exprs) if not0(w)) + bounds.bias
             # Introduce a fresh noise symbol for the approximation error
             new_eps = LpEpsilon(bounds.error_coeffs.input_shape)
             result_expr = result_expr + bounds.error_coeffs(new_eps)

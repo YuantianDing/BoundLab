@@ -35,3 +35,10 @@ def merge_name(name1, op: str, name2) -> str | None:
     if name1 is not None and name2 is not None:
         return f"({name1} {op} {name2})"
     return None
+
+def not0(input) -> bool:
+    """Helper function to check if a tensor is not identically zero."""
+    if isinstance(input, int):
+        return input != 0 
+    else:
+        return True

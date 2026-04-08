@@ -5,7 +5,6 @@ Implements the DeepT minimal-area relaxation for the exponential function.
 
 import torch
 
-from boundlab.expr._core import Expr
 from boundlab.linearop._base import LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._indices import SetIndicesOp
@@ -14,7 +13,7 @@ from . import ZonoBounds, _register_linearizer
 
 
 @_register_linearizer("exp")
-def exp_linearizer(expr: Expr) -> ZonoBounds:
+def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Minimal-area exp relaxation (DeepT, Section 4.5).
 
     For each element with input bounds [l, u]:
@@ -29,11 +28,11 @@ def exp_linearizer(expr: Expr) -> ZonoBounds:
     >>> import boundlab.expr as expr
     >>> from boundlab.zono.exp import exp_linearizer
     >>> x = expr.ConstVal(torch.tensor([0.0])) + 0.1 * expr.LpEpsilon([1])
-    >>> b = exp_linearizer(x)
+    >>> ub, lb = x.ublb()
+    >>> b = exp_linearizer(ub, lb)
     >>> b.bias.shape
     torch.Size([1])
     """
-    ub, lb = expr.ublb()
     output_shape = ub.shape
 
     lb_c = torch.clamp(lb, -30, 30)
@@ -64,6 +63,6 @@ def exp_linearizer(expr: Expr) -> ZonoBounds:
 
     # Build ZonoBounds
     
-    error_op = EinsumOp.from_hardmard(beta, len(expr.shape))
+    error_op = EinsumOp.from_hardmard(beta, len(ub.shape))
 
     return ZonoBounds(bias=mu, error_coeffs=error_op, input_weights=[slope])

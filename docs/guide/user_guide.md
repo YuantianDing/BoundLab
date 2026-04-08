@@ -51,7 +51,7 @@ import torch
 import boundlab.expr as expr
 
 x_center = torch.randn(8)
-x = expr.ConstVal(x_center) + 0.1 * expr.LpEpsilon([8])
+x = x_center + 0.1 * expr.LpEpsilon([8])
 ```
 
 ### Bound Propagation (`boundlab.prop`)
@@ -105,7 +105,7 @@ import boundlab.expr as expr
 import boundlab.zono as zono
 
 model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
-x = expr.ConstVal(torch.randn(4)) + 0.1 * expr.LpEpsilon([4])
+x = torch.randn(4) + 0.1 * expr.LpEpsilon([4])
 
 exported = torch.export.export(model, (torch.randn(4),))
 op = zono.interpret(exported)
@@ -122,11 +122,11 @@ import torch
 import boundlab.expr as expr
 import boundlab.zono as zono
 
-x = expr.ConstVal(torch.randn(8)) + expr.LpEpsilon([8])
+x = torch.randn(8) + expr.LpEpsilon([8])
 W = torch.randn(3, 8)
 b = torch.randn(3)
 
-y = W @ x + expr.ConstVal(b)
+y = W @ x + b
 y = zono.interpret["relu"](y)
 ub, lb = y.ublb()
 ```
@@ -158,7 +158,7 @@ import torch
 import boundlab.expr as expr
 import boundlab.zono as zono
 
-x = expr.ConstVal(torch.tensor([1.0, -0.5])) + expr.LpEpsilon([2])
+x = torch.tensor([1.0, -0.5]) + expr.LpEpsilon([2])
 y = zono.interpret["relu"](x)
 print(y)
 ```
@@ -379,7 +379,7 @@ exported = torch.export.export(model, (torch.randn(4),))
 op = diff_interpret(exported)
 
 c = torch.randn(4)
-x = expr.ConstVal(c) + 0.1 * expr.LpEpsilon([4])
+x = c + 0.1 * expr.LpEpsilon([4])
 out = op(x, x)   # returns DiffExpr3 after the first ReLU
 
 d_ub, d_lb = out.diff.ublb()

@@ -319,7 +319,7 @@ class EinsumOp(LinearOp):
             else:
                 tensor0 = self.tensor.abs().pow(p)
         op = EinsumOp(tensor0, self.input_dims, self.output_dims).sum_input()
-        return EinsumOp(op.tensor.pow(1/p), op.input_dims, op.output_dims, name=f"{self}.norm_input(p={p})" if hasattr(self, "name") else None)
+        return EinsumOp(op.tensor.pow(1/p) if p != 1 else op.tensor, op.input_dims, op.output_dims, name=f"{self}.norm_input(p={p})" if hasattr(self, "name") else None)
         
     def norm_output(self, p=1):
         """Return a LinearOp that computes the norm over the output dimensions of this EinsumOp."""
