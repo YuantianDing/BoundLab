@@ -71,10 +71,10 @@ def _apply_weights(weights, inputs) -> Expr | None:
 
 
 def _build_triple_from_dzb(
-    dzb: "DiffZonoBounds",
-    xs: list[Expr],
-    ys: list[Expr],
-    ds: list[Expr],
+        dzb: "DiffZonoBounds",
+        xs: list[Expr],
+        ys: list[Expr],
+        ds: list[Expr],
 ) -> DiffExpr3:
     """Build a :class:`~boundlab.diff.expr.DiffExpr3` from *dzb*, sharing epsilon variables.
 
@@ -174,6 +174,7 @@ interpretation:
 torch.Size([3])
 """
 
+
 @dataclasses.dataclass
 class DiffZonoBounds:
     x_bounds: ZonoBounds
@@ -183,10 +184,9 @@ class DiffZonoBounds:
 
     diff_x_error: LinearOp
     diff_x_weights: list[torch.Tensor | 0] | 0
-    
+
     diff_y_error: LinearOp
     diff_y_weights: list[torch.Tensor | 0] | 0
-
 
 
 # =====================================================================
@@ -216,6 +216,7 @@ def _register_linearizer(name: str):
     the standard zonotope handler.  :class:`~boundlab.diff.expr.DiffExpr2`
     inputs have their diff synthesised as ``x − y``.
     """
+
     def decorator(linearizer):
         std_handler = std_interpret[name]
 
@@ -225,15 +226,22 @@ def _register_linearizer(name: str):
             xs, ys, ds = [], [], []
             for a in args:
                 if isinstance(a, DiffExpr3):
-                    xs.append(a.x); ys.append(a.y); ds.append(a.diff)
+                    xs.append(a.x);
+                    ys.append(a.y);
+                    ds.append(a.diff)
                 elif isinstance(a, DiffExpr2):
-                    xs.append(a.x); ys.append(a.y); ds.append(a.x - a.y)
+                    xs.append(a.x);
+                    ys.append(a.y);
+                    ds.append(a.x - a.y)
                 else:
-                    xs.append(a); ys.append(a); ds.append(expr.ConstVal(None))  # constant: diff is 0
+                    xs.append(a);
+                    ys.append(a);
+                    ds.append(expr.ConstVal(None))  # constant: diff is 0
             return _build_triple_from_dzb(linearizer(xs, ys, ds), xs, ys, ds)
 
         interpret[name] = handler
         return linearizer
+
     return decorator
 
 
@@ -242,19 +250,54 @@ def _register_linearizer(name: str):
 # =====================================================================
 
 from . import relu as _relu  # noqa: E402  — registers "relu"
+from . import tanh as _tanh  # noqa: E402  — registers "tanh"
+from . import exp as _exp  # noqa: E402  — registers "exp"
+from . import reciprocal as _reciprocal  # noqa: E402  — registers "reciprocal"
 
-# ONNX activation op name
+# ONNX activation op names
 interpret["Relu"] = interpret["relu"]
+interpret["Tanh"] = interpret["tanh"]
 
 # diff_pair: converts paired tensors (from boundlab::diff_pair ONNX nodes) to DiffExpr2
 from boundlab.diff.op import diff_pair_handler  # noqa: E402
+
 interpret["diff_pair"] = diff_pair_handler
 
+# Bilinear handlers (differential mul/matmul)
+from .bilinear import diff_mul_handler, diff_matmul_handler  # noqa: E402
+
+interpret["mul"] = diff_mul_handler
+interpret["matmul"] = diff_matmul_handler
+interpret["bmm"] = diff_matmul_handler
+interpret["mm"] = diff_matmul_handler
+interpret["MatMul"] = diff_matmul_handler
+
+# Softmax: both call_module (nn.Softmax) and ATen lowered (_softmax.default)
+from .softmax import diff_softmax_handler  # noqa: E402
+
+interpret["softmax"] = diff_softmax_handler
+interpret["_softmax"] = lambda x, dim, _half_to_float=False: diff_softmax_handler(x, dim=dim)
+interpret["Softmax"] = lambda X, axis=-1: diff_softmax_handler(X, dim=axis)
+
+# Public re-exports
 from .relu import relu_linearizer  # noqa: E402, F401
+from .tanh import tanh_linearizer  # noqa: E402, F401
+from .exp import exp_linearizer  # noqa: E402, F401
+from .reciprocal import reciprocal_linearizer  # noqa: E402, F401
+from .bilinear import (  # noqa: E402, F401
+    diff_bilinear_elementwise,
+    diff_bilinear_matmul,
+)
 
 __all__ = [
     "interpret",
     "DiffZonoBounds",
-    "relu_linearizer",
     "_register_linearizer",
+    "relu_linearizer",
+    "tanh_linearizer",
+    "exp_linearizer",
+    "reciprocal_linearizer",
+    "diff_bilinear_elementwise",
+    "diff_bilinear_matmul",
+    "diff_softmax_handler",
 ]
