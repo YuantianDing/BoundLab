@@ -133,6 +133,15 @@ class AffineSum(Expr):
     def simplify_ops_(self):
         self.children_dict = {child: op.einsum_op() for child, op in self.children_dict.items()}
 
+    def symmetric_decompose(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
+        """Decompose this AffineSum into a constant part and a zero-constant AffineSum."""
+        if self.constant is None:
+            return self, None
+        const_part = ConstVal(self.constant)
+        if not self.children_dict:
+            return const_part, None
+        non_const_part = AffineSum(*zip(self.children_dict.values(), self.children_dict.keys()))
+        return const_part, non_const_part
 
 class ConstVal(AffineSum):
     """Expression representing a constant tensor value.

@@ -53,24 +53,16 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     assert A.shape[1] == B.shape[0], \
         f"Inner dims must match: {A.shape} @ {B.shape}"
 
-    a_c = A.center()  # (m, k) concrete tensor
-    b_c = B.center()  # (k, n) concrete tensor
+    Ac, As = A.symmetric_decompose()  # Ac: constant part, As: epsilon part
+    Bc, Bs = B.symmetric_decompose()  # Bc: constant part, Bs: epsilon part
 
-    # Affine linearization around centers
-    term1 = a_c @ B                     # c_A @ B (linear in B, uses Expr.__rmatmul__)
-    term2 = A @ b_c                     # A @ c_B (linear in A, uses Expr.__matmul__)
-    const = ConstVal(-(a_c @ b_c))      # -c_A @ c_B (constant)
+    result = Ac @ Bs + As @ Bc + Ac @ Bc
 
-    result = term1 + term2 + const
+    # Error bound
+    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
+    Ahw = As.ub()
+    error_bound = (Ahw @ Bs).ub()
 
-    # Error bound for quadratic remainder: |δA @ δB| ≤ hw_A @ hw_B
-    ub_A, lb_A = A.ublb()
-    ub_B, lb_B = B.ublb()
-    hw_a = (ub_A - lb_A) / 2  # (m, k)
-    hw_b = (ub_B - lb_B) / 2  # (k, n)
-    error_bound = hw_a @ hw_b  # (m, n) concrete tensor
-
-    # Introduce new error symbols
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
 
@@ -115,20 +107,16 @@ def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
     assert A.shape == B.shape, \
         f"Shapes must match for element-wise product: {A.shape} vs {B.shape}"
 
-    a_c = A.center()  # concrete tensor
-    b_c = B.center()  # concrete tensor
+    Ac, As = A.symmetric_decompose()  # Ac: constant part, As: zero-constant part
+    Bc, Bs = B.symmetric_decompose()  # Bc: constant part, Bs: zero-constant part
 
-    # Affine linearization
-    # a_c * B: Tensor * Expr → Expr.__rmul__(Tensor)
-    # A * b_c: Expr.__mul__(Tensor)
-    result = a_c * B + A * b_c + ConstVal(-(a_c * b_c))
+    result = Ac * Bs + As * Bc + Ac * Bc
 
     # Error bound
-    ub_A, lb_A = A.ublb()
-    ub_B, lb_B = B.ublb()
-    hw_a = (ub_A - lb_A) / 2
-    hw_b = (ub_B - lb_B) / 2
-    error_bound = hw_a * hw_b  # element-wise
+    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
+    Ahw = As.ub()
+    Bhw = Bs.ub()
+    error_bound = Ahw * Bhw
 
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps

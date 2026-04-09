@@ -175,6 +175,7 @@ def onnx_export(
         custom_translation_table=dict(_ONNX_CUSTOM_TABLE) if _ONNX_CUSTOM_TABLE else None,
         input_names=input_names,
         output_names=output_names,
+        verbose=False,
     )
     model = onnx_program.model
     _apply_sentinel_fixups(model)

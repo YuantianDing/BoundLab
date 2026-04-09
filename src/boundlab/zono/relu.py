@@ -22,22 +22,13 @@ def relu_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """
 
     output_shape = ub.shape
-    dead   = ub <= 0
-    active = lb >= 0
-    cross  = ~dead & ~active
-
-    slope = torch.where(active, torch.ones_like(ub), torch.zeros_like(ub))
-    slope = torch.where(cross, ub / (ub - lb), slope)
-
-    error = torch.zeros_like(ub)
-    cross_val = -ub * lb / (2 * (ub - lb))
-    bias  = torch.where(cross, cross_val, torch.zeros_like(ub))
+    lam = (torch.relu(ub) - torch.relu(lb)) / (ub - lb + 1e-30)
+    mu = 0.5 * (torch.relu(ub) - lam * ub)
     # nonzero_idx = torch.nonzero(cross, as_tuple=True)
     # length = nonzero_idx[0].shape[0]
     # cross_coeffs = cross_val[nonzero_idx]
     # indices_op = SetIndicesOp(nonzero_idx, torch.Size((length,)), output_shape) 
     # hardmard_op = EinsumOp.from_hardmard(cross_coeffs, 1)
     # hardmard_op.flags |= LinearOpFlags.IS_NON_NEGATIVE
-    cross_val = torch.where(cross, cross_val, torch.zeros_like(ub))
-    hardmard_op = EinsumOp.from_hardmard(cross_val, len(ub.shape))
-    return ZonoBounds(bias=bias, error_coeffs=hardmard_op, input_weights=[slope])
+    hardmard_op = EinsumOp.from_hardmard(mu, len(ub.shape))
+    return ZonoBounds(bias=mu, error_coeffs=hardmard_op, input_weights=[lam])

@@ -396,6 +396,21 @@ class Expr:
         """Recursively compute simplified ops for affine expressions."""
         pass
 
+    def is_symmetric_to_0(self) -> bool:
+        """Return True if this expression is symmetric about zero, else False."""
+        return bool(self.flags & ExprFlags.SYMMETRIC_TO_0)
+
+    def symmetric_decompose(self) -> tuple["Expr | 0", "Expr | 0"]:
+        """Decompose this expression into a constant part and a zero-constant part.
+
+        If the expression is symmetric about zero, the constant part is zero.
+        If the expression is a pure constant, the zero-constant part is zero.
+
+        Returns:
+            A tuple ``(non_const_part, const_part)`` where exactly one of the two is zero.
+        """
+        raise NotImplementedError(f"The :code:`symmetric_decompose` method is not implemented for {self.__class__.__name__}.")
+
 
 def expr_pretty_print(expr: Expr, indent: int = 0) -> str:
     """Pretty print an expression in SSA form."""
