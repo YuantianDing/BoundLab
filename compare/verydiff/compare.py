@@ -82,7 +82,6 @@ def parse_vnnlib_input_bounds(path: Path) -> tuple[torch.Tensor, torch.Tensor]:
 def _load_merged(net1_path: Path, net2_path: Path):
     """Merge the two ONNX networks and return a bound diff interpreter."""
     merged = diff_net(net1_path, net2_path)
-    onnx_ir.save(merged, "merged.onnx")
     return diff_interpret(merged)
 
 

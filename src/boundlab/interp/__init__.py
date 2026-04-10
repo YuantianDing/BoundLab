@@ -79,6 +79,11 @@ def _onnx_flatten(X, axis=1):
     return X.reshape(first, -1)
 
 
+def _onnx_reshape(data, shape, allowzero=0):
+    del allowzero
+    return data.reshape(_unwrap_shape(shape))
+
+
 def _onnx_unsqueeze(data, axes):
     """ONNX Unsqueeze: insert size-1 dims at the given axes positions."""
     axes_list = sorted(_unwrap_shape(axes))
@@ -98,9 +103,76 @@ def _onnx_squeeze(data, axes=None):
         result = result.squeeze(ax)
     return result
 
-def _onnx_constant(value=None, **_):
+def _onnx_constant(value=None, value_float=None, value_int=None, value_string=None, value_floats=None, value_ints=None, value_strings=None, **_):
     """ONNX Constant node: wrap the tensor attribute as a torch.Tensor."""
-    return torch.Tensor(value) if value is not None else None
+
+    if value is not None:
+        return torch.Tensor(value) if value is not None else None
+    elif value_float is not None:
+        return torch.tensor(value_float)
+    elif value_int is not None:
+        return torch.tensor(value_int)
+    elif value_string is not None:
+        return value_string
+    elif value_floats is not None:
+        return torch.tensor(value_floats)
+    elif value_ints is not None:
+        return torch.tensor(value_ints)
+    elif value_strings is not None:
+        return value_strings
+    else:
+        raise ValueError(f"ONNX Constant: no value provided among {locals()}")
+
+
+def _normalize_reduce_axes(axes):
+    if axes is None:
+        return None
+    return tuple(int(a) for a in _unwrap_shape(axes))
+
+
+def _onnx_reduce_sum(data, axes=None, keepdims=1, noop_with_empty_axes=0):
+    reduce_axes = _normalize_reduce_axes(axes)
+    if reduce_axes == () and int(noop_with_empty_axes) == 1:
+        return data
+    return data.sum(dim=reduce_axes, keepdim=bool(keepdims))
+
+
+def _onnx_reduce_mean(data, axes=None, keepdims=1, noop_with_empty_axes=0):
+    reduce_axes = _normalize_reduce_axes(axes)
+    if reduce_axes == () and int(noop_with_empty_axes) == 1:
+        return data
+    return data.mean(dim=reduce_axes, keepdim=bool(keepdims))
+
+
+def _onnx_gather(data, indices, axis=0):
+    axis = int(axis)
+    if isinstance(data, Expr):
+        rank = len(data.shape)
+        axis = axis + rank if axis < 0 else axis
+        idx = indices.long()
+        if idx.numel() == 1:
+            slices = [slice(None)] * rank
+            slices[axis] = int(idx.item())
+            return data[tuple(slices)]
+        if idx.dim() == 1:
+            from boundlab.expr import Cat
+            parts = []
+            for i in idx.tolist():
+                slices = [slice(None)] * rank
+                slices[axis] = int(i)
+                parts.append(data[tuple(slices)].unsqueeze(axis))
+            return Cat(*parts, dim=axis)
+        raise NotImplementedError(
+            f"ONNX Gather for Expr currently supports scalar/1D indices, got shape {tuple(idx.shape)}"
+        )
+
+    if indices.dim() == 0:
+        index = indices.reshape(1).long()
+    else:
+        index = indices.long().reshape(-1)
+    gathered = torch.index_select(data, axis, index)
+    out_shape = list(data.shape[:axis]) + list(indices.shape) + list(data.shape[axis + 1 :])
+    return gathered.reshape(out_shape)
 
 
 # =====================================================================
@@ -280,6 +352,7 @@ class Interpreter(Generic[E]):
             env: dict[str, Any] = {}
 
             for name, e in zip(input_names, exprs):
+                assert e is not None, name
                 env[name] = self.dispatcher["Input"](e, name=name)
 
             for node in model.graph:
@@ -291,8 +364,10 @@ class Interpreter(Generic[E]):
 
                     inp_name = inp.name
                     if inp_name in env:
+                        assert env[inp_name] is not None, inp_name
                         args.append(env[inp_name])
                     elif inp_name in initializers:
+                        assert initializers[inp_name] is not None, inp_name
                         args.append(initializers[inp_name])
                     else:
                         raise KeyError(
@@ -313,6 +388,7 @@ class Interpreter(Generic[E]):
                 if len(node.outputs) == 1:
                     out = node.outputs[0]
                     if out is not None and out.name:
+
                         env[out.name] = result
                 else:
                     for i, out in enumerate(node.outputs):
@@ -342,12 +418,16 @@ ONNX_BASE_INTERPRETER = Interpreter({
     "Gemm":     _onnx_gemm,
     "MatMul":   lambda A, B: A @ B,
     # ---- shape ops ----------------------------------------------------
-    "Reshape":  lambda data, shape: data.reshape(_unwrap_shape(shape)),
+    "Reshape":  _onnx_reshape,
     "Flatten":  _onnx_flatten,
     "Transpose": lambda data, perm=None: (data.permute(*perm) if perm is not None else data.T),
     "Unsqueeze": _onnx_unsqueeze,
     "Squeeze":  _onnx_squeeze,
+    "Gather": _onnx_gather,
     "Identity": lambda X: X,
+    # ---- reductions ---------------------------------------------------
+    "ReduceSum": _onnx_reduce_sum,
+    "ReduceMean": _onnx_reduce_mean,
     # ---- constants ---------------------------------------------
     "Constant": _onnx_constant,
 })

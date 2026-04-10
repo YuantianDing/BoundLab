@@ -351,9 +351,56 @@ class Expr:
         from boundlab.linearop import ScatterOp
         return self._apply_op(ScatterOp(indices, self.shape, output_shape))
     
-    def gather(self, indices) -> "Expr":
+    def gather(self, indices, dim: int = 0) -> "Expr":
         from boundlab.linearop import GatherOp
-        return self._apply_op(GatherOp(indices, self.shape))
+        return self._apply_op(GatherOp(self.shape, dim, indices))
+
+    def _normalize_reduce_dims(self, dim: int | tuple[int, ...] | list[int] | torch.Tensor | None) -> tuple[int, ...]:
+        rank = len(self.shape)
+        if dim is None:
+            return tuple(range(rank))
+        if isinstance(dim, int):
+            dims = (dim,)
+        elif isinstance(dim, torch.Tensor):
+            dims = tuple(int(d) for d in dim.flatten().tolist())
+        else:
+            dims = tuple(int(d) for d in dim)
+
+        normalized: list[int] = []
+        for d in dims:
+            d0 = d + rank if d < 0 else d
+            if d0 < 0 or d0 >= rank:
+                raise IndexError(f"Reduction dim {d} out of range for shape {tuple(self.shape)}")
+            if d0 not in normalized:
+                normalized.append(d0)
+        return tuple(sorted(normalized))
+
+    def sum(self, dim: int | tuple[int, ...] | list[int] | torch.Tensor | None = None, keepdim: bool = False) -> "Expr":
+        from boundlab.linearop import EinsumOp
+
+        dims = self._normalize_reduce_dims(dim)
+        if len(dims) == 0:
+            return self
+        
+        weights = torch.ones(self.shape)
+        input_dims = list(range(len(self.shape)))
+        output_dims = [i for i in input_dims if i not in dims]
+        op = EinsumOp(weights, input_dims=input_dims, output_dims=output_dims)
+        out = self._apply_op(op)
+        if keepdim:
+            for d in dims:
+                out = out.unsqueeze(d)
+        return out
+
+    def mean(self, dim: int | tuple[int, ...] | list[int] | torch.Tensor | None = None, keepdim: bool = False) -> "Expr":
+        reduce_dims = self._normalize_reduce_dims(dim)
+        if len(reduce_dims) == 0:
+            return self
+
+        denom = 1
+        for d in reduce_dims:
+            denom *= int(self.shape[d])
+        return self.sum(dim=reduce_dims, keepdim=keepdim) / float(denom)
 
     # ------------------------------------------------------------------
     # Bound computation helpers
