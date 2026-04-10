@@ -184,4 +184,4 @@ def diff_pair_handler(x, y) -> DiffExpr2:
     return DiffExpr2(x, y)
 
 
-__all__ = ["diff_pair", "DiffLinear"]
+__all__ = ["diff_pair", "DiffLinear", "heaviside_pruning", "topk_pruning"]
