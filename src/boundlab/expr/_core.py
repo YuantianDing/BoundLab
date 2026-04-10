@@ -355,7 +355,7 @@ class Expr:
         from boundlab.linearop import GatherOp
         return self._apply_op(GatherOp(self.shape, dim, indices))
 
-    def _normalize_reduce_dims(self, dim: int | tuple[int, ...] | list[int] | torch.Tensor | None) -> tuple[int, ...]:
+    def _normalize_reduce_dims(self, dim: Union[int, tuple[int, ...], list[int], torch.Tensor, None]) -> tuple[int, ...]:
         rank = len(self.shape)
         if dim is None:
             return tuple(range(rank))
@@ -375,7 +375,7 @@ class Expr:
                 normalized.append(d0)
         return tuple(sorted(normalized))
 
-    def sum(self, dim: int | tuple[int, ...] | list[int] | torch.Tensor | None = None, keepdim: bool = False) -> "Expr":
+    def sum(self, dim: Union[int, tuple[int, ...], list[int], torch.Tensor, None] = None, keepdim: bool = False) -> "Expr":
         from boundlab.linearop import EinsumOp
 
         dims = self._normalize_reduce_dims(dim)
@@ -392,7 +392,7 @@ class Expr:
                 out = out.unsqueeze(d)
         return out
 
-    def mean(self, dim: int | tuple[int, ...] | list[int] | torch.Tensor | None = None, keepdim: bool = False) -> "Expr":
+    def mean(self, dim: Union[int, tuple[int, ...], list[int], torch.Tensor, None] = None, keepdim: bool = False) -> "Expr":
         reduce_dims = self._normalize_reduce_dims(dim)
         if len(reduce_dims) == 0:
             return self
