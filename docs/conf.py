@@ -83,6 +83,7 @@ autodoc_mock_imports = [
     "atomicx",
     "sortedcontainers",
     "onnx_ir",
+    "onnxscript"
 ]
 
 # Napoleon settings (for Google/NumPy style docstrings)
