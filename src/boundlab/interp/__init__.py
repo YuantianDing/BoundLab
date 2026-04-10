@@ -23,8 +23,9 @@ import beartype
 import beartype.roar
 
 from boundlab.expr._core import Expr, ExprFlags
+from .onnx import onnx_export
 
-__all__ = ["Interpreter", "ONNX_BASE_INTERPRETER"]
+__all__ = ["Interpreter", "ONNX_BASE_INTERPRETER", "onnx_export"]
 
 E = TypeVar("E", bound=Expr)
 
