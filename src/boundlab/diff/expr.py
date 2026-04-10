@@ -93,6 +93,9 @@ class DiffExpr2:
     def __truediv__(self, other):
         if isinstance(other, (int, float, torch.Tensor)):
             return DiffExpr2(self.x / other, self.y / other)
+        if isinstance(other, DiffExpr2):
+            if (tensors := other.get_const()) is not None:
+                return DiffExpr2(self.x / tensors[0], self.y / tensors[1])
         return NotImplemented
 
     def __matmul__(self, other):
@@ -188,6 +191,9 @@ class DiffExpr2:
 
     def diag(self, diagonal=0):
         return self._map(lambda e: e.diag(diagonal))
+
+    def mean(self, dim=None, keepdim=False):
+        return self._map(lambda e: e.mean(dim=dim, keepdim=keepdim))
 
 
 @dataclasses.dataclass
@@ -302,6 +308,17 @@ class DiffExpr3:
     def __truediv__(self, other):
         if isinstance(other, (int, float, torch.Tensor)):
             return self._map_all(lambda e: e / other)
+        if isinstance(other, DiffExpr2):
+            if (tensors := other.get_const()) is not None:
+                # x/vx, y/vy, diff: d/vx + y*(1/vx - 1/vy)
+                vx, vy = tensors
+                if torch.allclose(vx, vy):
+                    return self._map_all(lambda e: e / vx)
+                return DiffExpr3(
+                    self.x / vx,
+                    self.y / vy,
+                    self.diff / vx + self.y * (1.0 / vx - 1.0 / vy),
+                )
         return NotImplemented
 
     def __matmul__(self, other):
@@ -399,5 +416,8 @@ class DiffExpr3:
 
     def diag(self, diagonal=0):
         return self._map_all(lambda e: e.diag(diagonal))
+
+    def mean(self, dim=None, keepdim=False):
+        return self._map_all(lambda e: e.mean(dim=dim, keepdim=keepdim))
 
 __all__ = ["DiffExpr2", "DiffExpr3"]

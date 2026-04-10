@@ -5,6 +5,7 @@ perturbations used in neural network verification.
 """
 
 import math
+import warnings
 from typing import Literal
 
 import torch
@@ -71,7 +72,7 @@ class LpEpsilon(Expr):
         try:
             result = weights.norm_input(p=self.q).jacobian()
         except NotImplementedError:
-            print(f"Warning: Failed to concretize using `norm_input` for LpEpsilon backward with p={self.p} and weight {weights}. This may be due to unsupported LinearOp types. Consider implementing norm_input for these LinearOp types for better performance.")
+            warnings.warn(f"Failed to concretize using `norm_input` for LpEpsilon backward with p={self.p} and weight {weights}. This may be due to unsupported LinearOp types. Consider implementing norm_input for these LinearOp types for better performance.", stacklevel=2)
             jac = weights.jacobian()
             input_dims = list(range(len(weights.output_shape), len(weights.output_shape) + len(weights.input_shape)))
             result = jac.norm(p=self.q, dim=input_dims)

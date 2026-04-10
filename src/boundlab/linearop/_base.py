@@ -1,3 +1,4 @@
+import warnings
 """Base LinearOp class and fundamental composition operators."""
 
 import enum
@@ -99,21 +100,21 @@ class LinearOp:
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose another LinearOp with this one (other ∘ self)."""
         if isinstance(other, LinearOp):
-            # print(f"Warning: Failed to fuse(@) LinearOps: {other} @ {self}, returning a ComposedOp. Consider implementing __matmul__ for these LinearOp types for better performance.")
+            # warnings.warn(f"Failed to fuse(@) LinearOps: {other} @ {self}, returning a ComposedOp. Consider implementing __matmul__ for these LinearOp types for better performance.", stacklevel=2)
             return ComposedOp(other, self)
         return NotImplemented
 
     def __add__(self, other: "LinearOp") -> "LinearOp":
         """Add this LinearOp to another."""
         if isinstance(other, LinearOp):
-            print(f"Warning: Failed to fuse(+) LinearOps: {self} + {other}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.")
+            warnings.warn(f"Failed to fuse(+) LinearOps: {self} + {other}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.", stacklevel=2)
             return SumOp(self, other)
         return NotImplemented
 
     def __radd__(self, other: "LinearOp") -> "LinearOp":
         """Add another LinearOp to this one."""
         if isinstance(other, LinearOp):
-            print(f"Warning: Failed to fuse LinearOps: {other} + {self}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.")
+            warnings.warn(f"Failed to fuse LinearOps: {other} + {self}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.", stacklevel=2)
             return SumOp(other, self)
         return NotImplemented
     
@@ -143,7 +144,7 @@ class LinearOp:
             ``NotImplemented`` for operators that only support implicit
             application.
         """
-        print(f"Warning: LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.")
+        warnings.warn(f"LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.", stacklevel=2)
         return self.force_jacobian()
     
     def abs(self) -> "LinearOp":

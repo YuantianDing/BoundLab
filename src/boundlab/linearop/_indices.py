@@ -420,8 +420,28 @@ class GetSliceOp(LinearOp):
         return x[self.indices]
 
     def vbackward(self, grad: torch.Tensor) -> torch.Tensor:
-        # For vbackward, we can use the same F.pad approach since it's vmap-compatible
-        return self.backward(grad)
+        """Backward with leading batch dimensions: grad is (*batch, *output_shape)."""
+        import torch.nn.functional as F
+
+        info = self._backward_info
+        batch_ndim = len(grad.shape) - len(self.output_shape)
+
+        if info is None:
+            batch = grad.shape[:batch_ndim]
+            result = torch.zeros(*batch, *self.input_shape, dtype=grad.dtype, device=grad.device)
+            batch_slices = tuple(slice(None) for _ in range(batch_ndim))
+            result[batch_slices + self.indices] = grad
+            return result
+
+        result = grad
+        # Unsqueeze at int-indexed dims, offset by batch dims
+        for dim, _ in reversed(info['int_indices']):
+            result = result.unsqueeze(batch_ndim + dim)
+
+        if any(p != 0 for p in info['pad_spec']):
+            result = F.pad(result, info['pad_spec'])
+
+        return result
 
     def __str__(self):
         return f"getslice({_format_indices(self.indices)})"

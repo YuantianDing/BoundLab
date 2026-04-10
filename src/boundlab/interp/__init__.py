@@ -176,6 +176,49 @@ def _onnx_gather(data, indices, axis=0):
     return gathered.reshape(out_shape)
 
 
+def _onnx_concat(*inputs, axis):
+    """ONNX Concat: concatenate inputs along *axis*.
+
+    Dispatches to :class:`boundlab.expr.Cat` when any input is an
+    :class:`Expr` (wrapping plain tensors as :class:`ConstVal`),
+    otherwise uses :func:`torch.cat`.
+    """
+    axis = int(axis)
+    if any(isinstance(x, Expr) for x in inputs):
+        from boundlab.expr import Cat, ConstVal
+        parts = [x if isinstance(x, Expr) else ConstVal(x) for x in inputs]
+        return Cat(*parts, dim=axis)
+    return torch.cat(list(inputs), dim=axis)
+
+
+def _onnx_slice(data, starts, ends, axes=None, steps=None, **_):
+    """ONNX Slice: extract a slice from *data*."""
+    starts_list = _unwrap_shape(_as_const(starts))
+    ends_list = _unwrap_shape(_as_const(ends))
+    ndim = len(data.shape)
+
+    if axes is not None:
+        axes_list = [a % ndim for a in _unwrap_shape(_as_const(axes))]
+    else:
+        axes_list = list(range(len(starts_list)))
+
+    if steps is not None:
+        steps_list = _unwrap_shape(_as_const(steps))
+    else:
+        steps_list = [1] * len(starts_list)
+
+    # Build index tuple
+    slices = [slice(None)] * ndim
+    for a, s, e, st in zip(axes_list, starts_list, ends_list, steps_list):
+        # ONNX uses INT_MAX-like sentinel for "to the end"
+        if e > data.shape[a]:
+            e = data.shape[a]
+        step = st if st != 1 else None
+        slices[a] = slice(s, e, step)
+
+    return data[tuple(slices)]
+
+
 # =====================================================================
 # FnList — multi-handler dispatch helper
 # =====================================================================
@@ -406,29 +449,75 @@ class Interpreter(Generic[E]):
 # ONNX base interpreter
 # =====================================================================
 
+def _onnx_broadcast(X, Y):
+    """Broadcast X and Y to compatible shapes (ONNX numpy-style rules)."""
+    from boundlab.expr._core import Expr
+    def _get_shape(v):
+        if isinstance(v, (Expr, torch.Tensor)):
+            return v.shape
+        if hasattr(v, 'shape'):  # DiffExpr2, DiffExpr3
+            return v.shape
+        return ()
+    x_shape = _get_shape(X)
+    y_shape = _get_shape(Y)
+    if x_shape == y_shape:
+        return X, Y
+    target = torch.broadcast_shapes(x_shape, y_shape)
+    if hasattr(X, 'expand') and x_shape != target:
+        X = X.expand(*target)
+    elif isinstance(X, torch.Tensor) and X.shape != target:
+        X = X.expand(target)
+    if hasattr(Y, 'expand') and y_shape != target:
+        Y = Y.expand(*target)
+    elif isinstance(Y, torch.Tensor) and Y.shape != target:
+        Y = Y.expand(target)
+    return X, Y
+
+
+def _as_const(x):
+    """Extract a concrete tensor from a DiffExpr2/3 or pass through.
+
+    Shape/axes/indices initializers get paired by diff_net but are
+    identical in both branches — just take the first.
+    """
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        if isinstance(x, DiffExpr2):
+            c = x.get_const()
+            return c[0] if c is not None else x.x
+        if isinstance(x, DiffExpr3):
+            return x.x
+    except ImportError:
+        pass
+    return x
+
+
 ONNX_BASE_INTERPRETER = Interpreter({
     "Input": lambda x, **_: x,
     "Initializer": lambda x, **_: x,
     # ---- arithmetic ---------------------------------------------------
-    "Add":      lambda X, Y: X + Y,
-    "Sub":      lambda X, Y: X - Y,
+    "Add":      lambda X, Y: (lambda a, b: a + b)(*_onnx_broadcast(X, Y)),
+    "Sub":      lambda X, Y: (lambda a, b: a - b)(*_onnx_broadcast(X, Y)),
     "Neg":      lambda X: -X,
-    "Mul":      lambda X, Y: X * Y,
-    "Div":      lambda X, Y: X / Y,
+    "Mul":      lambda X, Y: (lambda a, b: a * b)(*_onnx_broadcast(X, Y)),
+    "Div":      lambda X, Y: (lambda a, b: a / b)(*_onnx_broadcast(X, Y)),
     # ---- linear layers ------------------------------------------------
     "Gemm":     _onnx_gemm,
     "MatMul":   lambda A, B: A @ B,
     # ---- shape ops ----------------------------------------------------
-    "Reshape":  _onnx_reshape,
+    "Reshape":  lambda data, shape, **_: data.reshape(_unwrap_shape(_as_const(shape))),
     "Flatten":  _onnx_flatten,
     "Transpose": lambda data, perm=None: (data.permute(*perm) if perm is not None else data.T),
-    "Unsqueeze": _onnx_unsqueeze,
-    "Squeeze":  _onnx_squeeze,
-    "Gather": _onnx_gather,
+    "Unsqueeze": lambda data, axes: _onnx_unsqueeze(data, _as_const(axes)),
+    "Squeeze":  lambda data, axes=None: _onnx_squeeze(data, _as_const(axes) if axes is not None else None),
     "Identity": lambda X: X,
     # ---- reductions ---------------------------------------------------
-    "ReduceSum": _onnx_reduce_sum,
     "ReduceMean": _onnx_reduce_mean,
+    "ReduceSum": _onnx_reduce_sum,
+    # ---- indexing -----------------------------------------------------
+    "Gather": _onnx_gather,
+    "Slice": _onnx_slice,
+    "Concat": _onnx_concat,
     # ---- constants ---------------------------------------------
     "Constant": _onnx_constant,
 })

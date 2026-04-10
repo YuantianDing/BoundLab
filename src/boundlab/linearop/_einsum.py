@@ -1,3 +1,4 @@
+import warnings
 
 
 
@@ -215,7 +216,7 @@ class EinsumOp(LinearOp):
             if self.is_full():
                 out = other.jacobian_scatter(self.permute_for_output().tensor)
                 return EinsumOp.from_full(out, len(self.input_dims), name=merge_name(self, "+", other))
-            print(f"Warning: Adding EinsumOps with different input/output dims: {self0} + {other0}. This needs `force_jacobian`.")
+            warnings.warn(f"Adding EinsumOps with different input/output dims: {self0} + {other0}. This needs `force_jacobian`.", stacklevel=2)
             return EinsumOp.from_full(SumOp(self, other).jacobian(), len(self.input_dims), name=merge_name(self, "+", other))
         if isinstance(other, LinearOp):
             return super().__radd__(other)
@@ -271,7 +272,7 @@ class EinsumOp(LinearOp):
         if self.is_full():
             return self.permute_for_output().tensor.view(self.output_shape + self.input_shape)
         else:
-            print(f"Warning: Jacobian is not efficiently available for non-full EinsumOp {self}. Consider using `jacobian_scatter` or `force_jacobian` instead.")
+            warnings.warn(f"Jacobian is not efficiently available for non-full EinsumOp {self}. Consider using `jacobian_scatter` or `force_jacobian` instead.", stacklevel=2)
             return self.force_jacobian()
             # raise NotImplementedError(f"Jacobian is only implemented for full EinsumOps: {self}")
         
@@ -413,3 +414,4 @@ def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
 
 def _to_ascii_letters(*args: list[int]) -> tuple[str, ...]:
     return tuple("".join(string.ascii_letters[i] for i in a) for a in args)
+    

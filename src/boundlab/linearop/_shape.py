@@ -357,4 +357,3 @@ class DiagOp(LinearOp):
     def __str__(self):
         return f"diag({self.diagonal})"
 
-
