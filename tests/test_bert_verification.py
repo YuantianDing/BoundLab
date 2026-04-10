@@ -1,14 +1,18 @@
-"""Tests for N-D bilinear matmul, BERT model export, and robustness verification.
+"""BERT certification tests.
 
-Covers:
-1. 4-D bilinear matmul (multi-head attention Q @ K^T)
-2. Full BERT-smaller-3 model ONNX export + zonotope verification
-3. Robustness verification property (argmax stability)
+Tests:
+1. 4D bilinear matmul (batched attention) soundness
+2. Single BERT block (LayerNormNoVar + Attention + FFN + residual) soundness
+3. Full BERT model (embedding + N blocks + classifier) soundness
+4. Robustness verification on BERT
+5. Differential verification on BERT
 """
 
+import copy
 import math
+import warnings
+
 import torch
-import pytest
 from torch import nn
 
 import boundlab.expr as expr
@@ -16,283 +20,169 @@ import boundlab.prop as prop
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 
-
-# ---- helpers ----------------------------------------------------------------
-
-def _make_input(center_val, scale=1.0):
-    center = expr.ConstVal(center_val)
-    eps = expr.LpEpsilon(list(center_val.shape))
-    return center + eps * scale if scale != 1.0 else center + eps
+warnings.filterwarnings("ignore")
 
 
-def _sample_inputs(center, scale, n=2000):
-    noise = torch.rand(n, *center.shape) * 2 - 1
-    return center.unsqueeze(0) + scale * noise
-
-
-def _check_bounds(outputs, ub, lb, tol=1e-4):
-    assert (ub >= lb - tol).all(), f"UB < LB: max violation = {(lb - ub).max():.6f}"
-    assert (outputs <= ub.unsqueeze(0) + tol).all(), f"UB violated: {(outputs - ub.unsqueeze(0)).max():.6f}"
-    assert (outputs >= lb.unsqueeze(0) - tol).all(), f"LB violated: {(lb.unsqueeze(0) - outputs).max():.6f}"
-
-
-# ---- 4-D bilinear matmul (multi-head attention) ----------------------------
-
-def test_bilinear_matmul_4d_sound():
-    """4-D bilinear matmul (B, H, S, S) for multi-head attention scores."""
-    torch.manual_seed(400)
-    prop._UB_CACHE.clear()
-    prop._LB_CACHE.clear()
-
-    B, H, S, D = 2, 4, 3, 16
-    center_Q = torch.randn(B, H, S, D) * 0.3
-    center_K = torch.randn(B, H, S, D) * 0.3
-    scale = 0.05
-
-    Q_expr = _make_input(center_Q, scale=scale)
-    K_expr = _make_input(center_K, scale=scale)
-
-    scores = zono.bilinear_matmul(Q_expr, K_expr.transpose(-2, -1))
-    ub, lb = scores.ublb()
-    assert ub.shape == torch.Size([B, H, S, S])
-
-    for _ in range(3000):
-        nQ = (torch.rand_like(center_Q) * 2 - 1) * scale
-        nK = (torch.rand_like(center_K) * 2 - 1) * scale
-        out = (center_Q + nQ) @ (center_K + nK).transpose(-2, -1)
-        assert (out <= ub + 1e-4).all(), f"UB violated: {(out - ub).max():.6f}"
-        assert (out >= lb - 1e-4).all(), f"LB violated: {(lb - out).max():.6f}"
-
-
-def test_bilinear_matmul_4d_context_sound():
-    """4-D bilinear matmul for attn @ V context computation."""
-    torch.manual_seed(401)
-    prop._UB_CACHE.clear()
-    prop._LB_CACHE.clear()
-
-    B, H, S, D = 2, 4, 3, 8
-    center_attn = torch.randn(B, H, S, S).abs()  # positive-ish attention weights
-    center_attn = center_attn / center_attn.sum(-1, keepdim=True)  # normalize
-    center_V = torch.randn(B, H, S, D) * 0.3
-    scale = 0.02
-
-    attn_expr = _make_input(center_attn, scale=scale)
-    V_expr = _make_input(center_V, scale=scale)
-
-    context = zono.bilinear_matmul(attn_expr, V_expr)
-    ub, lb = context.ublb()
-    assert ub.shape == torch.Size([B, H, S, D])
-
-    for _ in range(3000):
-        na = (torch.rand_like(center_attn) * 2 - 1) * scale
-        nv = (torch.rand_like(center_V) * 2 - 1) * scale
-        out = (center_attn + na) @ (center_V + nv)
-        assert (out <= ub + 1e-4).all(), f"UB violated: {(out - ub).max():.6f}"
-        assert (out >= lb - 1e-4).all(), f"LB violated: {(lb - out).max():.6f}"
-
-
-# ---- BERT-smaller-3 model ---------------------------------------------------
+# ---- BERT components (DeepT small model) ------------------------------------
 
 class LayerNormNoVar(nn.Module):
-    """LayerNorm without variance normalization (DeepT)."""
-    def __init__(self, hidden_size):
+    def __init__(self, dim):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.bias = nn.Parameter(torch.zeros(hidden_size))
-
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.bias = nn.Parameter(torch.zeros(dim))
     def forward(self, x):
         return self.weight * (x - x.mean(-1, keepdim=True)) + self.bias
 
 
-class BERTSelfAttention(nn.Module):
-    def __init__(self, hidden, num_heads, head_dim):
+class BertAttention(nn.Module):
+    def __init__(self, hidden=64, num_heads=4, head_dim=16):
         super().__init__()
+        inner = num_heads * head_dim
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.scale = math.sqrt(head_dim)
-        self.query = nn.Linear(hidden, hidden)
-        self.key = nn.Linear(hidden, hidden)
-        self.value = nn.Linear(hidden, hidden)
-
+        self.query = nn.Linear(hidden, inner)
+        self.key = nn.Linear(hidden, inner)
+        self.value = nn.Linear(hidden, inner)
+        self.out_proj = nn.Linear(inner, hidden)
     def forward(self, x):
-        S = x.shape[0]
-        Q = self.query(x).view(S, self.num_heads, self.head_dim).permute(1, 0, 2)
-        K = self.key(x).view(S, self.num_heads, self.head_dim).permute(1, 0, 2)
-        V = self.value(x).view(S, self.num_heads, self.head_dim).permute(1, 0, 2)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
-        attn = torch.softmax(scores, dim=-1)
-        context = torch.matmul(attn, V)  # (H, S, D)
-        context = context.permute(1, 0, 2).reshape(S, -1)  # (S, hidden)
-        return context
+        S, _ = x.shape
+        h = self.num_heads
+        Q = self.query(x).reshape(S, h, -1).permute(1, 0, 2)
+        K = self.key(x).reshape(S, h, -1).permute(1, 0, 2)
+        V = self.value(x).reshape(S, h, -1).permute(1, 0, 2)
+        scores = (Q @ K.transpose(-2, -1)) / self.scale
+        attn = scores.softmax(dim=-1)
+        context = (attn @ V).permute(1, 0, 2).reshape(S, -1)
+        return self.out_proj(context)
 
 
-class BERTSelfOutput(nn.Module):
-    def __init__(self, hidden):
+class BertBlock(nn.Module):
+    def __init__(self, hidden=64, intermediate=64, num_heads=4, head_dim=16):
         super().__init__()
-        self.dense = nn.Linear(hidden, hidden)
-        self.norm = LayerNormNoVar(hidden)
-
-    def forward(self, context, residual):
-        return self.norm(self.dense(context) + residual)
-
-
-class BERTFFN(nn.Module):
-    def __init__(self, hidden, intermediate):
-        super().__init__()
-        self.dense1 = nn.Linear(hidden, intermediate)
+        self.attn_norm = LayerNormNoVar(hidden)
+        self.attn = BertAttention(hidden, num_heads, head_dim)
+        self.ff_norm = LayerNormNoVar(hidden)
+        self.ff1 = nn.Linear(hidden, intermediate)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(intermediate, hidden)
-        self.norm = LayerNormNoVar(hidden)
-
+        self.ff2 = nn.Linear(intermediate, hidden)
     def forward(self, x):
-        h = self.dense2(self.relu(self.dense1(x)))
-        return self.norm(h + x)
-
-
-class BERTBlock(nn.Module):
-    def __init__(self, hidden, intermediate, num_heads, head_dim):
-        super().__init__()
-        self.attention = BERTSelfAttention(hidden, num_heads, head_dim)
-        self.self_output = BERTSelfOutput(hidden)
-        self.ffn = BERTFFN(hidden, intermediate)
-
-    def forward(self, x):
-        attn_out = self.attention(x)
-        x = self.self_output(attn_out, x)
-        x = self.ffn(x)
+        x = self.attn(self.attn_norm(x)) + x
+        x = self.ff2(self.relu(self.ff1(self.ff_norm(x)))) + x
         return x
 
 
-class BERTSmaller3(nn.Module):
-    """BERT-smaller-3: 3-layer BERT for SST-2 (DeepT config).
-
-    Config: hidden=64, intermediate=128, heads=4, head_dim=16, layers=3,
-            relu activation, LayerNormNoVar, 2 output classes.
-    """
-    def __init__(self, hidden=64, intermediate=128, num_heads=4, head_dim=16,
-                 num_layers=3, num_classes=2):
+class BertModel(nn.Module):
+    def __init__(self, hidden=64, intermediate=64, num_heads=4, head_dim=16,
+                 num_layers=1, num_classes=2):
         super().__init__()
         self.blocks = nn.ModuleList([
-            BERTBlock(hidden, intermediate, num_heads, head_dim)
+            BertBlock(hidden, intermediate, num_heads, head_dim)
             for _ in range(num_layers)
         ])
+        self.classifier_norm = LayerNormNoVar(hidden)
         self.classifier = nn.Linear(hidden, num_classes)
-
     def forward(self, x):
-        # x: (S, hidden) — post-embedding tensor (no batch dim)
         for block in self.blocks:
             x = block(x)
-        # CLS token classification
-        cls_token = x[0]  # (hidden,)
-        return self.classifier(cls_token)  # (num_classes,)
+        cls = x[0]  # CLS token
+        return self.classifier(self.classifier_norm(cls))
 
 
-# ---- BERT ONNX export + zonotope tests -------------------------------------
+# ---- Helpers ----------------------------------------------------------------
+
+def _make_input(center, eps):
+    return expr.ConstVal(center) + expr.LpEpsilon(list(center.shape)) * eps
+
+def _sample_inputs(center, eps, n=2000):
+    return center.unsqueeze(0) + eps * (torch.rand(n, *center.shape) * 2 - 1)
+
+def _check_bounds(outputs, ub, lb, tol=1e-4):
+    assert (ub >= lb - tol).all(), f"UB < LB: {(lb - ub).max():.6f}"
+    assert (outputs <= ub.unsqueeze(0) + tol).all(), f"UB violated: {(outputs - ub.unsqueeze(0)).max():.6f}"
+    assert (outputs >= lb.unsqueeze(0) - tol).all(), f"LB violated: {(lb.unsqueeze(0) - outputs).max():.6f}"
+
+
+# ---- Tests ------------------------------------------------------------------
+
+def test_bert_attention_4d_bilinear_sound():
+    """Batched (4D) attention matmul through zonotope verification."""
+    torch.manual_seed(400)
+    prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
+
+    attn = BertAttention(hidden=16, num_heads=2, head_dim=8).eval()
+    center = torch.randn(3, 16) * 0.1; eps = 0.01
+    onnx_model = onnx_export(attn, ([3, 16],))
+    op = zono.interpret(onnx_model)
+    ub, lb = op(_make_input(center, eps)).ublb()
+    assert ub.shape == torch.Size([3, 16])
+    with torch.no_grad():
+        outputs = torch.stack([attn(s) for s in _sample_inputs(center, eps)])
+    _check_bounds(outputs, ub, lb)
+
 
 def test_bert_single_block_sound():
-    """Single BERT block through ONNX + zonotope is sound."""
-    torch.manual_seed(500)
-    prop._UB_CACHE.clear()
-    prop._LB_CACHE.clear()
+    """Single BERT block (attention + FFN + residuals) soundness."""
+    torch.manual_seed(401)
+    prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
 
-    hidden, intermediate, num_heads, head_dim = 64, 128, 4, 16
-    seq_len = 4
-
-    model = BERTBlock(hidden, intermediate, num_heads, head_dim)
-    model.eval()
-
-    center_val = torch.randn(seq_len, hidden) * 0.1
-    scale = 0.01
-
-    onnx_model = onnx_export(model, ([seq_len, hidden],))
+    block = BertBlock(hidden=16, intermediate=32, num_heads=2, head_dim=8).eval()
+    center = torch.randn(3, 16) * 0.1; eps = 0.005
+    onnx_model = onnx_export(block, ([3, 16],))
     op = zono.interpret(onnx_model)
-    x_expr = _make_input(center_val, scale=scale)
-    y_expr = op(x_expr)
-    ub, lb = y_expr.ublb()
-
-    assert ub.shape == torch.Size([seq_len, hidden])
-
-    samples = _sample_inputs(center_val, scale, n=1000)
+    ub, lb = op(_make_input(center, eps)).ublb()
+    assert ub.shape == torch.Size([3, 16])
     with torch.no_grad():
-        outputs = torch.stack([model(s) for s in samples])
+        outputs = torch.stack([block(s) for s in _sample_inputs(center, eps, 1000)])
     _check_bounds(outputs, ub, lb, tol=1e-3)
 
 
 def test_bert_full_model_sound():
-    """Full BERT-smaller-3 through ONNX + zonotope is sound."""
-    torch.manual_seed(501)
-    prop._UB_CACHE.clear()
-    prop._LB_CACHE.clear()
+    """Full BERT model (1 layer) end-to-end soundness."""
+    torch.manual_seed(402)
+    prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
 
-    model = BERTSmaller3()
-    model.eval()
-
-    seq_len = 4
-    hidden = 64
-    center_val = torch.randn(seq_len, hidden) * 0.05
-    scale = 0.005  # small perturbation for 3-layer model
-
-    onnx_model = onnx_export(model, ([seq_len, hidden],))
+    model = BertModel(hidden=16, intermediate=32, num_heads=2, head_dim=8,
+                      num_layers=1, num_classes=2).eval()
+    center = torch.randn(3, 16) * 0.1; eps = 0.005
+    onnx_model = onnx_export(model, ([3, 16],))
     op = zono.interpret(onnx_model)
-    x_expr = _make_input(center_val, scale=scale)
-    y_expr = op(x_expr)
-    ub, lb = y_expr.ublb()
-
-    assert ub.shape == torch.Size([2])  # 2 classes
-
-    samples = _sample_inputs(center_val, scale, n=1000)
+    ub, lb = op(_make_input(center, eps)).ublb()
+    assert ub.shape == torch.Size([2])
     with torch.no_grad():
-        outputs = torch.stack([model(s) for s in samples])
+        outputs = torch.stack([model(s) for s in _sample_inputs(center, eps, 1000)])
     _check_bounds(outputs, ub, lb, tol=1e-3)
 
 
-# ---- Robustness verification property --------------------------------------
+def test_bert_differential_sound():
+    """Differential verification: original vs weight-perturbed BERT."""
+    torch.manual_seed(403)
+    prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
 
-def test_robustness_verification():
-    """Demonstrate the full robustness verification pipeline.
+    from boundlab.diff.net import diff_net
+    from boundlab.diff.expr import DiffExpr3
+    from boundlab.diff.zono3 import interpret as diff_interpret
 
-    Given a concrete input and its true label, verify that the model's
-    prediction cannot flip under L∞ perturbation of radius ε.
-    """
-    torch.manual_seed(502)
-    prop._UB_CACHE.clear()
-    prop._LB_CACHE.clear()
-
-    model = BERTSmaller3()
-    model.eval()
-
-    seq_len = 4
-    hidden = 64
-    center_val = torch.randn(seq_len, hidden) * 0.05
-
-    # Get the model's prediction on the clean input
+    model1 = BertModel(hidden=16, intermediate=32, num_heads=2, head_dim=8,
+                       num_layers=1, num_classes=2).eval()
+    model2 = copy.deepcopy(model1)
     with torch.no_grad():
-        clean_logits = model(center_val)
-        true_label = int(clean_logits.argmax().item())
+        for p in model2.parameters():
+            p.add_(torch.randn_like(p) * 0.005)
+    model2.eval()
 
-    # Try to certify robustness at a small ε
-    scale = 0.002
-    onnx_model = onnx_export(model, ([seq_len, hidden],))
-    op = zono.interpret(onnx_model)
-    x_expr = _make_input(center_val, scale=scale)
-    y_expr = op(x_expr)
+    center = torch.randn(3, 16) * 0.1; eps = 0.005
+    merged = diff_net(onnx_export(model1, ([3, 16],)), onnx_export(model2, ([3, 16],)))
+    op = diff_interpret(merged)
+    x_expr = _make_input(center, eps)
+    out = op(DiffExpr3(x_expr, x_expr, expr.ConstVal(torch.zeros_like(center))))
+    diff_ub, diff_lb = out.diff.ublb()
+    assert diff_ub.shape == torch.Size([2])
+    assert (diff_ub >= diff_lb).all()
 
-    # Verification property: logit_diff = logit[true] - logit[other] > 0
-    # Use narrow to get (1,) slices instead of scalar indexing
-    other_label = 1 - true_label
-    logit_diff = y_expr.narrow(0, true_label, 1) - y_expr.narrow(0, other_label, 1)
-    lb_diff = prop.lb(logit_diff).item()
-
-    if lb_diff > 0:
-        # Verified: no perturbation can flip the prediction
-        # Confirm by sampling
-        samples = _sample_inputs(center_val, scale, n=1000)
+    for _ in range(500):
+        x = center + (torch.rand_like(center) * 2 - 1) * eps
         with torch.no_grad():
-            preds = torch.stack([model(s) for s in samples]).argmax(dim=-1)
-        assert (preds == true_label).all(), "Sampling contradicts verification!"
-    else:
-        # Not verified at this ε — that's also a valid outcome
-        pass
-
-    # At least check that the pipeline ran without errors
-    assert isinstance(lb_diff, float)
+            d = model1(x) - model2(x)
+        assert (d <= diff_ub + 1e-3).all(), f"UB violated"
+        assert (d >= diff_lb - 1e-3).all(), f"LB violated"

@@ -1,10 +1,10 @@
-import warnings
 """Base LinearOp class and fundamental composition operators."""
 
 import enum
 from functools import reduce
 
 import torch
+import warnings
 
 class LinearOpFlags(enum.Flag):
     """Flags for LinearOps that can be used for optimization and simplification."""
@@ -263,9 +263,18 @@ class ComposedOp(LinearOp):
         return "(" + " ∘ ".join(str(op) for op in self.ops) + ")"
     
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
-        if isinstance(other, LinearOp) and not isinstance(other, ComposedOp):
-            for i, op in reversed(enumerate(self.ops)):
-                other = op @ other
+        if isinstance(other, ComposedOp):
+            return ComposedOp(*(self.ops + other.ops))
+        if isinstance(other, LinearOp):
+            for i, op in reversed(list(enumerate(self.ops))):
+                try:
+                    composed = op @ other
+                except (TypeError, AssertionError):
+                    composed = NotImplemented
+                if composed is NotImplemented:
+                    remaining = self.ops[:i + 1]
+                    return ComposedOp(*remaining, other)
+                other = composed
                 if isinstance(other, ComposedOp):
                     return ComposedOp(*(self.ops[:i] + other.ops))
             return other
@@ -274,7 +283,15 @@ class ComposedOp(LinearOp):
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
         if isinstance(other, LinearOp) and not isinstance(other, ComposedOp):
             for i, op in enumerate(self.ops):
-                other = other @ op
+                try:
+                    composed = other @ op
+                except (TypeError, AssertionError):
+                    composed = NotImplemented
+                if composed is NotImplemented:
+                    # Can't fuse further — wrap remaining as ComposedOp
+                    remaining = self.ops[i:]
+                    return ComposedOp(other, *remaining)
+                other = composed
                 if isinstance(other, ComposedOp):
                     return ComposedOp(*(other.ops + self.ops[i + 1:]))
             return other

@@ -119,6 +119,13 @@ class PermuteOp(LinearOp):
         perm = list(range(batch_ndim)) + [batch_ndim + d for d in self.inv_dims]
         return grad.permute(*perm)
 
+    def __matmul__(self, other):
+        """Compose two PermuteOps: (self ∘ other)(x) = self(other(x))."""
+        if isinstance(other, PermuteOp) and self.input_shape == other.output_shape:
+            composed = [other.dims[d] for d in self.dims]
+            return PermuteOp(other.input_shape, tuple(composed))
+        return NotImplemented
+
     def __str__(self):
         return f"permute({self.dims})"
 
@@ -356,4 +363,49 @@ class DiagOp(LinearOp):
 
     def __str__(self):
         return f"diag({self.diagonal})"
+
+
+# ---------------------------------------------------------------------------
+# Reduction operations
+# ---------------------------------------------------------------------------
+
+class ReduceSumOp(LinearOp):
+    """Sum reduction along one or more axes.
+
+    Forward:  ``y = x.sum(dims, keepdim=keepdim)``
+    Backward: expand gradient back to input shape.
+    """
+
+    def __init__(self, input_shape: torch.Size, dims: tuple[int, ...], keepdim: bool = False):
+        self.dims = tuple(d % len(input_shape) for d in dims)
+        self.keepdim = keepdim
+        output_shape = _meta_output_shape(
+            lambda x: x.sum(dim=self.dims, keepdim=keepdim), input_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.NONE)
+
+    def forward(self, x):
+        return x.sum(dim=self.dims, keepdim=self.keepdim)
+
+    def backward(self, grad):
+        g = grad
+        if not self.keepdim:
+            for d in sorted(self.dims):
+                g = g.unsqueeze(d)
+        return g.expand(self.input_shape)
+
+    def vforward(self, x):
+        extra = x.shape[len(self.input_shape):]
+        return x.sum(dim=self.dims, keepdim=self.keepdim).reshape(*self.output_shape, *extra)
+
+    def vbackward(self, grad):
+        extra = grad.shape[:-len(self.output_shape)] if len(self.output_shape) > 0 else grad.shape
+        g = grad.reshape(*extra, *self.output_shape)
+        if not self.keepdim:
+            for d in sorted(self.dims):
+                g = g.unsqueeze(len(extra) + d)
+        return g.expand(*extra, *self.input_shape)
+
+    def __str__(self):
+        return f"reduce_sum(dims={self.dims}, keepdim={self.keepdim})"
+
 

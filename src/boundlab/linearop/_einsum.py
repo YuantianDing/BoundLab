@@ -1,4 +1,3 @@
-import warnings
 
 
 
@@ -10,6 +9,7 @@ import torch
 from boundlab.linearop._base import LinearOp, ComposedOp, ScalarOp, SumOp
 from boundlab.linearop._shape import ExpandOp, PermuteOp
 from boundlab.utils import merge_name
+import warnings
 
 
 class EinsumOp(LinearOp):
@@ -152,7 +152,8 @@ class EinsumOp(LinearOp):
 
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose another LinearOp with this EinsumOp: (other ∘ self)(x) = other(self(x))."""
-        if self.is_full():
+        from boundlab.linearop._shape import ReshapeOp, FlattenOp, UnflattenOp
+        if self.is_full() and not isinstance(other, (ReshapeOp, FlattenOp, UnflattenOp)):
             op = self.permute_for_output()
             odims = len(op.output_dims)
             assert all(a == b for a, b in zip(op.output_dims, range(odims))), "Full EinsumOp should have output_dims permuted to the end."
@@ -414,4 +415,3 @@ def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
 
 def _to_ascii_letters(*args: list[int]) -> tuple[str, ...]:
     return tuple("".join(string.ascii_letters[i] for i in a) for a in args)
-    
