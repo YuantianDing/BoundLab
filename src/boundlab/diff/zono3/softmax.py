@@ -58,8 +58,6 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     ndim = len(x.shape)
     if dim < 0:
         dim = ndim + dim
-    assert ndim == 2 and dim == 1, \
-        f"Differential softmax only supports 2D tensors along last dim, got shape {x.shape} dim {dim}"
 
     n = x.shape[dim]
 
@@ -75,8 +73,8 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     exp_handler = interpret["exp"]
     exp_out = exp_handler(x_shifted)
 
-    ones_col = torch.ones(n, 1)
-    sum_exp = exp_out @ ones_col
+    # Sum along softmax dim using mean * n (works for any ndim)
+    sum_exp = exp_out.mean(dim=dim, keepdim=True) * float(n)
 
     reciprocal_handler = interpret["reciprocal"]
     inv_sum = reciprocal_handler(sum_exp)

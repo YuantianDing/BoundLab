@@ -358,3 +358,50 @@ class DiagOp(LinearOp):
         return f"diag({self.diagonal})"
 
 
+# ---------------------------------------------------------------------------
+# Reduction operations
+# ---------------------------------------------------------------------------
+
+class ReduceMeanOp(LinearOp):
+    """Mean reduction along one or more axes.
+
+    Forward:  ``y = x.mean(dims, keepdim=keepdim)``
+    Backward: uniform expansion ``grad.expand(input_shape) / n``
+    """
+
+    def __init__(self, input_shape: torch.Size, dims: tuple[int, ...], keepdim: bool = False):
+        self.dims = tuple(d % len(input_shape) for d in dims)
+        self.keepdim = keepdim
+        self.n = 1
+        for d in self.dims:
+            self.n *= input_shape[d]
+        output_shape = _meta_output_shape(
+            lambda x: x.mean(dim=self.dims, keepdim=keepdim), input_shape)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.NONE)
+
+    def forward(self, x):
+        return x.mean(dim=self.dims, keepdim=self.keepdim)
+
+    def backward(self, grad):
+        g = grad
+        if not self.keepdim:
+            for d in sorted(self.dims):
+                g = g.unsqueeze(d)
+        return g.expand(self.input_shape) / self.n
+
+    def vforward(self, x):
+        extra = x.shape[len(self.input_shape):]
+        return x.mean(dim=self.dims, keepdim=self.keepdim).reshape(*self.output_shape, *extra)
+
+    def vbackward(self, grad):
+        extra = grad.shape[:-len(self.output_shape)] if len(self.output_shape) > 0 else grad.shape
+        g = grad.reshape(*extra, *self.output_shape)
+        if not self.keepdim:
+            for d in sorted(self.dims):
+                g = g.unsqueeze(len(extra) + d)
+        return g.expand(*extra, *self.input_shape) / self.n
+
+    def __str__(self):
+        return f"reduce_mean(dims={self.dims}, keepdim={self.keepdim})"
+
+

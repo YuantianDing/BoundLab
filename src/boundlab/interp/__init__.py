@@ -103,6 +103,72 @@ def _onnx_constant(value=None, **_):
     return torch.Tensor(value) if value is not None else None
 
 
+def _onnx_reduce_mean(data, axes=None, keepdims=1, **_):
+    """ONNX ReduceMean: mean reduction along *axes*."""
+    if axes is not None:
+        axes = tuple(_unwrap_shape(_as_const(axes)))
+    return data.mean(dim=axes, keepdim=bool(keepdims))
+
+
+def _onnx_gather(data, indices, axis=0, **_):
+    """ONNX Gather: index into *data* along *axis* using *indices*."""
+    indices = _as_const(indices)
+    if isinstance(indices, torch.Tensor):
+        idx_shape = indices.shape
+        if idx_shape == torch.Size([]):
+            # Scalar index → select (removes the axis dim)
+            idx = int(indices.item())
+            slices = tuple(
+                idx if d == axis else slice(None)
+                for d in range(len(data.shape))
+            )
+            return data[slices]
+        elif len(idx_shape) == 1:
+            # 1-D index tensor → build per-element select and stack
+            # For Expr, use narrow(axis, i, 1).squeeze(axis) for each index
+            from boundlab.expr._core import Expr
+            if isinstance(data, Expr):
+                parts = []
+                for i in range(idx_shape[0]):
+                    idx_val = int(indices[i].item())
+                    parts.append(data.narrow(axis, idx_val, 1).squeeze(axis))
+                from boundlab.expr import Stack
+                return Stack(parts, dim=axis)
+            else:
+                return torch.index_select(data, axis, indices.long())
+    raise NotImplementedError(
+        f"ONNX Gather with indices shape {indices.shape} not yet supported"
+    )
+
+
+def _onnx_slice(data, starts, ends, axes=None, steps=None, **_):
+    """ONNX Slice: extract a slice from *data*."""
+    starts_list = _unwrap_shape(_as_const(starts))
+    ends_list = _unwrap_shape(_as_const(ends))
+    ndim = len(data.shape)
+
+    if axes is not None:
+        axes_list = [a % ndim for a in _unwrap_shape(_as_const(axes))]
+    else:
+        axes_list = list(range(len(starts_list)))
+
+    if steps is not None:
+        steps_list = _unwrap_shape(_as_const(steps))
+    else:
+        steps_list = [1] * len(starts_list)
+
+    # Build index tuple
+    slices = [slice(None)] * ndim
+    for a, s, e, st in zip(axes_list, starts_list, ends_list, steps_list):
+        # ONNX uses INT_MAX-like sentinel for "to the end"
+        if e > data.shape[a]:
+            e = data.shape[a]
+        step = st if st != 1 else None
+        slices[a] = slice(s, e, step)
+
+    return data[tuple(slices)]
+
+
 # =====================================================================
 # FnList — multi-handler dispatch helper
 # =====================================================================
@@ -329,25 +395,73 @@ class Interpreter(Generic[E]):
 # ONNX base interpreter
 # =====================================================================
 
+def _onnx_broadcast(X, Y):
+    """Broadcast X and Y to compatible shapes (ONNX numpy-style rules)."""
+    from boundlab.expr._core import Expr
+    def _get_shape(v):
+        if isinstance(v, (Expr, torch.Tensor)):
+            return v.shape
+        if hasattr(v, 'shape'):  # DiffExpr2, DiffExpr3
+            return v.shape
+        return ()
+    x_shape = _get_shape(X)
+    y_shape = _get_shape(Y)
+    if x_shape == y_shape:
+        return X, Y
+    target = torch.broadcast_shapes(x_shape, y_shape)
+    if hasattr(X, 'expand') and x_shape != target:
+        X = X.expand(*target)
+    elif isinstance(X, torch.Tensor) and X.shape != target:
+        X = X.expand(target)
+    if hasattr(Y, 'expand') and y_shape != target:
+        Y = Y.expand(*target)
+    elif isinstance(Y, torch.Tensor) and Y.shape != target:
+        Y = Y.expand(target)
+    return X, Y
+
+
+def _as_const(x):
+    """Extract a concrete tensor from a DiffExpr2/3 or pass through.
+
+    Shape/axes/indices initializers get paired by diff_net but are
+    identical in both branches — just take the first.
+    """
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        if isinstance(x, DiffExpr2):
+            c = x.get_const()
+            return c[0] if c is not None else x.x
+        if isinstance(x, DiffExpr3):
+            return x.x
+    except ImportError:
+        pass
+    return x
+
+
 ONNX_BASE_INTERPRETER = Interpreter({
     "Input": lambda x, **_: x,
     "Initializer": lambda x, **_: x,
     # ---- arithmetic ---------------------------------------------------
-    "Add":      lambda X, Y: X + Y,
-    "Sub":      lambda X, Y: X - Y,
+    "Add":      lambda X, Y: (lambda a, b: a + b)(*_onnx_broadcast(X, Y)),
+    "Sub":      lambda X, Y: (lambda a, b: a - b)(*_onnx_broadcast(X, Y)),
     "Neg":      lambda X: -X,
-    "Mul":      lambda X, Y: X * Y,
-    "Div":      lambda X, Y: X / Y,
+    "Mul":      lambda X, Y: (lambda a, b: a * b)(*_onnx_broadcast(X, Y)),
+    "Div":      lambda X, Y: (lambda a, b: a / b)(*_onnx_broadcast(X, Y)),
     # ---- linear layers ------------------------------------------------
     "Gemm":     _onnx_gemm,
     "MatMul":   lambda A, B: A @ B,
     # ---- shape ops ----------------------------------------------------
-    "Reshape":  lambda data, shape: data.reshape(_unwrap_shape(shape)),
+    "Reshape":  lambda data, shape, **_: data.reshape(_unwrap_shape(_as_const(shape))),
     "Flatten":  _onnx_flatten,
     "Transpose": lambda data, perm=None: (data.permute(*perm) if perm is not None else data.T),
-    "Unsqueeze": _onnx_unsqueeze,
-    "Squeeze":  _onnx_squeeze,
+    "Unsqueeze": lambda data, axes: _onnx_unsqueeze(data, _as_const(axes)),
+    "Squeeze":  lambda data, axes=None: _onnx_squeeze(data, _as_const(axes) if axes is not None else None),
     "Identity": lambda X: X,
+    # ---- reductions ---------------------------------------------------
+    "ReduceMean": _onnx_reduce_mean,
+    # ---- indexing -----------------------------------------------------
+    "Gather": _onnx_gather,
+    "Slice": _onnx_slice,
     # ---- constants ---------------------------------------------
     "Constant": _onnx_constant,
 })

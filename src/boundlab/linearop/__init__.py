@@ -44,6 +44,7 @@ from ._shape import (
     FlipOp,
     RollOp,
     DiagOp,
+    ReduceMeanOp,
 )
 from ._indices import (
     # Core indexing ops

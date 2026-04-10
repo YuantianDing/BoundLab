@@ -14,7 +14,8 @@ from boundlab.expr._var import LpEpsilon
 def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     r"""Linearize ``A @ B`` when both operands are symbolic expressions.
 
-    A: (m, k), B: (k, n) → result: (m, n)
+    Supports batched matmul: A has shape ``(*batch, m, k)`` and B has shape
+    ``(*batch, k, n)``, producing result shape ``(*batch, m, n)``.
 
     The method uses a first-order expansion around expression centers:
 
@@ -31,8 +32,8 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     and represented using fresh noise symbols.
 
     Args:
-        A: Left expression with shape ``(m, k)``.
-        B: Right expression with shape ``(k, n)``.
+        A: Left expression with shape ``(*batch, m, k)``.
+        B: Right expression with shape ``(*batch, k, n)``.
 
     Returns:
         An expression over-approximating ``A @ B``.
@@ -48,9 +49,9 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     >>> C.shape
     torch.Size([2, 4])
     """
-    assert len(A.shape) == 2 and len(B.shape) == 2, \
-        f"Only 2D matmul supported, got {A.shape} @ {B.shape}"
-    assert A.shape[1] == B.shape[0], \
+    assert len(A.shape) >= 2 and len(B.shape) >= 2, \
+        f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
+    assert A.shape[-1] == B.shape[-2], \
         f"Inner dims must match: {A.shape} @ {B.shape}"
 
     Ac, As = A.symmetric_decompose()  # Ac: constant part, As: epsilon part
