@@ -70,9 +70,55 @@ def diff_pair(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     )
 
 
-# =====================================================================
-# DiffLinear
-# =====================================================================
+def heaviside_pruning(scores: torch.Tensor, data: torch.Tensor) -> torch.Tensor:
+    """
+    A mock operator for differential verification that simulates the effect of pruning based on scores. This operator is not intended for actual use in production code, but serves as a placeholder for differential verification.
+
+    For one network, this operator simply gives back the :code:`data` tensor.
+    For the other network, it gives :code:`heaviside(scores) * data`, simulating the effect of pruning based on the scores.
+
+    Args:
+        scores: A tensor of scores used for pruning. Must have the same shape as :code
+        data: A tensor of data to be pruned. Must have the same shape as :code:`scores`.
+
+    Returns:
+        A tensor of the same shape as :code:`scores` and :code:`data`.
+    """
+    assert scores.shape == data.shape, "scores and data must have the same shape"
+    return torch.onnx.ops.symbolic(
+        "boundlab::heaviside_pruning",
+        (scores, data),
+        dtype=data.dtype,
+        shape=data.shape,
+        version=1,
+    )
+
+def topk_pruning(scores: torch.Tensor, data: torch.Tensor, k: int, dim: int = -1) -> torch.Tensor:
+    """
+    A mock operator for differential verification that simulates the effect of top-k pruning based on scores. This operator is not intended for actual use in production code, but serves as a placeholder for differential verification.
+
+    For one network, this operator simply gives back the :code:`data` tensor.
+    For the other network, it gives :code:`topk_mask(scores) * data`, simulating the effect of top-k pruning based on the scores.
+
+    Args:
+        scores: A tensor of scores used for pruning. Must have the same shape as :code:`data`.
+        data: A tensor of data to be pruned. Must have the same shape as :code:`scores`.
+        k: The number of top elements to keep based on the scores.
+        dim: The dimension along which to compute the top-k elements.
+
+    Returns:
+        A tensor of the same shape as :code:`scores` and :code:`data`.
+    """
+    assert scores.shape == data.shape, "scores and data must have the same shape"
+    dim = dim if dim >= 0 else scores.dim() + dim
+    return torch.onnx.ops.symbolic(
+        "boundlab::topk_pruning",
+        (scores, data),
+        attrs={"k": k, "dim": dim},
+        dtype=data.dtype,
+        shape=data.shape,
+        version=1,
+    )
 
 import torch.nn as nn
 
@@ -136,5 +182,6 @@ def diff_pair_handler(x, y) -> DiffExpr2:
     if isinstance(y, torch.Tensor):
         y = ConstVal(y)
     return DiffExpr2(x, y)
+
 
 __all__ = ["diff_pair", "DiffLinear"]
