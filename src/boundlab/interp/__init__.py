@@ -268,8 +268,6 @@ def _onnx_einsum(*inputs, equation):
 
 
 def _onnx_conv(X, W, B=None, *, kernel_shape=None, strides=None, pads=None, dilations=None, group=1, auto_pad="NOTSET", **_):
-    if kernel_shape is None:
-        kernel_shape = list(W.shape[2:])
     """ONNX Conv (2D), restricted to ``kernel_size == stride``.
 
     Reshapes ``X`` into non-overlapping patches
@@ -277,6 +275,8 @@ def _onnx_conv(X, W, B=None, *, kernel_shape=None, strides=None, pads=None, dila
     tensor ``W`` of shape ``[C_out, C_in, kH, kW]`` via :func:`_onnx_einsum`,
     which fuses with surrounding linear ops.
     """
+    if kernel_shape is None:
+        kernel_shape = list(W.shape[2:])
     assert len(kernel_shape) == 2, f"only 2D Conv is supported, got kernel_shape={kernel_shape}"
     kH, kW = int(kernel_shape[0]), int(kernel_shape[1])
     strides = [kH, kW] if strides is None else [int(s) for s in strides]
@@ -297,7 +297,7 @@ def _onnx_conv(X, W, B=None, *, kernel_shape=None, strides=None, pads=None, dila
     Hp, Wp = H // kH, Win // kW
 
     X_r = X.reshape(N, C_in, Hp, kH, Wp, kW)
-    Y = _onnx_einsum(X_r, W, equation="nchHwW,ochW->nohw")
+    Y = _onnx_einsum(X_r, W, equation="nchHwW,ocHW->nohw")
     if B is not None:
         Y = Y + B.reshape(1, C_out, 1, 1)
     return Y

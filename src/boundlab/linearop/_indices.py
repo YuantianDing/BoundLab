@@ -17,6 +17,7 @@ The key distinction is:
 import torch
 
 from boundlab.linearop._base import LinearOp, LinearOpFlags
+from boundlab.utils import merge_name
 
 
 def _meta_output_shape(fn, input_shape: torch.Size) -> torch.Size:
@@ -304,6 +305,43 @@ class SetIndicesOp(LinearOp):
 # ---------------------------------------------------------------------------
 
 
+def _normalize_basic_indices(indices, ndim: int):
+    """Expand ``indices`` (as passed to ``x[indices]``) into a length-``ndim``
+    list of ``slice`` / ``int`` entries.
+
+    Returns ``None`` when the indices include ``None`` (newaxis), tensor
+    advanced indices, or anything else not representable per-axis as a basic
+    slice/int — the fusion paths below bail out in that case.
+    """
+    if not isinstance(indices, tuple):
+        indices = (indices,)
+    normalized: list = []
+    idx_pos = 0
+    saw_ellipsis = False
+    for _ in range(ndim):
+        if idx_pos < len(indices):
+            idx = indices[idx_pos]
+            if idx is Ellipsis:
+                if saw_ellipsis:
+                    return None
+                saw_ellipsis = True
+                remaining = ndim - (len(indices) - 1 - idx_pos) - len(normalized)
+                for _ in range(remaining):
+                    normalized.append(slice(None))
+                idx_pos += 1
+                continue
+            if isinstance(idx, slice) or isinstance(idx, int):
+                normalized.append(idx)
+                idx_pos += 1
+            else:
+                return None
+        else:
+            normalized.append(slice(None))
+    if idx_pos != len(indices):
+        return None
+    return normalized
+
+
 class GetSliceOp(LinearOp):
     """Basic slicing via ``x[indices]`` where indices contains int/slice/None/Ellipsis.
 
@@ -446,6 +484,53 @@ class GetSliceOp(LinearOp):
     def __str__(self):
         return f"getslice({_format_indices(self.indices)})"
 
+    def __matmul__(self, other: "LinearOp") -> "LinearOp":
+        """Fuse ``GetSliceOp @ EinsumOp`` by slicing the einsum tensor along
+        output-side tensor dims.
+
+        Bails out (``NotImplemented``) when any sliced output axis is a
+        mul_dim (shared input/output tensor dim): slicing such a dim would
+        implicitly reshape the input as well, which requires
+        ``remove_conditions`` to express correctly.
+        """
+        from boundlab.linearop._einsum import EinsumOp
+        if isinstance(other, EinsumOp):
+            if self.input_shape != other.output_shape:
+                return NotImplemented
+            normalized = _normalize_basic_indices(self.indices, len(other.output_shape))
+            if normalized is None:
+                return NotImplemented
+            for out_axis, idx in enumerate(normalized):
+                tensor_dim = other.output_dims[out_axis]
+                if tensor_dim in other.mul_dims:
+                    if isinstance(idx, slice) and idx == slice(None):
+                        continue
+                    return NotImplemented
+
+            tensor_slices: list = [slice(None)] * other.tensor.dim()
+            dropped: list[int] = []
+            for out_axis, idx in enumerate(normalized):
+                tensor_dim = other.output_dims[out_axis]
+                if isinstance(idx, int):
+                    tensor_slices[tensor_dim] = idx
+                    dropped.append(tensor_dim)
+                else:
+                    tensor_slices[tensor_dim] = idx
+            new_tensor = other.tensor[tuple(tensor_slices)]
+
+            def adj(d: int) -> int:
+                return d - sum(1 for dd in dropped if dd < d)
+
+            new_output_dims = [
+                adj(other.output_dims[i])
+                for i, idx in enumerate(normalized)
+                if not isinstance(idx, int)
+            ]
+            new_input_dims = [adj(d) for d in other.input_dims]
+            return EinsumOp(new_tensor, new_input_dims, new_output_dims,
+                            name=merge_name(self, "@", other))
+        return NotImplemented
+
 
 class SetSliceOp(LinearOp):
     """Embed input into zeros at specified slice positions.
@@ -496,6 +581,55 @@ class SetSliceOp(LinearOp):
 
     def __str__(self):
         return f"setslice({_format_indices(self.indices)})"
+
+    def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
+        """Fuse ``EinsumOp @ SetSliceOp`` by slicing the einsum tensor along
+        input-side tensor dims.
+
+        ``SetSlice`` embeds its (small) input into zeros at indexed positions
+        of an (einsum-input-shaped) tensor; zero entries contribute nothing to
+        the einsum, so the composition equals an einsum whose tensor is sliced
+        to the indexed region.  Bails out when a sliced input axis is a
+        mul_dim (would also change the output shape).
+        """
+        from boundlab.linearop._einsum import EinsumOp
+        if isinstance(other, EinsumOp) and self.output_shape == other.input_shape:
+            normalized = _normalize_basic_indices(self.indices, len(other.input_shape))
+            fusable = normalized is not None
+            if fusable:
+                for in_axis, idx in enumerate(normalized):
+                    tensor_dim = other.input_dims[in_axis]
+                    if tensor_dim in other.mul_dims and not (
+                        isinstance(idx, slice) and idx == slice(None)
+                    ):
+                        fusable = False
+                        break
+            if not fusable:
+                return super().__rmatmul__(other)
+
+            tensor_slices: list = [slice(None)] * other.tensor.dim()
+            dropped: list[int] = []
+            for in_axis, idx in enumerate(normalized):
+                tensor_dim = other.input_dims[in_axis]
+                if isinstance(idx, int):
+                    tensor_slices[tensor_dim] = idx
+                    dropped.append(tensor_dim)
+                else:
+                    tensor_slices[tensor_dim] = idx
+            new_tensor = other.tensor[tuple(tensor_slices)]
+
+            def adj(d: int) -> int:
+                return d - sum(1 for dd in dropped if dd < d)
+
+            new_input_dims = [
+                adj(other.input_dims[i])
+                for i, idx in enumerate(normalized)
+                if not isinstance(idx, int)
+            ]
+            new_output_dims = [adj(d) for d in other.output_dims]
+            return EinsumOp(new_tensor, new_input_dims, new_output_dims,
+                            name=merge_name(other, "@", self))
+        return super().__rmatmul__(other)
 
 
 # ---------------------------------------------------------------------------
