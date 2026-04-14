@@ -5,7 +5,6 @@ perturbations used in neural network verification.
 """
 
 import math
-import warnings
 from typing import Literal
 
 import torch
@@ -13,6 +12,7 @@ import torch
 from boundlab.expr._core import Expr, ExprFlags
 from boundlab.linearop._base import LinearOp, LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
+import warnings
 
 
 class LpEpsilon(Expr):

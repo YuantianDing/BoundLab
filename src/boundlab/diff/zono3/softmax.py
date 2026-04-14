@@ -73,7 +73,7 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     exp_handler = interpret["exp"]
     exp_out = exp_handler(x_shifted)
 
-    # Sum along softmax dim using mean * n (works for any ndim)
+    # Sum along softmax dim using mean * n
     sum_exp = exp_out.mean(dim=dim, keepdim=True) * float(n)
 
     reciprocal_handler = interpret["reciprocal"]

@@ -420,7 +420,7 @@ class GetSliceOp(LinearOp):
         return x[self.indices]
 
     def vbackward(self, grad: torch.Tensor) -> torch.Tensor:
-        """Backward with leading batch dimensions: grad is (*batch, *output_shape)."""
+        """Backward with leading batch dimensions."""
         import torch.nn.functional as F
 
         info = self._backward_info
@@ -434,7 +434,6 @@ class GetSliceOp(LinearOp):
             return result
 
         result = grad
-        # Unsqueeze at int-indexed dims, offset by batch dims
         for dim, _ in reversed(info['int_indices']):
             result = result.unsqueeze(batch_ndim + dim)
 

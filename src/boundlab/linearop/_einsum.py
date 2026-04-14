@@ -1,4 +1,3 @@
-import warnings
 
 
 
@@ -10,6 +9,7 @@ import torch
 from boundlab.linearop._base import LinearOp, ComposedOp, ScalarOp, SumOp
 from boundlab.linearop._shape import ExpandOp, PermuteOp
 from boundlab.utils import merge_name
+import warnings
 
 
 class EinsumOp(LinearOp):

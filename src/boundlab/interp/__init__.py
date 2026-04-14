@@ -147,6 +147,20 @@ def _onnx_reduce_mean(data, axes=None, keepdims=1, noop_with_empty_axes=0):
 
 def _onnx_gather(data, indices, axis=0):
     axis = int(axis)
+    indices = _as_const(indices)
+
+    # Handle DiffExpr3
+    try:
+        from boundlab.diff.expr import DiffExpr3
+        if isinstance(data, DiffExpr3):
+            return DiffExpr3(
+                _onnx_gather(data.x, indices, axis),
+                _onnx_gather(data.y, indices, axis),
+                _onnx_gather(data.diff, indices, axis),
+            )
+    except ImportError:
+        pass
+
     if isinstance(data, Expr):
         rank = len(data.shape)
         axis = axis + rank if axis < 0 else axis
@@ -176,47 +190,247 @@ def _onnx_gather(data, indices, axis=0):
     return gathered.reshape(out_shape)
 
 
-def _onnx_concat(*inputs, axis):
-    """ONNX Concat: concatenate inputs along *axis*.
-
-    Dispatches to :class:`boundlab.expr.Cat` when any input is an
-    :class:`Expr` (wrapping plain tensors as :class:`ConstVal`),
-    otherwise uses :func:`torch.cat`.
-    """
-    axis = int(axis)
-    if any(isinstance(x, Expr) for x in inputs):
-        from boundlab.expr import Cat, ConstVal
-        parts = [x if isinstance(x, Expr) else ConstVal(x) for x in inputs]
-        return Cat(*parts, dim=axis)
-    return torch.cat(list(inputs), dim=axis)
-
-
 def _onnx_slice(data, starts, ends, axes=None, steps=None, **_):
     """ONNX Slice: extract a slice from *data*."""
     starts_list = _unwrap_shape(_as_const(starts))
     ends_list = _unwrap_shape(_as_const(ends))
     ndim = len(data.shape)
-
     if axes is not None:
         axes_list = [a % ndim for a in _unwrap_shape(_as_const(axes))]
     else:
         axes_list = list(range(len(starts_list)))
-
     if steps is not None:
         steps_list = _unwrap_shape(_as_const(steps))
     else:
         steps_list = [1] * len(starts_list)
-
-    # Build index tuple
     slices = [slice(None)] * ndim
     for a, s, e, st in zip(axes_list, starts_list, ends_list, steps_list):
-        # ONNX uses INT_MAX-like sentinel for "to the end"
         if e > data.shape[a]:
             e = data.shape[a]
         step = st if st != 1 else None
         slices[a] = slice(s, e, step)
-
     return data[tuple(slices)]
+
+
+def _onnx_conv(X, W, B=None, auto_pad='NOTSET', dilations=None, group=1,
+               kernel_shape=None, pads=None, strides=None, **_):
+    """ONNX Conv: convolution. Supports Expr and DiffExpr inputs."""
+    import torch.nn.functional as F
+
+    # Handle DiffExpr3 input with DiffExpr2 weights
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        if isinstance(X, DiffExpr3):
+            W_x = _as_const(W.x) if isinstance(W, DiffExpr2) else (_as_const(W) if not isinstance(W, torch.Tensor) else W)
+            W_y = _as_const(W.y) if isinstance(W, DiffExpr2) else W_x
+            if B is not None:
+                B_x = _as_const(B.x) if isinstance(B, DiffExpr2) else (_as_const(B) if not isinstance(B, torch.Tensor) else B)
+                B_y = _as_const(B.y) if isinstance(B, DiffExpr2) else B_x
+            else:
+                B_x = B_y = None
+            kwargs = dict(auto_pad=auto_pad, dilations=dilations, group=group,
+                          kernel_shape=kernel_shape, pads=pads, strides=strides)
+            x_out = _onnx_conv(X.x, W_x, B_x, **kwargs)
+            y_out = _onnx_conv(X.y, W_y, B_y, **kwargs)
+            # diff = x - y, conv is linear: conv(diff, W_x) + conv(y, W_x - W_y)
+            diff_out = _onnx_conv(X.diff, W_x, None, **kwargs)
+            if not torch.equal(W_x, W_y):
+                dW = W_x - W_y
+                dB = (B_x - B_y) if (B_x is not None and B_y is not None) else None
+                diff_out = diff_out + _onnx_conv(X.y, dW, dB, **kwargs)
+            return DiffExpr3(x_out, y_out, diff_out)
+    except ImportError:
+        pass
+
+    # Conv weight/bias may be DiffExpr2 from diff_net — extract concrete tensors
+    W_concrete = _as_const(W) if not isinstance(W, torch.Tensor) else W
+    B_concrete = _as_const(B) if B is not None and not isinstance(B, torch.Tensor) else B
+
+    dilations = dilations or [1] * (W_concrete.dim() - 2)
+    strides = strides or [1] * (W_concrete.dim() - 2)
+    if pads is None:
+        pads = [0] * (2 * (W_concrete.dim() - 2))
+    ndim = W_concrete.dim() - 2
+    padding = tuple(pads[i] for i in range(ndim))  # just take begin pads (symmetric)
+
+    if isinstance(X, Expr):
+        # Conv is linear: implement via ConvOp LinearOp
+        # Input may be (C_in, H, W) or (1, C_in, H, W) with batch dim
+        x_shape = X.shape
+        has_batch = (len(x_shape) == ndim + 2)
+        if has_batch:
+            assert x_shape[0] == 1, f"Conv Expr only supports batch=1, got {x_shape[0]}"
+            spatial_shape = x_shape[1:]  # (C_in, H, W)
+        else:
+            spatial_shape = x_shape  # (C_in, H, W)
+
+        assert len(spatial_shape) == ndim + 1, f"Only 2D conv supported for Expr, got {ndim}D"
+        C_in = spatial_shape[0]
+        H_in, W_in = spatial_shape[1], spatial_shape[2]
+        C_out = W.shape[0]
+        kH, kW = W.shape[2], W.shape[3]
+        sH, sW = strides[0], strides[1]
+        pH, pW = padding[0], padding[1]
+        dH, dW = dilations[0], dilations[1]
+
+        H_out = (H_in + 2 * pH - dH * (kH - 1) - 1) // sH + 1
+        W_out = (W_in + 2 * pW - dW * (kW - 1) - 1) // sW + 1
+
+        # Build the im2col → matmul as a concrete operation on a meta tensor,
+        # then construct the EinsumOp from the kernel weights
+        # unfold: (1, C_in, H, W) → (1, C_in*kH*kW, L) where L = H_out*W_out
+        # matmul: W_reshaped (C_out, C_in*kH*kW) @ unfolded (C_in*kH*kW, L) → (C_out, L)
+        # reshape → (C_out, H_out, W_out)
+
+        from boundlab.linearop._base import LinearOp, LinearOpFlags
+
+        class ConvOp(LinearOp):
+            def __init__(self, weight, bias, stride, pad, dilation, groups, in_shape, out_shape):
+                self.weight = weight
+                self.conv_bias = bias
+                self.stride = stride
+                self.pad = pad
+                self.dilation = dilation
+                self.groups = groups
+                super().__init__(in_shape, out_shape, flags=LinearOpFlags.NONE)
+
+            def forward(self, x):
+                y = F.conv2d(x.unsqueeze(0), self.weight, None,
+                             stride=self.stride, padding=self.pad,
+                             dilation=self.dilation, groups=self.groups).squeeze(0)
+                return y
+
+            def backward(self, grad):
+                return F.conv_transpose2d(
+                    grad.unsqueeze(0), self.weight, None,
+                    stride=self.stride, padding=self.pad,
+                    dilation=self.dilation, groups=self.groups
+                ).squeeze(0)
+
+            def vforward(self, x):
+                # x: (C_in, H, W, *batch)
+                extra = x.shape[len(self.input_shape):]
+                flat = x.reshape(*self.input_shape, -1)
+                # Process each batch element
+                results = []
+                for i in range(flat.shape[-1]):
+                    results.append(self.forward(flat[..., i]))
+                out = torch.stack(results, dim=-1)
+                return out.reshape(*self.output_shape, *extra)
+
+            def vbackward(self, grad):
+                # grad: (*batch, C_out, H_out, W_out)
+                extra = grad.shape[:-len(self.output_shape)]
+                flat = grad.reshape(-1, *self.output_shape)
+                results = []
+                for i in range(flat.shape[0]):
+                    results.append(self.backward(flat[i]))
+                out = torch.stack(results, dim=0)
+                return out.reshape(*extra, *self.input_shape)
+
+            def __str__(self):
+                return f"conv2d({list(self.weight.shape)})"
+
+        out_shape = torch.Size([C_out, H_out, W_out])
+        if has_batch:
+            # Strip batch dim, apply ConvOp on (C_in, H, W), add batch back
+            from boundlab.linearop import SqueezeOp, UnsqueezeOp
+            stripped = X._apply_op(SqueezeOp(x_shape, 0))
+            op = ConvOp(W, B, strides, padding, dilations, int(group), 
+                        torch.Size(spatial_shape), out_shape)
+            result = stripped._apply_op(op)
+            if B is not None:
+                result = result + B.reshape(C_out, 1, 1).expand(out_shape)
+            result = result._apply_op(UnsqueezeOp(out_shape, 0))
+        else:
+            op = ConvOp(W, B, strides, padding, dilations, int(group), x_shape, out_shape)
+            result = X._apply_op(op)
+            if B is not None:
+                result = result + B.reshape(C_out, 1, 1).expand(out_shape)
+        return result
+    else:
+        # Concrete tensor path
+        y = F.conv2d(X.unsqueeze(0), W, B, stride=strides, padding=padding,
+                     dilation=dilations, groups=int(group)).squeeze(0)
+        return y
+
+
+def _onnx_concat(*args, axis=0):
+    """ONNX Concat: concatenate inputs along axis."""
+    inputs = list(args)
+    from boundlab.expr._core import Expr
+    from boundlab.expr._affine import ConstVal
+
+    # Check for DiffExpr types
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        if any(isinstance(x, DiffExpr3) for x in inputs):
+            from boundlab.expr import Cat
+            x_parts, y_parts, d_parts = [], [], []
+            for inp in inputs:
+                if isinstance(inp, DiffExpr3):
+                    x_parts.append(inp.x)
+                    y_parts.append(inp.y)
+                    d_parts.append(inp.diff)
+                elif isinstance(inp, DiffExpr2):
+                    x_parts.append(inp.x if isinstance(inp.x, Expr) else ConstVal(inp.x))
+                    y_parts.append(inp.y if isinstance(inp.y, Expr) else ConstVal(inp.y))
+                    shape = inp.x.shape if hasattr(inp.x, 'shape') else inp.y.shape
+                    d_parts.append(ConstVal(torch.zeros(shape)))
+                else:
+                    v = inp if isinstance(inp, Expr) else ConstVal(inp) if isinstance(inp, torch.Tensor) else inp
+                    x_parts.append(v)
+                    y_parts.append(v)
+                    d_parts.append(ConstVal(torch.zeros(v.shape)))
+            dim = int(axis)
+            return DiffExpr3(Cat(*x_parts, dim=dim), Cat(*y_parts, dim=dim), Cat(*d_parts, dim=dim))
+    except ImportError:
+        pass
+
+    if any(isinstance(x, Expr) for x in inputs):
+        from boundlab.expr import Cat
+        wrapped = [x if isinstance(x, Expr) else ConstVal(x) for x in inputs]
+        return Cat(*wrapped, dim=int(axis))
+    return torch.cat(inputs, dim=int(axis))
+
+
+def _onnx_broadcast(X, Y):
+    """Broadcast X and Y to compatible shapes (ONNX numpy-style rules)."""
+    def _get_shape(v):
+        if hasattr(v, 'shape'):
+            return v.shape
+        return ()
+    x_shape = _get_shape(X)
+    y_shape = _get_shape(Y)
+    if x_shape == y_shape:
+        return X, Y
+    target = torch.broadcast_shapes(x_shape, y_shape)
+    if hasattr(X, 'expand') and x_shape != target:
+        X = X.expand(*target)
+    elif isinstance(X, torch.Tensor) and X.shape != target:
+        X = X.expand(target)
+    if hasattr(Y, 'expand') and y_shape != target:
+        Y = Y.expand(*target)
+    elif isinstance(Y, torch.Tensor) and Y.shape != target:
+        Y = Y.expand(target)
+    return X, Y
+
+
+def _as_const(x):
+    """Extract a concrete tensor from a DiffExpr2/3 or ConstVal for shape/index constants."""
+    from boundlab.expr._affine import ConstVal as CV
+    if isinstance(x, CV):
+        return x.value
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        if isinstance(x, DiffExpr2):
+            c = x.get_const()
+            return c[0] if c is not None else _as_const(x.x)
+        if isinstance(x, DiffExpr3):
+            return _as_const(x.x)
+    except ImportError:
+        pass
+    return x
 
 
 # =====================================================================
@@ -449,53 +663,10 @@ class Interpreter(Generic[E]):
 # ONNX base interpreter
 # =====================================================================
 
-def _onnx_broadcast(X, Y):
-    """Broadcast X and Y to compatible shapes (ONNX numpy-style rules)."""
-    from boundlab.expr._core import Expr
-    def _get_shape(v):
-        if isinstance(v, (Expr, torch.Tensor)):
-            return v.shape
-        if hasattr(v, 'shape'):  # DiffExpr2, DiffExpr3
-            return v.shape
-        return ()
-    x_shape = _get_shape(X)
-    y_shape = _get_shape(Y)
-    if x_shape == y_shape:
-        return X, Y
-    target = torch.broadcast_shapes(x_shape, y_shape)
-    if hasattr(X, 'expand') and x_shape != target:
-        X = X.expand(*target)
-    elif isinstance(X, torch.Tensor) and X.shape != target:
-        X = X.expand(target)
-    if hasattr(Y, 'expand') and y_shape != target:
-        Y = Y.expand(*target)
-    elif isinstance(Y, torch.Tensor) and Y.shape != target:
-        Y = Y.expand(target)
-    return X, Y
-
-
-def _as_const(x):
-    """Extract a concrete tensor from a DiffExpr2/3 or pass through.
-
-    Shape/axes/indices initializers get paired by diff_net but are
-    identical in both branches — just take the first.
-    """
-    try:
-        from boundlab.diff.expr import DiffExpr2, DiffExpr3
-        if isinstance(x, DiffExpr2):
-            c = x.get_const()
-            return c[0] if c is not None else x.x
-        if isinstance(x, DiffExpr3):
-            return x.x
-    except ImportError:
-        pass
-    return x
-
-
 ONNX_BASE_INTERPRETER = Interpreter({
     "Input": lambda x, **_: x,
     "Initializer": lambda x, **_: x,
-    # ---- arithmetic ---------------------------------------------------
+    # ---- arithmetic (with broadcast) --------------------------------------
     "Add":      lambda X, Y: (lambda a, b: a + b)(*_onnx_broadcast(X, Y)),
     "Sub":      lambda X, Y: (lambda a, b: a - b)(*_onnx_broadcast(X, Y)),
     "Neg":      lambda X: -X,
@@ -504,20 +675,21 @@ ONNX_BASE_INTERPRETER = Interpreter({
     # ---- linear layers ------------------------------------------------
     "Gemm":     _onnx_gemm,
     "MatMul":   lambda A, B: A @ B,
+    "Conv":     _onnx_conv,
     # ---- shape ops ----------------------------------------------------
     "Reshape":  lambda data, shape, **_: data.reshape(_unwrap_shape(_as_const(shape))),
     "Flatten":  _onnx_flatten,
     "Transpose": lambda data, perm=None: (data.permute(*perm) if perm is not None else data.T),
     "Unsqueeze": lambda data, axes: _onnx_unsqueeze(data, _as_const(axes)),
     "Squeeze":  lambda data, axes=None: _onnx_squeeze(data, _as_const(axes) if axes is not None else None),
+    "Gather":   _onnx_gather,
+    "Slice":    _onnx_slice,
+    "Concat":   _onnx_concat,
     "Identity": lambda X: X,
+    "Cast":     lambda input, to=None, **_: input,
     # ---- reductions ---------------------------------------------------
-    "ReduceMean": _onnx_reduce_mean,
     "ReduceSum": _onnx_reduce_sum,
-    # ---- indexing -----------------------------------------------------
-    "Gather": _onnx_gather,
-    "Slice": _onnx_slice,
-    "Concat": _onnx_concat,
+    "ReduceMean": _onnx_reduce_mean,
     # ---- constants ---------------------------------------------
     "Constant": _onnx_constant,
 })

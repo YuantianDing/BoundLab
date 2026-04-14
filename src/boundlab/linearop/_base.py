@@ -1,10 +1,10 @@
-import warnings
 """Base LinearOp class and fundamental composition operators."""
 
 import enum
 from functools import reduce
 
 import torch
+import warnings
 
 class LinearOpFlags(enum.Flag):
     """Flags for LinearOps that can be used for optimization and simplification."""
