@@ -1,10 +1,10 @@
-import warnings
 """Base LinearOp class and fundamental composition operators."""
 
 import enum
 from functools import reduce
 
 import torch
+import warnings
 
 class LinearOpFlags(enum.Flag):
     """Flags for LinearOps that can be used for optimization and simplification."""
@@ -271,16 +271,24 @@ class ComposedOp(LinearOp):
         return "(" + " ∘ ".join(str(op) for op in self.ops) + ")"
     
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
-        if isinstance(other, LinearOp) and not isinstance(other, ComposedOp):
-            for i, op in reversed(enumerate(self.ops)):
-                other = op @ other
+        if isinstance(other, ComposedOp):
+            assert self.input_shape == other.output_shape, \
+                f"Shape mismatch in ComposedOp: {self.input_shape} vs {other.output_shape}"
+            return ComposedOp(*(self.ops + other.ops))
+        if isinstance(other, LinearOp):
+            for i in range(len(self.ops) - 1, -1, -1):
+                other = self.ops[i] @ other
                 if isinstance(other, ComposedOp):
                     return ComposedOp(*(self.ops[:i] + other.ops))
             return other
         return NotImplemented
 
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
-        if isinstance(other, LinearOp) and not isinstance(other, ComposedOp):
+        if isinstance(other, ComposedOp):
+            assert other.input_shape == self.output_shape, \
+                f"Shape mismatch in ComposedOp: {other.input_shape} vs {self.output_shape}"
+            return ComposedOp(*(other.ops + self.ops))
+        if isinstance(other, LinearOp):
             for i, op in enumerate(self.ops):
                 other = other @ op
                 if isinstance(other, ComposedOp):

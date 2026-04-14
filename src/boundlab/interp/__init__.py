@@ -169,6 +169,20 @@ def _onnx_reduce_mean(data, axes=None, keepdims=1, noop_with_empty_axes=0):
 
 def _onnx_gather(data, indices, axis=0):
     axis = int(axis)
+    indices = _as_const(indices)
+
+    # Handle DiffExpr3
+    try:
+        from boundlab.diff.expr import DiffExpr3
+        if isinstance(data, DiffExpr3):
+            return DiffExpr3(
+                _onnx_gather(data.x, indices, axis),
+                _onnx_gather(data.y, indices, axis),
+                _onnx_gather(data.diff, indices, axis),
+            )
+    except ImportError:
+        pass
+
     if isinstance(data, Expr):
         rank = len(data.shape)
         axis = axis + rank if axis < 0 else axis
@@ -225,6 +239,28 @@ def _onnx_einsum(*inputs, equation):
     lhs, rhs = equation.split("->")
     in_labels = lhs.split(",")
     assert len(in_labels) == len(inputs), f"Einsum equation mismatch: {equation}"
+
+    # DiffExpr support: evaluate component-wise
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        diff_positions = [i for i, v in enumerate(inputs) if isinstance(v, (DiffExpr3, DiffExpr2))]
+    except Exception:
+        DiffExpr2 = DiffExpr3 = ()
+        diff_positions = []
+
+    if diff_positions:
+        assert len(diff_positions) == 1, "Einsum with multiple DiffExpr inputs is not supported"
+        di = diff_positions[0]
+        diff = inputs[di]
+        if isinstance(diff, DiffExpr2):
+            diff = DiffExpr3(diff.x, diff.y, diff.x - diff.y)
+        in_x = list(inputs); in_x[di] = diff.x
+        in_y = list(inputs); in_y[di] = diff.y
+        in_d = list(inputs); in_d[di] = diff.diff
+        out_x = _onnx_einsum(*in_x, equation=equation)
+        out_y = _onnx_einsum(*in_y, equation=equation)
+        out_d = _onnx_einsum(*in_d, equation=equation)
+        return DiffExpr3(out_x, out_y, out_d)
 
     expr_positions = [i for i, v in enumerate(inputs) if isinstance(v, Expr)]
     if not expr_positions:
@@ -308,27 +344,99 @@ def _onnx_slice(data, starts, ends, axes=None, steps=None, **_):
     starts_list = _unwrap_shape(_as_const(starts))
     ends_list = _unwrap_shape(_as_const(ends))
     ndim = len(data.shape)
-
     if axes is not None:
         axes_list = [a % ndim for a in _unwrap_shape(_as_const(axes))]
     else:
         axes_list = list(range(len(starts_list)))
-
     if steps is not None:
         steps_list = _unwrap_shape(_as_const(steps))
     else:
         steps_list = [1] * len(starts_list)
-
-    # Build index tuple
     slices = [slice(None)] * ndim
     for a, s, e, st in zip(axes_list, starts_list, ends_list, steps_list):
-        # ONNX uses INT_MAX-like sentinel for "to the end"
         if e > data.shape[a]:
             e = data.shape[a]
         step = st if st != 1 else None
         slices[a] = slice(s, e, step)
-
     return data[tuple(slices)]
+
+
+def _onnx_concat(*args, axis=0):
+    """ONNX Concat: concatenate inputs along axis."""
+    inputs = list(args)
+    from boundlab.expr._core import Expr
+    from boundlab.expr._affine import ConstVal
+
+    # Check for DiffExpr types
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        if any(isinstance(x, DiffExpr3) for x in inputs):
+            from boundlab.expr import Cat
+            x_parts, y_parts, d_parts = [], [], []
+            for inp in inputs:
+                if isinstance(inp, DiffExpr3):
+                    x_parts.append(inp.x)
+                    y_parts.append(inp.y)
+                    d_parts.append(inp.diff)
+                elif isinstance(inp, DiffExpr2):
+                    x_parts.append(inp.x if isinstance(inp.x, Expr) else ConstVal(inp.x))
+                    y_parts.append(inp.y if isinstance(inp.y, Expr) else ConstVal(inp.y))
+                    shape = inp.x.shape if hasattr(inp.x, 'shape') else inp.y.shape
+                    d_parts.append(ConstVal(torch.zeros(shape)))
+                else:
+                    v = inp if isinstance(inp, Expr) else ConstVal(inp) if isinstance(inp, torch.Tensor) else inp
+                    x_parts.append(v)
+                    y_parts.append(v)
+                    d_parts.append(ConstVal(torch.zeros(v.shape)))
+            dim = int(axis)
+            return DiffExpr3(Cat(*x_parts, dim=dim), Cat(*y_parts, dim=dim), Cat(*d_parts, dim=dim))
+    except ImportError:
+        pass
+
+    if any(isinstance(x, Expr) for x in inputs):
+        from boundlab.expr import Cat
+        wrapped = [x if isinstance(x, Expr) else ConstVal(x) for x in inputs]
+        return Cat(*wrapped, dim=int(axis))
+    return torch.cat(inputs, dim=int(axis))
+
+
+def _onnx_broadcast(X, Y):
+    """Broadcast X and Y to compatible shapes (ONNX numpy-style rules)."""
+    def _get_shape(v):
+        if hasattr(v, 'shape'):
+            return v.shape
+        return ()
+    x_shape = _get_shape(X)
+    y_shape = _get_shape(Y)
+    if x_shape == y_shape:
+        return X, Y
+    target = torch.broadcast_shapes(x_shape, y_shape)
+    if hasattr(X, 'expand') and x_shape != target:
+        X = X.expand(*target)
+    elif isinstance(X, torch.Tensor) and X.shape != target:
+        X = X.expand(target)
+    if hasattr(Y, 'expand') and y_shape != target:
+        Y = Y.expand(*target)
+    elif isinstance(Y, torch.Tensor) and Y.shape != target:
+        Y = Y.expand(target)
+    return X, Y
+
+
+def _as_const(x):
+    """Extract a concrete tensor from a DiffExpr2/3 or ConstVal for shape/index constants."""
+    from boundlab.expr._affine import ConstVal as CV
+    if isinstance(x, CV):
+        return x.value
+    try:
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        if isinstance(x, DiffExpr2):
+            c = x.get_const()
+            return c[0] if c is not None else _as_const(x.x)
+        if isinstance(x, DiffExpr3):
+            return _as_const(x.x)
+    except ImportError:
+        pass
+    return x
 
 
 # =====================================================================
@@ -347,6 +455,7 @@ class FnList(Generic[E]):
 
     def __call__(self, *args: E, **kwargs) -> E:
         if len(self.fns) == 1:
+            self.fns[0]
             return self.fns[0](*args, **kwargs)
         errors = []
         for fn in self.fns[::-1]:
@@ -568,53 +677,10 @@ class Interpreter(Generic[E]):
 # ONNX base interpreter
 # =====================================================================
 
-def _onnx_broadcast(X, Y):
-    """Broadcast X and Y to compatible shapes (ONNX numpy-style rules)."""
-    from boundlab.expr._core import Expr
-    def _get_shape(v):
-        if isinstance(v, (Expr, torch.Tensor)):
-            return v.shape
-        if hasattr(v, 'shape'):  # DiffExpr2, DiffExpr3
-            return v.shape
-        return ()
-    x_shape = _get_shape(X)
-    y_shape = _get_shape(Y)
-    if x_shape == y_shape:
-        return X, Y
-    target = torch.broadcast_shapes(x_shape, y_shape)
-    if hasattr(X, 'expand') and x_shape != target:
-        X = X.expand(*target)
-    elif isinstance(X, torch.Tensor) and X.shape != target:
-        X = X.expand(target)
-    if hasattr(Y, 'expand') and y_shape != target:
-        Y = Y.expand(*target)
-    elif isinstance(Y, torch.Tensor) and Y.shape != target:
-        Y = Y.expand(target)
-    return X, Y
-
-
-def _as_const(x):
-    """Extract a concrete tensor from a DiffExpr2/3 or pass through.
-
-    Shape/axes/indices initializers get paired by diff_net but are
-    identical in both branches — just take the first.
-    """
-    try:
-        from boundlab.diff.expr import DiffExpr2, DiffExpr3
-        if isinstance(x, DiffExpr2):
-            c = x.get_const()
-            return c[0] if c is not None else x.x
-        if isinstance(x, DiffExpr3):
-            return x.x
-    except ImportError:
-        pass
-    return x
-
-
 ONNX_BASE_INTERPRETER = Interpreter({
     "Input": lambda x, **_: x,
     "Initializer": lambda x, **_: x,
-    # ---- arithmetic ---------------------------------------------------
+    # ---- arithmetic (with broadcast) --------------------------------------
     "Add":      lambda X, Y: (lambda a, b: a + b)(*_onnx_broadcast(X, Y)),
     "Sub":      lambda X, Y: (lambda a, b: a - b)(*_onnx_broadcast(X, Y)),
     "Neg":      lambda X: -X,
@@ -631,15 +697,14 @@ ONNX_BASE_INTERPRETER = Interpreter({
     "Transpose": lambda data, perm=None: (data.permute(*perm) if perm is not None else data.T),
     "Unsqueeze": lambda data, axes: _onnx_unsqueeze(data, _as_const(axes)),
     "Squeeze":  lambda data, axes=None: _onnx_squeeze(data, _as_const(axes) if axes is not None else None),
+    "Gather":   _onnx_gather,
+    "Slice":    _onnx_slice,
+    "Concat":   _onnx_concat,
     "Identity": lambda X: X,
     "Cast":     _onnx_cast,
     # ---- reductions ---------------------------------------------------
-    "ReduceMean": _onnx_reduce_mean,
     "ReduceSum": _onnx_reduce_sum,
-    # ---- indexing -----------------------------------------------------
-    "Gather": _onnx_gather,
-    "Slice": _onnx_slice,
-    "Concat": _onnx_concat,
+    "ReduceMean": _onnx_reduce_mean,
     # ---- constants ---------------------------------------------
     "Constant": _onnx_constant,
 })

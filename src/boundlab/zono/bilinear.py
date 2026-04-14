@@ -14,8 +14,7 @@ from boundlab.expr._var import LpEpsilon
 def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     r"""Linearize ``A @ B`` when both operands are symbolic expressions.
 
-    Supports batched matmul: A has shape ``(*batch, m, k)`` and B has shape
-    ``(*batch, k, n)``, producing result shape ``(*batch, m, n)``.
+    A: (m, k), B: (k, n) → result: (m, n)
 
     The method uses a first-order expansion around expression centers:
 
@@ -32,8 +31,8 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     and represented using fresh noise symbols.
 
     Args:
-        A: Left expression with shape ``(*batch, m, k)``.
-        B: Right expression with shape ``(*batch, k, n)``.
+        A: Left expression with shape ``(m, k)``.
+        B: Right expression with shape ``(k, n)``.
 
     Returns:
         An expression over-approximating ``A @ B``.
@@ -59,10 +58,19 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
 
     result = Ac @ Bs + As @ Bc + Ac @ Bc
 
-    # Error bound
-    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
-    Ahw = As.ub()
-    error_bound = (Ahw @ Bs).ub()
+    # Error bound: |E| ≤ hw(A) * hw(B) where hw = half-width
+    if As.is_symmetric_to_0():
+        Ahw = As.ub()
+    else:
+        A_ub, A_lb = As.ublb()
+        Ahw = (A_ub - A_lb) / 2.0
+
+    if Bs.is_symmetric_to_0():
+        error_bound = (Ahw @ Bs).ub()
+    else:
+        B_ub, B_lb = Bs.ublb()
+        Bhw = (B_ub - B_lb) / 2.0
+        error_bound = Ahw @ Bhw
 
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
@@ -113,10 +121,19 @@ def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
 
     result = Ac * Bs + As * Bc + Ac * Bc
 
-    # Error bound
-    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
-    Ahw = As.ub()
-    Bhw = Bs.ub()
+    # Error bound: |E| ≤ hw(A) * hw(B)
+    if As.is_symmetric_to_0():
+        Ahw = As.ub()
+    else:
+        A_ub, A_lb = As.ublb()
+        Ahw = (A_ub - A_lb) / 2.0
+
+    if Bs.is_symmetric_to_0():
+        Bhw = Bs.ub()
+    else:
+        B_ub, B_lb = Bs.ublb()
+        Bhw = (B_ub - B_lb) / 2.0
+
     error_bound = Ahw * Bhw
 
     new_eps = LpEpsilon(error_bound.shape)

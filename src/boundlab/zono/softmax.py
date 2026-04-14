@@ -28,9 +28,10 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     ``exp -> reduce-sum -> reciprocal -> element-wise product``.
     For stability, it first shifts by the center maximum along the softmax
     dimension.
+    Currently, only 2D inputs with ``dim == 1`` are supported.
 
     Args:
-        x: Input expression with shape ``(*batch, ..., n, ...)``.
+        x: Input expression with shape (m, n).
         dim: Dimension along which to apply softmax (default: -1).
         dtype: Ignored (for API compatibility with torch.softmax).
 
@@ -56,7 +57,7 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     # Numerical stability: shift by center's max along softmax dim
     x_center = x.center()
     x_max = x_center.max(dim=dim, keepdim=True).values
-    x_shifted = x - x_max.expand(*x.shape)  # affine, same shape as x
+    x_shifted = x - x_max.expand(*x.shape)
 
     # Import the registered handlers from the zonotope interpreter
     from . import interpret
@@ -69,10 +70,10 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     # Sum along softmax dim using mean * n (ReduceMeanOp is affine)
     sum_exp = exp_x.sum(dim=dim, keepdim=True)
 
-    # Reciprocal: 1 / sum_exp
+    # Reciprocal: 1 / sum_exp → (m, 1)
     inv_sum = reciprocal_handler(sum_exp)
 
-    # Broadcast inv_sum to match exp_x shape
+    # Broadcast inv_sum to match exp_x shape: (m, 1) → (m, n)
     inv_sum_expanded = inv_sum.expand(*exp_x.shape)
 
     # Element-wise product: exp_x * inv_sum (bilinear)

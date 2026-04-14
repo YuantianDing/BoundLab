@@ -219,43 +219,29 @@ class Expr:
         if isinstance(other, torch.Tensor) and len(other.shape) >= 2:
             assert self.shape[-1] == other.shape[-2], \
                 f"Inner dims must match: {self.shape} @ {other.shape}"
-
             if len(self.shape) == 1:
-                # Vector-matrix: (K,) @ (*batch_t, K, S2) → (*batch_t, S2)
                 K = self.shape[0]
                 batch_t = other.shape[:-2]
                 S2 = other.shape[-1]
                 nb = len(batch_t)
-                # tensor = other, shape (*batch_t, K, S2)
-                # input_dims: K is at nb, output_dims: (*batch, S2) = [0..nb-1, nb+1]
-                input_dims = [nb]  # K
-                output_dims = list(range(nb)) + [nb + 1]  # (*batch_t, S2)
+                input_dims = [nb]
+                output_dims = list(range(nb)) + [nb + 1]
                 return AffineSum((EinsumOp(other, input_dims, output_dims), self))
-
-            # self: (*batch_s, S, D), other: (*batch_t, D, S2)
             batch_s = self.shape[:-2]
             batch_t = other.shape[:-2]
             S, D, S2 = self.shape[-2], self.shape[-1], other.shape[-1]
             batch = torch.broadcast_shapes(batch_s, batch_t) if (batch_s and batch_t) else (batch_s or batch_t)
             nb = len(batch)
-
-            # Build tensor of shape (*batch, S, D, S2)
             other_b = other.expand(*batch, D, S2)
             tensor = other_b.unsqueeze(nb).expand(*batch, S, D, S2)
-
-            # input_dims covers self's shape within the tensor
-            # self may have fewer batch dims than the tensor (broadcasting)
             ns = len(self.shape)
-            input_dims = list(range(nb + 2))[-ns:]  # last ns of (*batch, S, D)
-            output_dims = list(range(nb + 1)) + [nb + 2]  # (*batch, S, S2)
+            input_dims = list(range(nb + 2))[-ns:]
+            output_dims = list(range(nb + 1)) + [nb + 2]
             return AffineSum((EinsumOp(tensor, input_dims, output_dims), self))
         return NotImplemented
 
     def __rmatmul__(self, other):
-        """Matrix multiply: other @ self. Supports batched matmul.
-
-        Handles both matrix-vector and matrix-matrix cases.
-        """
+        """Matrix multiply: other @ self. Supports batched matmul."""
         from boundlab.expr._affine import AffineSum, ConstVal
         if isinstance(other, ConstVal):
             other = other.value
@@ -264,33 +250,21 @@ class Expr:
         if isinstance(other, torch.Tensor) and len(other.shape) >= 2:
             M, K = other.shape[-2], other.shape[-1]
             batch_t = other.shape[:-2]
-
             if len(self.shape) == 1:
-                # Matrix-vector: (*batch_t, M, K) @ (K,) → (*batch_t, M)
                 assert self.shape[0] == K, f"Inner dims must match: {other.shape} @ {self.shape}"
                 nb = len(batch_t)
-                # EinsumOp: tensor(*batch, M, K), input=[nb+1], output=[0..nb, nb]
-                # But we also need batch dims as batch_dims of EinsumOp
-                input_dims = [nb + 1]  # K
-                output_dims = list(range(nb + 1))  # (*batch, M)
+                input_dims = [nb + 1]
+                output_dims = list(range(nb + 1))
                 return AffineSum((EinsumOp(other, input_dims, output_dims), self))
-
-            # Matrix-matrix: (*batch_t, M, K) @ (*batch_s, K, N) → (*batch, M, N)
             assert self.shape[-2] == K, f"Inner dims must match: {other.shape} @ {self.shape}"
             N = self.shape[-1]
             batch_s = self.shape[:-2]
             batch = torch.broadcast_shapes(batch_t, batch_s) if (batch_t and batch_s) else (batch_t or batch_s)
             nb = len(batch)
-
-            # Build tensor of shape (*batch, M, K, N)
             other_b = other.expand(*batch, M, K)
             tensor = other_b.unsqueeze(-1).expand(*batch, M, K, N)
-
-            # input_dims: self's shape (*batch_s, K, N) maps to tensor dims
-            ns = len(self.shape)
-            # K is at nb+1, N is at nb+2; batch dims are the last len(batch_s) of 0..nb-1
             input_dims = list(range(nb))[-len(batch_s):] + [nb + 1, nb + 2] if batch_s else [nb + 1, nb + 2]
-            output_dims = list(range(nb + 1)) + [nb + 2]  # (*batch, M, N)
+            output_dims = list(range(nb + 1)) + [nb + 2]
             return AffineSum((EinsumOp(tensor, input_dims, output_dims), self))
         return NotImplemented
     
@@ -425,15 +399,34 @@ class Expr:
         if len(dims) == 0:
             return self
         
-        weights = torch.ones(self.shape)
-        input_dims = list(range(len(self.shape)))
-        output_dims = [i for i in input_dims if i not in dims]
-        op = EinsumOp(weights, input_dims=input_dims, output_dims=output_dims)
-        out = self._apply_op(op)
-        if keepdim:
-            for d in dims:
-                out = out.unsqueeze(d)
-        return out
+        if not keepdim:
+            weights = torch.ones(self.shape)
+            input_dims = list(range(len(self.shape)))
+            output_dims = [i for i in input_dims if i not in dims]
+            op = EinsumOp(weights, input_dims=input_dims, output_dims=output_dims)
+            return self._apply_op(op)
+        else:
+            # Build EinsumOp that keeps reduced dims as size 1 directly,
+            # avoiding the sum+unsqueeze composition bug.
+            # Weight shape: insert size-1 dims at reduced positions in output
+            ndim = len(self.shape)
+            # weight tensor has the full input shape
+            weights = torch.ones(self.shape)
+            input_dims = list(range(ndim))
+            # output_dims: same as input but reduced dims point to
+            # dedicated size-1 output dims appended after the input dims
+            output_dims = []
+            next_extra = ndim
+            for i in range(ndim):
+                if i in dims:
+                    # Add a size-1 dim to the weight tensor for this output position
+                    weights = weights.unsqueeze(next_extra)
+                    output_dims.append(next_extra)
+                    next_extra += 1
+                else:
+                    output_dims.append(i)
+            op = EinsumOp(weights, input_dims=input_dims, output_dims=output_dims)
+            return self._apply_op(op)
 
     def mean(self, dim: Union[int, tuple[int, ...], list[int], torch.Tensor, None] = None, keepdim: bool = False) -> "Expr":
         reduce_dims = self._normalize_reduce_dims(dim)

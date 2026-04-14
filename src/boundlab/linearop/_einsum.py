@@ -12,6 +12,9 @@ import torch
 from boundlab import utils
 from boundlab.linearop._base import LinearOp, ComposedOp, ScalarOp, SumOp
 from boundlab.utils import merge_name, EQCondition
+from boundlab.linearop._shape import ExpandOp, PermuteOp
+from boundlab.utils import merge_name
+import warnings
 
 
 class EinsumOp(LinearOp):
@@ -296,7 +299,10 @@ class EinsumOp(LinearOp):
         permute_dims = self.output_dims + non_output_dims
         new_tensor = self.tensor.permute(permute_dims)
         output_dims = [permute_dims.index(i) for i in self.output_dims]
-        input_dims = [permute_dims.index(i) for i in self.input_dims]
+        input_dims = []
+        for i in self.input_dims:
+            idx = i if i >= 0 else len(permute_dims) + i
+            input_dims.append(permute_dims.index(idx))
         assert output_dims == list(range(len(output_dims))), "Output dimensions should be permuted to the end."
         return EinsumOp(new_tensor, input_dims, output_dims, name=self.name)
     
@@ -424,6 +430,13 @@ class EinsumOp(LinearOp):
         return EinsumOp(result, input_dims, output_dims, name=f"{self}.remove_conditions({target})" if self.name else None)
 
     def purify_with(self, other: "EinsumOp") -> "EinsumOp":
+        if isinstance(other, ScalarOp):
+            other = EinsumOp.from_scalar(other)
+        if not isinstance(other, EinsumOp):
+            if hasattr(other, "einsum_op"):
+                other = other.einsum_op()
+            else:
+                raise NotImplementedError(f"purify_with is only implemented for EinsumOps: {self} vs {other}")
         assert self.input_shape == other.input_shape
         assert self.output_shape == other.output_shape
         

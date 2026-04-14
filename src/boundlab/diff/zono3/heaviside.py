@@ -73,7 +73,7 @@ def _linearize_base(ls, us, lx, ux):
     return w_s, w_x, bias, err
 
 
-def _linearize_no_s_flip(ls, us, lx, ux):
+def _linearize_no_s_flip0(ls, us, lx, ux):
     """Assumes ls+us<=0; handles x-flip and base."""
     zeros = torch.zeros_like(ls)
     w_s = zeros.clone()
@@ -82,7 +82,6 @@ def _linearize_no_s_flip(ls, us, lx, ux):
     err = zeros.clone()
 
     mask_x_flip = lx + ux > 0
-    ls2 = 
     ws_xflip, wx_xflip, b_xflip, e_xflip = _linearize_base(ls[mask_x_flip], us[mask_x_flip],
                                                            -ux[mask_x_flip], -lx[mask_x_flip])
     w_s[mask_x_flip] = -ws_xflip
@@ -100,8 +99,23 @@ def _linearize_no_s_flip(ls, us, lx, ux):
 
     return w_s, w_x, bias, err
 
+def _linearize_no_s_flip(ls, us, lx, ux):
+    """Assumes ls+us<=0; handles x-flip and base."""
+    zeros = torch.zeros_like(ls)
 
-def _linearize_hsx(ls: torch.Tensor, us: torch.Tensor,
+    mask_x_flip = lx + ux > 0
+    lx2 = torch.where(mask_x_flip, -ux, lx)
+    ux2 = torch.where(mask_x_flip, -lx, ux)
+    ws_0, wx_0, b_x0, e_x0 = _linearize_base(ls, us, lx2, ux2)
+    w_s = torch.where(mask_x_flip, -ws_0, ws_0)
+    w_x = torch.where(mask_x_flip, wx_0, wx_0)
+    bias = torch.where(mask_x_flip, -b_x0, b_x0)
+    err = torch.where(mask_x_flip, e_x0, e_x0)
+
+    return w_s, w_x, bias, err
+
+
+def _linearize_hsx0(ls: torch.Tensor, us: torch.Tensor,
                    lx: torch.Tensor, ux: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return (w_s, w_x, bias, err) such that
 
@@ -136,6 +150,32 @@ def _linearize_hsx(ls: torch.Tensor, us: torch.Tensor,
     w_x[mask_remaining] = wx_rest
     bias[mask_remaining] = b_rest
     err[mask_remaining] = e_rest
+
+    return w_s, w_x, bias, err
+
+def _linearize_hsx(ls: torch.Tensor, us: torch.Tensor,
+                   lx: torch.Tensor, ux: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return (w_s, w_x, bias, err) such that
+
+    ``h(s) * x ≈ w_s * s + w_x * x + bias ± err``.
+
+    Element-wise implementation mirroring the case split in ``vit_plan.md``.
+    """
+    if ls.numel() == 0:
+        z = torch.zeros_like(ls)
+        return z, z, z, z
+
+    zeros = torch.zeros_like(ls)
+    ls2 = torch.where(ls + us > 0, -us, ls)
+    us2 = torch.where(ls + us > 0, -ls, us)
+
+
+    mask_s_flip = ls + us > 0
+    ws_0, wx_0, b_0, e_0 = _linearize_no_s_flip(ls2, us2, lx, ux)
+    w_s = torch.where(mask_s_flip, ws_0, ws_0)
+    w_x = torch.where(mask_s_flip, 1 - wx_0, wx_0)
+    bias = torch.where(mask_s_flip, -b_0, b_0)
+    err = torch.where(mask_s_flip, e_0, e_0)
 
     return w_s, w_x, bias, err
 

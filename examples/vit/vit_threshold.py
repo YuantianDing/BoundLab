@@ -79,10 +79,12 @@ class Attention(nn.Module):
         out = self.to_out(out)
 
         if self.pruning_threshold is not None:
-            cls_attn = attn[:, 0, 1:] # [H, N-1]
-            cls_attn = cls_attn.mean(dim=0) # [N-1]
-            score = self.prunned_softmax(cls_attn, last_score[1:]) - self.pruning_threshold # [N-1]
-            torch.cat([torch.tensor([1.0], device=score.device), score], dim=0, out=score) # [N]
+            cls_attn = attn[:, 0, 1:]  # [H, N-1]
+            cls_attn = cls_attn.mean(dim=0)  # [N-1]
+            score = self.prunned_softmax(cls_attn, last_score[1:]) - self.pruning_threshold  # [N-1]
+            score = torch.cat(
+                [torch.tensor([1.0], device=score.device), score], dim=0
+            )  # [N]
             return out, score
         
         return out, last_score 
@@ -165,19 +167,25 @@ class ViT(nn.Module):
 _MODELS_DIR = Path(__file__).parent
 
 
-def vit_ibp_3_3_8(layer_norm_type: Literal["standard", "no_var"] = "no_var") -> ViT:
+def vit_ibp_3_3_8(
+    layer_norm_type: Literal["standard", "no_var"] = "no_var",
+    pruning_threshold: Optional[float] = None,
+) -> ViT:
     model = ViT(image_size=32, patch_size=8, num_classes=10, channels=3,
                 dim=48, depth=3, heads=3, mlp_dim=96, dim_head=16,
-                layer_norm_type=layer_norm_type)
+                layer_norm_type=layer_norm_type, pruning_threshold=pruning_threshold)
     sd = load_file(_MODELS_DIR / "ibp_3_3_8.safetensors")
     model.load_state_dict(sd)
     return model
 
 
-def vit_pgd_2_3_16(layer_norm_type: Literal["standard", "no_var"] = "no_var") -> ViT:
+def vit_pgd_2_3_16(
+    layer_norm_type: Literal["standard", "no_var"] = "no_var",
+    pruning_threshold: Optional[float] = None,
+) -> ViT:
     model = ViT(image_size=32, patch_size=16, num_classes=10, channels=3,
                 dim=48, depth=2, heads=3, mlp_dim=96, dim_head=16,
-                layer_norm_type=layer_norm_type)
+                layer_norm_type=layer_norm_type, pruning_threshold=pruning_threshold)
     sd = load_file(_MODELS_DIR / "pgd_2_3_16.safetensors")
     model.load_state_dict(sd)
     return model

@@ -310,7 +310,6 @@ class DiffExpr3:
             return self._map_all(lambda e: e / other)
         if isinstance(other, DiffExpr2):
             if (tensors := other.get_const()) is not None:
-                # x/vx, y/vy, diff: d/vx + y*(1/vx - 1/vy)
                 vx, vy = tensors
                 if torch.allclose(vx, vy):
                     return self._map_all(lambda e: e / vx)
