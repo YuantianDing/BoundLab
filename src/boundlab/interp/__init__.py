@@ -125,6 +125,28 @@ def _onnx_constant(value=None, value_float=None, value_int=None, value_string=No
         raise ValueError(f"ONNX Constant: no value provided among {locals()}")
 
 
+_ONNX_DTYPE_MAP = {
+    1: torch.float32,
+    2: torch.uint8,
+    3: torch.int8,
+    5: torch.int16,
+    6: torch.int32,
+    7: torch.int64,
+    9: torch.bool,
+    10: torch.float16,
+    11: torch.float64,
+    16: torch.bfloat16,
+}
+
+
+def _onnx_cast(input, to):
+    """ONNX Cast: convert tensor dtype."""
+    dtype = _ONNX_DTYPE_MAP.get(to)
+    if dtype is None:
+        raise ValueError(f"Unsupported ONNX dtype id: {to}")
+    return input.to(dtype)
+
+
 def _normalize_reduce_axes(axes):
     if axes is None:
         return None
@@ -191,6 +213,96 @@ def _onnx_concat(*inputs, axis):
     return torch.cat(list(inputs), dim=axis)
 
 
+def _onnx_einsum(*inputs, equation):
+    """ONNX Einsum: dispatch to torch.einsum for constants, or build an
+    :class:`EinsumOp` when exactly one operand is an :class:`Expr`.
+
+    Constant operands are pre-contracted into a single tensor whose axes span
+    ``union(x_labels, out_labels)``, then wrapped by :class:`EinsumOp` so it
+    fuses with surrounding linear ops.
+    """
+    equation = equation.replace(" ", "")
+    lhs, rhs = equation.split("->")
+    in_labels = lhs.split(",")
+    assert len(in_labels) == len(inputs), f"Einsum equation mismatch: {equation}"
+
+    expr_positions = [i for i, v in enumerate(inputs) if isinstance(v, Expr)]
+    if not expr_positions:
+        return torch.einsum(equation, *inputs)
+    assert len(expr_positions) == 1, "Einsum with multiple Expr inputs is not supported"
+    ei = expr_positions[0]
+    x = inputs[ei]
+    x_labels = in_labels[ei]
+    const_labels = [in_labels[i] for i in range(len(inputs)) if i != ei]
+    const_tensors = [inputs[i] for i in range(len(inputs)) if i != ei]
+    out_labels = rhs
+
+    t_labels = list(dict.fromkeys(x_labels + out_labels))
+    sizes = {l: s for l, s in zip(x_labels, x.shape)}
+    for t, lbl in zip(const_tensors, const_labels):
+        for l, s in zip(lbl, t.shape):
+            sizes.setdefault(l, s)
+
+    const_label_set = set("".join(const_labels))
+    contract_target = "".join(l for l in t_labels if l in const_label_set)
+    if const_tensors:
+        contract_eq = ",".join(const_labels) + "->" + contract_target
+        tensor = torch.einsum(contract_eq, *const_tensors)
+    else:
+        tensor = torch.ones(())
+
+    current = list(contract_target)
+    for i, l in enumerate(t_labels):
+        if l not in current:
+            tensor = tensor.unsqueeze(i)
+            current.insert(i, l)
+    tensor = tensor.expand([sizes[l] for l in t_labels]).contiguous()
+
+    input_dims = [t_labels.index(l) for l in x_labels]
+    output_dims = [t_labels.index(l) for l in out_labels]
+
+    from boundlab.linearop._einsum import EinsumOp
+    from boundlab.expr._affine import AffineSum
+    op = EinsumOp(tensor, input_dims, output_dims)
+    return AffineSum((op, x))
+
+
+def _onnx_conv(X, W, B=None, *, kernel_shape=None, strides=None, pads=None, dilations=None, group=1, auto_pad="NOTSET", **_):
+    if kernel_shape is None:
+        kernel_shape = list(W.shape[2:])
+    """ONNX Conv (2D), restricted to ``kernel_size == stride``.
+
+    Reshapes ``X`` into non-overlapping patches
+    ``[N, C_in, H/kH, kH, W/kW, kW]`` and contracts against the weight
+    tensor ``W`` of shape ``[C_out, C_in, kH, kW]`` via :func:`_onnx_einsum`,
+    which fuses with surrounding linear ops.
+    """
+    assert len(kernel_shape) == 2, f"only 2D Conv is supported, got kernel_shape={kernel_shape}"
+    kH, kW = int(kernel_shape[0]), int(kernel_shape[1])
+    strides = [kH, kW] if strides is None else [int(s) for s in strides]
+    assert strides == [kH, kW], f"Conv requires kernel_size == stride, got kernel={kernel_shape}, stride={strides}"
+    assert int(group) == 1, "grouped Conv is not supported"
+    assert auto_pad in ("NOTSET", "VALID"), f"Conv auto_pad={auto_pad} is not supported"
+    if pads is not None:
+        assert all(int(p) == 0 for p in pads), f"Conv with padding is not supported, got pads={pads}"
+    if dilations is not None:
+        assert all(int(d) == 1 for d in dilations), f"Conv with dilation is not supported, got dilations={dilations}"
+
+    N, C_in, H, Win = X.shape
+    C_out, C_in_w, kH_w, kW_w = W.shape
+    assert C_in == C_in_w and kH == kH_w and kW == kW_w, \
+        f"Conv weight shape {tuple(W.shape)} incompatible with input {tuple(X.shape)}"
+    assert H % kH == 0 and Win % kW == 0, \
+        f"input spatial dims ({H},{Win}) not divisible by kernel ({kH},{kW})"
+    Hp, Wp = H // kH, Win // kW
+
+    X_r = X.reshape(N, C_in, Hp, kH, Wp, kW)
+    Y = _onnx_einsum(X_r, W, equation="nchHwW,ochW->nohw")
+    if B is not None:
+        Y = Y + B.reshape(1, C_out, 1, 1)
+    return Y
+
+
 def _onnx_slice(data, starts, ends, axes=None, steps=None, **_):
     """ONNX Slice: extract a slice from *data*."""
     starts_list = _unwrap_shape(_as_const(starts))
@@ -223,7 +335,7 @@ def _onnx_slice(data, starts, ends, axes=None, steps=None, **_):
 # FnList — multi-handler dispatch helper
 # =====================================================================
 
-class FnList:
+class FnList(Generic[E]):
     """Helper class for merging multiple handlers for the same operator."""
     def __init__(self, fns):
         if isinstance(fns, FnList):
@@ -233,7 +345,9 @@ class FnList:
         else:
             self.fns = [fns]
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: E, **kwargs) -> E:
+        if len(self.fns) == 1:
+            return self.fns[0](*args, **kwargs)
         errors = []
         for fn in self.fns[::-1]:
             try:
@@ -284,7 +398,7 @@ class Interpreter(Generic[E]):
         else:
             self.dispatcher = {k: FnList(v) for k, v in dispatcher.items()}
 
-    def __getitem__(self, key) -> FnList:
+    def __getitem__(self, key) -> FnList[E]:
         return self.dispatcher[key]
 
     def __setitem__(self, key, value):
@@ -326,7 +440,13 @@ class Interpreter(Generic[E]):
 
     def and_then(self, other: Callable[[E], E]) -> Interpreter:
         """Return a new interpreter that applies another function to the output of this one."""
-        return Interpreter({k: lambda *args, **kwargs: other(v(*args, **kwargs)) for k, v in self.dispatcher.items()})
+        result = {}
+
+        for k, v in self.dispatcher.items():
+            def chained_fn(*args, **kwargs):
+                return other(v(*args, **kwargs))
+            result[k] = chained_fn
+        return Interpreter(result)
 
     def __call__(
         self, model: ir.Model | str | Path
@@ -377,8 +497,7 @@ class Interpreter(Generic[E]):
 
         initializers = {
             init.name: self.dispatcher["Initializer"](
-                torch.from_numpy(init.const_value.numpy().copy()),
-                name=init.name
+                torch.from_numpy(init.const_value.numpy().copy())
             )
             for init in model.graph.initializers.values()
         }
@@ -397,7 +516,7 @@ class Interpreter(Generic[E]):
 
             for name, e in zip(input_names, exprs):
                 assert e is not None, name
-                env[name] = self.dispatcher["Input"](e, name=name)
+                env[name] = self.dispatcher["Input"](e)
 
             for node in model.graph:
                 args = []
@@ -504,6 +623,8 @@ ONNX_BASE_INTERPRETER = Interpreter({
     # ---- linear layers ------------------------------------------------
     "Gemm":     _onnx_gemm,
     "MatMul":   lambda A, B: A @ B,
+    "Einsum":   _onnx_einsum,
+    "Conv":     _onnx_conv,
     # ---- shape ops ----------------------------------------------------
     "Reshape":  lambda data, shape, **_: data.reshape(_unwrap_shape(_as_const(shape))),
     "Flatten":  _onnx_flatten,
@@ -511,6 +632,7 @@ ONNX_BASE_INTERPRETER = Interpreter({
     "Unsqueeze": lambda data, axes: _onnx_unsqueeze(data, _as_const(axes)),
     "Squeeze":  lambda data, axes=None: _onnx_squeeze(data, _as_const(axes) if axes is not None else None),
     "Identity": lambda X: X,
+    "Cast":     _onnx_cast,
     # ---- reductions ---------------------------------------------------
     "ReduceMean": _onnx_reduce_mean,
     "ReduceSum": _onnx_reduce_sum,

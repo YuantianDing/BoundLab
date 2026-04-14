@@ -12,6 +12,7 @@ import pytest
 from torch import nn
 
 import boundlab.expr as expr
+from boundlab.expr._core import Expr
 import boundlab.prop as prop
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
@@ -227,7 +228,7 @@ def test_bert_full_model_sound():
     model = BERTSmaller3()
     model.eval()
 
-    seq_len = 4
+    seq_len = 8
     hidden = 64
     center_val = torch.randn(seq_len, hidden) * 0.05
     scale = 0.005  # small perturbation for 3-layer model

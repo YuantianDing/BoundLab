@@ -84,7 +84,7 @@ def heaviside_pruning(scores: torch.Tensor, data: torch.Tensor) -> torch.Tensor:
     Returns:
         A tensor of the same shape as :code:`scores` and :code:`data`.
     """
-    assert scores.shape == data.shape, "scores and data must have the same shape"
+    assert scores.shape == data.shape[-scores.dim():], "scores and data must have the same shape"
     return torch.onnx.ops.symbolic(
         "boundlab::heaviside_pruning",
         (scores, data),

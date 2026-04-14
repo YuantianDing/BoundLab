@@ -10,6 +10,8 @@ class LinearOpFlags(enum.Flag):
     """Flags for LinearOps that can be used for optimization and simplification."""
     NONE = 0
     IS_NON_NEGATIVE = enum.auto()  # Output is guaranteed to be non-negative for non-negative input
+    IS_PURE_EXPANDING = enum.auto()  # Forward does not sum over input (e.g. broadcasting, repeat, pure reindex).
+    IS_PURE_CONTRACTING = enum.auto()  # Forward does not duplicate input (e.g. sum, norm, pure reindex).
 
 class LinearOp:
     r"""A base class for linear operators that can be applied to boundlab expressions.
@@ -35,9 +37,10 @@ class LinearOp:
         self.input_shape = input_shape
         self.output_shape = output_shape
         self.flags = flags
+        self.name = None
 
     def __str__(self):
-        return self.name if hasattr(self, "name") else f"<unknown linop {self.input_shape} -> {self.output_shape}>"
+        return self.name if self.name else f"<unknown linop {self.input_shape} -> {self.output_shape}>"
 
     def __call__(self, x):
         """Apply this LinearOp to an expression, returning a Linear."""
@@ -107,14 +110,13 @@ class LinearOp:
     def __add__(self, other: "LinearOp") -> "LinearOp":
         """Add this LinearOp to another."""
         if isinstance(other, LinearOp):
-            warnings.warn(f"Failed to fuse(+) LinearOps: {self} + {other}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.", stacklevel=2)
+            # warnings.warn(f"Failed to fuse(+) LinearOps: {self} + {other}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.", stacklevel=2)
             return SumOp(self, other)
         return NotImplemented
 
     def __radd__(self, other: "LinearOp") -> "LinearOp":
         """Add another LinearOp to this one."""
         if isinstance(other, LinearOp):
-            warnings.warn(f"Failed to fuse LinearOps: {other} + {self}, returning a SumOp. Consider implementing __add__ for these LinearOp types for better performance.", stacklevel=2)
             return SumOp(other, self)
         return NotImplemented
     
@@ -153,25 +155,27 @@ class LinearOp:
             return self
         raise NotImplementedError(f"LinearOp {self} does not implement abs method, and is not guaranteed to be non-negative.")
     
-    def sum_input(self) -> "LinearOp":
-        """Return a LinearOp that sums over the input dimensions, if supported."""
-        raise NotImplementedError(f"LinearOp {self} doesn't implement the sum_input method.")
-    
-    def sum_output(self) -> "LinearOp":
-        """Return a LinearOp that sums over the output dimensions, if supported."""
-        raise NotImplementedError(f"LinearOp {self} doesn't implement the sum_output method.")
-        
     def norm_input(self, p=1) -> "LinearOp":
         """Return a LinearOp that computes the norm over the input dimensions, if supported."""
-        raise NotImplementedError(f"LinearOp {self} doesn't implement the norm_input method.")
+        from boundlab.linearop._einsum import EinsumOp
+        if self.flags & LinearOpFlags.IS_PURE_CONTRACTING and self.flags & LinearOpFlags.IS_NON_NEGATIVE:
+            tensor = self.forward(torch.ones(self.input_shape))
+            return EinsumOp.from_full(tensor, len(self.input_shape), name=f"norm_input(p={p}) of {self}" if self.name else None)
+        raise NotImplementedError(f"LinearOp {self} does not implement norm_output method.")
     
     def norm_output(self, p=1) -> "LinearOp":
         """Return a LinearOp that computes the norm over the output dimensions, if supported."""
-        raise NotImplementedError(f"LinearOp {self} doesn't implement the norm_output method.")
+        raise NotImplementedError(f"LinearOp {self} does not implement norm_output method.")
     
     def __neg__(self):
         """Return the negation of this LinearOp."""
         return (-1) * self
+
+    def __sub__(self, other):
+        """Return ``self - other`` as ``self + (-other)``."""
+        if isinstance(other, LinearOp):
+            return self + (-other)
+        return NotImplemented
     
     def __repr__(self):
         return str(self)
@@ -238,6 +242,10 @@ class ComposedOp(LinearOp):
         super().__init__(inner.input_shape, outer.output_shape)
         if all(op.flags & LinearOpFlags.IS_NON_NEGATIVE for op in self.ops):
             self.flags |= LinearOpFlags.IS_NON_NEGATIVE
+        if all(op.flags & LinearOpFlags.IS_PURE_EXPANDING for op in self.ops):
+            self.flags |= LinearOpFlags.IS_PURE_EXPANDING
+        if all(op.flags & LinearOpFlags.IS_PURE_CONTRACTING for op in self.ops):
+            self.flags |= LinearOpFlags.IS_PURE_CONTRACTING
 
     def forward(self, x):
         for op in reversed(self.ops):
@@ -248,7 +256,7 @@ class ComposedOp(LinearOp):
         for op in self.ops:
             grad = op.backward(grad)
         return grad
-    
+
     def vforward(self, x):
         for op in reversed(self.ops):
             x = op.vforward(x)
@@ -280,16 +288,6 @@ class ComposedOp(LinearOp):
             return other
         return super().__rmatmul__(other)
     
-    def sum_input(self):
-        ops = self.ops.copy()
-        ops[-1] = ops[-1].sum_input()
-        return ComposedOp(*ops)
-
-    def sum_output(self):
-        ops = self.ops.copy()
-        ops[0] = ops[0].sum_output()
-        return ComposedOp(*ops)
-    
     def jacobian(self):
         if self.input_shape.numel() >= self.output_shape.numel():
             jac = self.ops[0].jacobian()
@@ -301,6 +299,53 @@ class ComposedOp(LinearOp):
             for op in reversed(self.ops[:-1]):
                 jac = op.vforward(jac)
             return jac
+    
+    def purify(self) -> bool:
+        i = 0
+        while self.ops[i].flags & LinearOpFlags.IS_PURE_EXPANDING:
+            i += 1
+            if i == len(self.ops):
+                break
+        
+        j = len(self.ops) - 1
+        while self.ops[j].flags & LinearOpFlags.IS_PURE_CONTRACTING:
+            j -= 1
+            if j < 0:
+                break
+        
+        expanding_ops = self.ops[:i]
+        contracting_ops = self.ops[j + 1:]
+        middle_ops = self.ops[i:j + 1]
+        if len(middle_ops) > 1:
+            return False
+        elif len(middle_ops) == 1:
+            if isinstance(middle_ops[0], SumOp):
+                return middle_ops[0].purify()
+            return True
+        else:
+            return True
+                
+    
+    def norm_input(self, p=1):
+        if self.purify():
+            op = self.ops[-1].norm_input(p)
+            for other_op in reversed(self.ops[:-1]):
+                op = other_op @ op
+            return op
+        else:
+            return super().norm_input(p)
+    
+    def norm_output(self, p=1):
+        if self.purify():
+            op = self.ops[0].norm_output(p)
+            for other_op in self.ops[1:]:
+                op = op @ other_op
+            return op
+        else:
+            return super().norm_output(p)
+    
+
+
 
 
 
@@ -322,6 +367,12 @@ class SumOp(LinearOp):
 
         if all(op.flags & LinearOpFlags.IS_NON_NEGATIVE for op in self.ops):
             self.flags |= LinearOpFlags.IS_NON_NEGATIVE
+        if all(op.flags & LinearOpFlags.IS_PURE_EXPANDING for op in self.ops):
+            self.flags |= LinearOpFlags.IS_PURE_EXPANDING
+        if all(op.flags & LinearOpFlags.IS_PURE_CONTRACTING for op in self.ops):
+            self.flags |= LinearOpFlags.IS_PURE_CONTRACTING
+
+        self.purified = False
 
     def forward(self, x):
         return sum(op.forward(x) for op in self.ops)
@@ -339,21 +390,81 @@ class SumOp(LinearOp):
         return "(" + " + ".join(str(op) for op in self.ops) + ")"
     
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
+        from boundlab.linearop._einsum import EinsumOp
+        ops = [op @ other for op in self.ops]
+        if not all(isinstance(op, ComposedOp) for op in ops):
+            return sum(ops, start=ZeroOp(other.input_shape, self.output_shape))
         return NotImplemented
-    
+
     def __rmatmul__(self, other):
+        from boundlab.linearop._einsum import EinsumOp
+        ops = [other @ op for op in self.ops]
+        if not all(isinstance(op, ComposedOp) for op in ops):
+            return sum(ops, start=ZeroOp(self.input_shape, other.output_shape))
         return super().__rmatmul__(other)
     
-    
-    def sum_input(self):
-        return SumOp(*(op.sum_input() for op in self.ops))
-    
-    def sum_output(self):
-        return SumOp(*(op.sum_output() for op in self.ops))
+    def __add__(self, other: "LinearOp") -> "LinearOp":
+        if isinstance(other, LinearOp):
+            other = SumOp(other)
+        if isinstance(other, SumOp):
+            assert self.input_shape == other.input_shape and self.output_shape == other.output_shape
+            result_self_ops = self.ops.copy()
+            result_other_ops = []
+            for op in other.ops:
+                for i, _ in enumerate(result_self_ops):
+                    o = result_self_ops[i] + op
+                    if not isinstance(o, SumOp):
+                        result_self_ops[i] = o
+                        break
+                else:
+                    result_other_ops.append(op)
+            result = result_self_ops + result_other_ops
+            if len(result) == 1:
+                return result[0]
+            else:
+                return SumOp(*result)
+        return NotImplemented
     
     def jacobian(self):
         jacs = [op.jacobian() for op in self.ops]
         return sum(jacs)
+    
+    def norm_input(self, p=1) -> "LinearOp":
+        """Return a LinearOp that computes the norm over the input dimensions, if supported."""
+        if not self.purified:
+            self.purify()
+        
+        return sum((op.norm_input(p) for op in self.ops), start=ZeroOp(self.input_shape, torch.Size(())))
+    
+    def norm_output(self, p=1) -> "LinearOp":
+        """Return a LinearOp that computes the norm over the output dimensions, if supported."""
+        if not self.purified:
+            self.purify()
+        
+        return sum((op.norm_output(p) for op in self.ops), start=ZeroOp(torch.Size(()), self.output_shape))
+    
+    
+    def purify(self) -> bool:
+        if self.purified:
+            return self
+        
+        i = 0
+        while i < len(self.ops):
+            for j in range(0, i):
+                result = self.ops[j].purify_with(self.ops[i])
+                if isinstance(result, tuple) and len(result) == 2:
+                    self.ops[j], self.ops[i] = result
+                elif isinstance(result, LinearOp):
+                    self.ops[j] = result
+                    del self.ops[i]
+                    break
+                else:
+                    raise NotImplementedError(f"SumOp purify_with not implemented for {type(self.ops[j])} and {type(self.ops[i])}")
+            else:
+                i += 1
+
+        self.purified = True
+        return self.purified
 
 
 class ScalarOp(LinearOp):
@@ -366,6 +477,7 @@ class ScalarOp(LinearOp):
 
         if scalar >= 0:
             self.flags |= LinearOpFlags.IS_NON_NEGATIVE
+        self.flags |= LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.scalar == 1.0:
@@ -425,21 +537,15 @@ class ScalarOp(LinearOp):
         if isinstance(other, ScalarOp):
             return other.__add__(self)
         return super().__radd__(other)
+    
+    def purify_with(self, other):
+        return NotImplemented
 
     def is_identity(self) -> bool:
         return self.scalar == 1.0
     
     def abs(self):
-        return ScalarOp(abs(self.scalar), self.input_shape, name=f"|{self}|" if hasattr(self, "name") else None)
-    
-    def sum_input(self):
-        from boundlab.linearop._einsum import EinsumOp
-        return EinsumOp.from_full(torch.tensor(self.scalar).expand(self.output_shape), 0)
-    
-    def sum_output(self):
-        from boundlab.linearop._einsum import EinsumOp
-        return EinsumOp.from_full(torch.tensor(self.scalar).expand(self.input_shape), len(self.input_shape))
-
+        return ScalarOp(abs(self.scalar), self.input_shape, name=f"|{self}|" if self.name else None)
 
 class ZeroOp(LinearOp):
     """A LinearOp that always returns zero, regardless of input."""
@@ -447,7 +553,11 @@ class ZeroOp(LinearOp):
     def __init__(self, input_shape: torch.Size, output_shape: torch.Size, name=None):
         if name is not None:
             self.name = name
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(
+            input_shape,
+            output_shape,
+            flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING,
+        )
 
     def forward(self, x):
         return torch.zeros(self.output_shape, dtype=x.dtype, device=x.device)
@@ -464,7 +574,7 @@ class ZeroOp(LinearOp):
         return torch.zeros(*extra, *self.input_shape, dtype=grad.dtype, device=grad.device)
 
     def __str__(self):
-        return self.name if hasattr(self, "name") else "0"
+        return self.name if self.name else "0"
 
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
         if isinstance(other, LinearOp):
@@ -485,12 +595,6 @@ class ZeroOp(LinearOp):
         if isinstance(other, LinearOp):
             return other
         return NotImplemented
-    
-    def sum_input(self):
-        return ZeroOp(torch.Size(()), self.output_shape)
-    
-    def sum_output(self):
-        return ZeroOp(self.input_shape, torch.Size(()))
     
     def jacobian(self):
         return torch.zeros(self.output_shape + self.input_shape)

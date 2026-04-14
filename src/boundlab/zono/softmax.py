@@ -67,7 +67,7 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     exp_x = exp_handler(x_shifted)
 
     # Sum along softmax dim using mean * n (ReduceMeanOp is affine)
-    sum_exp = exp_x.mean(dim=dim, keepdim=True) * float(n)
+    sum_exp = exp_x.sum(dim=dim, keepdim=True)
 
     # Reciprocal: 1 / sum_exp
     inv_sum = reciprocal_handler(sum_exp)

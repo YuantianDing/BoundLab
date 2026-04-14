@@ -11,7 +11,7 @@ from typing import Literal
 import torch
 
 from boundlab.expr._core import Expr, ExprFlags
-from boundlab.linearop._base import LinearOp, LinearOpFlags
+from boundlab.linearop._base import LinearOp, LinearOpFlags, SumOp
 from boundlab.linearop._einsum import EinsumOp
 
 
@@ -73,6 +73,9 @@ class LpEpsilon(Expr):
             result = weights.norm_input(p=self.q).jacobian()
         except NotImplementedError:
             warnings.warn(f"Failed to concretize using `norm_input` for LpEpsilon backward with p={self.p} and weight {weights}. This may be due to unsupported LinearOp types. Consider implementing norm_input for these LinearOp types for better performance.", stacklevel=2)
+            if isinstance(weights, SumOp) and any(isinstance(term, EinsumOp) and term.is_full() for term in weights.ops):
+                raise NotImplementedError("Failed to concretize LpEpsilon backward with SumOp containing full EinsumOp terms. Consider implementing norm_input for this case for better performance.")
+
             jac = weights.jacobian()
             input_dims = list(range(len(weights.output_shape), len(weights.output_shape) + len(weights.input_shape)))
             result = jac.norm(p=self.q, dim=input_dims)
@@ -80,7 +83,7 @@ class LpEpsilon(Expr):
         
 
     def to_string(self) -> str:
-        if self.name is not None:
+        if self.name:
             return f"<𝜀 {list(self.shape)}>#{self.name}"
         return f"<𝜀 {list(self.shape)}>#{self.id:X}"
     

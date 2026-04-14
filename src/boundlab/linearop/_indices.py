@@ -48,7 +48,7 @@ class GatherOp(LinearOp):
         self.dim = dim
         self.index = index
         output_shape = torch.Size(index.shape)
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Check if x has extra batch dimensions (e.g., when called via vmap)
@@ -102,7 +102,7 @@ class ScatterOp(LinearOp):
         self.dim = dim
         self.index = index
         assert index.shape == input_shape, f"Index shape {index.shape} must match input shape {input_shape}"
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Check if x has extra batch dimensions
@@ -177,7 +177,7 @@ class GetIndicesOp(LinearOp):
         for idx in indices:
             assert idx.shape == output_shape, \
                 f"Each index tensor must have shape {output_shape}, got {idx.shape}"
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Check if x has extra batch dimensions
@@ -250,7 +250,7 @@ class SetIndicesOp(LinearOp):
         for idx in indices:
             assert idx.shape == input_shape, \
                 f"Each index tensor must have shape {input_shape}, got {idx.shape}"
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Check if x has extra batch dimensions
@@ -319,7 +319,7 @@ class GetSliceOp(LinearOp):
     def __init__(self, input_shape: torch.Size, indices):
         self.indices = indices
         output_shape = _meta_output_shape(lambda x: x[indices], input_shape)
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
         # Pre-compute backward info for functional (vmap-compatible) backward
         self._backward_info = self._compute_backward_info(input_shape, indices, output_shape)
 
@@ -458,7 +458,7 @@ class SetSliceOp(LinearOp):
 
     def __init__(self, indices, input_shape: torch.Size, output_shape: torch.Size):
         self.indices = indices
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Check if x has extra batch dimensions (e.g., when called via vmap)

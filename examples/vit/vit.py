@@ -145,7 +145,7 @@ class ViT(nn.Module):
 _MODELS_DIR = Path(__file__).parent
 
 
-def vit_ibp_3_3_8(layer_norm_type: Literal["standard", "no_var"] = "standard") -> ViT:
+def vit_ibp_3_3_8(layer_norm_type: Literal["standard", "no_var"] = "no_var") -> ViT:
     model = ViT(image_size=32, patch_size=8, num_classes=10, channels=3,
                 dim=48, depth=3, heads=3, mlp_dim=96, dim_head=16,
                 layer_norm_type=layer_norm_type)
@@ -154,7 +154,7 @@ def vit_ibp_3_3_8(layer_norm_type: Literal["standard", "no_var"] = "standard") -
     return model
 
 
-def vit_pgd_2_3_16(layer_norm_type: Literal["standard", "no_var"] = "standard") -> ViT:
+def vit_pgd_2_3_16(layer_norm_type: Literal["standard", "no_var"] = "no_var") -> ViT:
     model = ViT(image_size=32, patch_size=16, num_classes=10, channels=3,
                 dim=48, depth=2, heads=3, mlp_dim=96, dim_head=16,
                 layer_norm_type=layer_norm_type)

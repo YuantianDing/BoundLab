@@ -32,7 +32,6 @@ Primary methods:
 - `force_jacobian()`: explicit Jacobian fallback via batched basis application.
 - `jacobian_scatter(src)`: add this operator's Jacobian into an existing
   Jacobian-layout tensor without requiring a full re-materialization path.
-- `abs()`, `sum_input()`, `sum_output()`: specialized algebra helpers.
 
 Operator overloads:
 

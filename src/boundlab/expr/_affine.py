@@ -125,7 +125,7 @@ class AffineSum(Expr):
         return (bias, [weights @ op for op in self.children_dict.values()])
 
     def to_string(self, *children_str: str) -> str:
-        parts = [f"{op}({cs})" for op, cs in zip(self.children_dict.values(), children_str)]
+        parts = [f"{op}{cs}" for op, cs in zip(self.children_dict.values(), children_str)]
         if self.constant is not None:
             parts.append(f"<Const>")
         return " + ".join(parts)

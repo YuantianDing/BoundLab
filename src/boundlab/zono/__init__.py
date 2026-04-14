@@ -31,7 +31,7 @@ from boundlab.linearop import LinearOp
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.utils import not0
 
-interpret = Interpreter(ONNX_BASE_INTERPRETER)
+interpret = Interpreter[Expr](ONNX_BASE_INTERPRETER)
 """Zonotope-based interpreter.
 
 Examples
