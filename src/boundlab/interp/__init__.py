@@ -249,18 +249,49 @@ def _onnx_einsum(*inputs, equation):
         diff_positions = []
 
     if diff_positions:
-        assert len(diff_positions) == 1, "Einsum with multiple DiffExpr inputs is not supported"
-        di = diff_positions[0]
-        diff = inputs[di]
-        if isinstance(diff, DiffExpr2):
-            diff = DiffExpr3(diff.x, diff.y, diff.x - diff.y)
-        in_x = list(inputs); in_x[di] = diff.x
-        in_y = list(inputs); in_y[di] = diff.y
-        in_d = list(inputs); in_d[di] = diff.diff
-        out_x = _onnx_einsum(*in_x, equation=equation)
-        out_y = _onnx_einsum(*in_y, equation=equation)
-        out_d = _onnx_einsum(*in_d, equation=equation)
-        return DiffExpr3(out_x, out_y, out_d)
+        if len(diff_positions) == 1:
+            di = diff_positions[0]
+            diff = inputs[di]
+            if isinstance(diff, DiffExpr2):
+                diff = DiffExpr3(diff.x, diff.y, diff.x - diff.y)
+            in_x = list(inputs); in_x[di] = diff.x
+            in_y = list(inputs); in_y[di] = diff.y
+            in_d = list(inputs); in_d[di] = diff.diff
+            out_x = _onnx_einsum(*in_x, equation=equation)
+            out_y = _onnx_einsum(*in_y, equation=equation)
+            out_d = _onnx_einsum(*in_d, equation=equation)
+            return DiffExpr3(out_x, out_y, out_d)
+        elif len(diff_positions) == 2:
+            # Bilinear case: two DiffExpr inputs.
+            # Use identity: A.x ⊗ B.x − A.y ⊗ B.y = A.diff ⊗ B.x + A.y ⊗ (B.x − B.y)
+            # Identify DiffExpr3 (has .diff) and DiffExpr2 positions.
+            di3 = [i for i in diff_positions if isinstance(inputs[i], DiffExpr3)]
+            di2 = [i for i in diff_positions if isinstance(inputs[i], DiffExpr2)]
+            in_x = list(inputs)
+            in_y = list(inputs)
+            for i in diff_positions:
+                in_x[i] = _as_const(inputs[i].x) if isinstance(inputs[i], DiffExpr2) else inputs[i].x
+                in_y[i] = _as_const(inputs[i].y) if isinstance(inputs[i], DiffExpr2) else inputs[i].y
+            out_x = _onnx_einsum(*in_x, equation=equation)
+            out_y = _onnx_einsum(*in_y, equation=equation)
+            if len(di3) == 1 and len(di2) == 1:
+                # Bilinear identity: diff = A.diff ⊗ B.x + A.y ⊗ (B.x − B.y)
+                a_idx, b_idx = di3[0], di2[0]
+                a, b = inputs[a_idx], inputs[b_idx]
+                bx = _as_const(b.x)
+                by = _as_const(b.y)
+                in_d1 = list(inputs)
+                in_d1[a_idx] = a.diff
+                in_d1[b_idx] = bx
+                in_d2 = list(inputs)
+                in_d2[a_idx] = a.y
+                in_d2[b_idx] = bx - by
+                out_d = _onnx_einsum(*in_d1, equation=equation) + _onnx_einsum(*in_d2, equation=equation)
+            else:
+                out_d = out_x - out_y
+            return DiffExpr3(out_x, out_y, out_d)
+        else:
+            raise NotImplementedError(f"Einsum with {len(diff_positions)} DiffExpr inputs is not supported")
 
     expr_positions = [i for i, v in enumerate(inputs) if isinstance(v, Expr)]
     if not expr_positions:

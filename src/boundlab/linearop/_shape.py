@@ -56,7 +56,15 @@ class ReshapeOp(LinearOp):
                 j += 1
 
             if i >= len(input_shape) or j >= len(output_shape):
-                assert i == len(input_shape) and j == len(output_shape)
+                # Consume any remaining size-1 dims on either side
+                while i < len(input_shape) and input_shape[i] == 1:
+                    i += 1
+                while j < len(output_shape) and output_shape[j] == 1:
+                    j += 1
+                if input_win < i or output_win < j:
+                    self.reshape_groups.append((input_win, max(i - 1, input_win), output_win, max(j - 1, output_win)))
+                assert i == len(input_shape) and j == len(output_shape), \
+                    f"ReshapeOp: cannot align {input_shape} -> {output_shape} (i={i}, j={j})"
                 break
 
         super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)

@@ -160,7 +160,7 @@ class LinearOp:
         from boundlab.linearop._einsum import EinsumOp
         if self.flags & LinearOpFlags.IS_PURE_CONTRACTING and self.flags & LinearOpFlags.IS_NON_NEGATIVE:
             tensor = self.forward(torch.ones(self.input_shape))
-            return EinsumOp.from_full(tensor, len(self.input_shape), name=f"norm_input(p={p}) of {self}" if self.name else None)
+            return EinsumOp.from_full(tensor, 0, name=f"norm_input(p={p}) of {self}" if self.name else None)
         raise NotImplementedError(f"LinearOp {self} does not implement norm_output method.")
     
     def norm_output(self, p=1) -> "LinearOp":
@@ -338,7 +338,7 @@ class ComposedOp(LinearOp):
         if self.purify():
             op = self.ops[-1].norm_input(p)
             for other_op in reversed(self.ops[:-1]):
-                op = other_op @ op
+                op = other_op.abs() @ op
             return op
         else:
             return super().norm_input(p)
@@ -347,11 +347,14 @@ class ComposedOp(LinearOp):
         if self.purify():
             op = self.ops[0].norm_output(p)
             for other_op in self.ops[1:]:
-                op = op @ other_op
+                op = op @ other_op.abs()
             return op
         else:
             return super().norm_output(p)
-    
+
+    def purify_with(self, other):
+        """Materialize as EinsumOp and delegate to EinsumOp.purify_with."""
+        return self.einsum_op().purify_with(other)
 
 
 
