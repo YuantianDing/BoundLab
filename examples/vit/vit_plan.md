@@ -1,6 +1,7 @@
 
 1. ~~Add `Conv2d` into the interpreter, using `EinsumOp` to implement `Conv2d` with `kernel_size == stride`.~~ Done — `_onnx_conv` in `src/boundlab/interp/__init__.py` handles `kernel_size == stride` via a 6-D reshape + `_onnx_einsum`.
 2. ~~Enable swapping `EinsumOp` with ops like `GetSlicesOp` and `SetSlicesOp` when the swapping and reduce the size of `EinsumOp`.~~ Done — `GetSliceOp.__matmul__(EinsumOp)` and `SetSliceOp.__rmatmul__(EinsumOp)` in `src/boundlab/linearop/_indices.py` fuse by slicing the einsum tensor along the corresponding output-/input-side tensor dims (bail on mul_dim partial slices). Tests in `tests/test_einsum_slice_fusion.py`.
+   1. Please make sure when `GetSliceOp` meets a `mul` dim, we swap the order of `GetSliceOp` and `EinsumOp` instead of returning `NotImplemented`.
 3. `vit/pruning.py` Implement differential verification on `vit_threshold.py`, leaving `heaviside_pruning` as a future work.
 4. Linearize `heaviside_pruning((_, sy, _), (x, y, d))`:
    1. Let `(x, y, d) -> (x, y - h(-sy) * y, d + h(-sy) * y)`, Only `h(-sy) * y` need to be linearized.
