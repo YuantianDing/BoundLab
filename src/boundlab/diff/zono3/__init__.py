@@ -253,6 +253,7 @@ from . import relu as _relu  # noqa: E402  — registers "relu"
 from . import tanh as _tanh  # noqa: E402  — registers "tanh"
 from . import exp as _exp  # noqa: E402  — registers "exp"
 from . import reciprocal as _reciprocal  # noqa: E402  — registers "reciprocal"
+from . import heaviside as _heaviside  # noqa: E402  — registers "heaviside_pruning"
 
 # ONNX activation op names
 interpret["Relu"] = interpret["relu"]
@@ -300,4 +301,5 @@ __all__ = [
     "diff_bilinear_elementwise",
     "diff_bilinear_matmul",
     "diff_softmax_handler",
+    "diff_heaviside_pruning_handler",
 ]
