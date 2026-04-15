@@ -1297,18 +1297,36 @@ class Zonotope:
         if not return_raw_tensors_separately:
             shape[0] += n_new_error_terms
 
-        t_crit = ((u.exp() - l.exp()) / (u - l)).log()
-        t_crit[u == l] = float('inf')  # Replace NaNs by infinity
-        t_crit[t_crit == float('-inf')] = (0.5 * l + 0.5 * u)[t_crit == float('-inf')]  # Replace -Inf that arise from the log to avg(l, u)
-        # t_crit[t_crit == float('-inf')] = float('+inf')  # Replace -Inf that arise from the log to avg(l, u)
-        t_crit2 = l + 0.95
-        t_opt = torch.min(torch.min(t_crit, t_crit2), u)  # Idea: has to be below L + 1 (and <= U)
+        # Use float64 for exp computations to avoid overflow when bounds are large
+        # (e.g. attention scores in IBP-trained ViTs can reach ±400, making exp() overflow float32).
+        l64, u64 = l.double(), u.double()
+
+        # Clamp upper bound to float64-safe range.
+        # NOTE: this is numerically inexact (unsound) when the true upper bound exceeds
+        # ~709. For IBP-trained ViTs whose attention score bounds far exceed this, the
+        # resulting zonotope bounds are loose but the computation completes without NaN.
+        LOG_MAX_F64 = 700.0
+        u64 = u64.clamp(max=LOG_MAX_F64)
+        # Also clamp l so that l <= u still holds after the above.
+        l64 = l64.clamp(max=u64)
+
+        exp_u = u64.exp()
+        exp_l = l64.exp()
+        # Guard against division by zero on the zero-width (l==u) case.
+        denom = (u64 - l64)
+        denom_safe = denom.clone(); denom_safe[denom == 0] = 1.0
+        t_crit = ((exp_u - exp_l) / denom_safe).log()
+        t_crit[u64 == l64] = float('inf')  # Replace NaNs by infinity
+        t_crit[t_crit == float('-inf')] = (0.5 * l64 + 0.5 * u64)[t_crit == float('-inf')]  # Replace -Inf that arise from the log to avg(l, u)
+        t_crit2 = l64 + 0.95
+        t_opt = torch.min(torch.min(t_crit, t_crit2), u64)
 
         if (t_opt == float('-inf')).any():
-            t_opt = torch.min(torch.min(t_crit, t_crit2), u)  # Idea: has to be below L + 1 (and <= U)
+            t_opt = torch.min(torch.min(t_crit, t_crit2), u64)
 
         # λ = f'(t) = e^t
         lambdas = t_opt.exp()
+        exp_u = u64.exp()  # recompute in case it was dropped
 
         # Final zonotope = line bottom + region above of uncertainty to fit the upper bound
         # Line bottom touches at the point (t, f(t)), therefore line_bottom:   y = λx + b
@@ -1339,29 +1357,26 @@ class Zonotope:
         #    E = 0.5 * (e^t - λt  +  X )
         #    u = 0.5 * (λt - e^t  +  X )
 
-        # V1
-        # NEW_CONSTS_OLD = 0.5 * (t_opt.exp() - lambdas * t_opt + u.exp() - lambdas * u)
-        # NEW_COEFFS_OLD = 0.5 * (lambdas * t_opt - t_opt.exp() + u.exp() - lambdas * u)
+        # All intermediate computations stay in float64 to avoid overflow.
+        # Individual terms like lambdas*(1-t-u) can overflow float32 even when their
+        # sum with exp_u is representable (catastrophic cancellation avoidance).
+        NEW_CONSTS_f64 = 0.5 * (lambdas * (1 - t_opt - u64) + exp_u)
+        NEW_COEFFS_f64 = 0.5 * (lambdas * (t_opt - u64 - 1) + exp_u)
+        # lambdas stays float64 — casting to float32 would overflow for t_opt > ~88.
+        # lambdas_f32 is only used for NEW_COEFFS output; the center/error multiplications
+        # are done in float64 below and cast to float32 only at assignment time.
 
-        # V2 to try to avoid fp problems
-        # NEW_CONSTS = 0.5 * (t_opt.exp() - lambdas * t_opt - lambdas * u)
-        # NEW_CONSTS = 0.5 * (t_opt.exp() - lambdas * (t_opt + u))
-        NEW_CONSTS = 0.5 * (lambdas * (1 - t_opt - u))
-        NEW_CONSTS += 0.5 * u.exp()  # inplace
+        INTERCEPT_f64 = t_opt.exp() - lambdas * t_opt
+        _diff_f64 = (NEW_CONSTS_f64 - INTERCEPT_f64)[different_bool]
+        assert (_diff_f64 >= -1e-4).all(), \
+            f"exp_mark: diff < 0. diff min = {_diff_f64.min()}, " \
+            f"const min = {NEW_CONSTS_f64[different_bool].min()},  intercept.max = {INTERCEPT_f64.max()}"
+        assert (NEW_COEFFS_f64[different_bool] >= -1e-4).all(), \
+            "exp_mark: NEW_COEFFS is negative. min = %f" % NEW_COEFFS_f64[different_bool].min().item()
 
-        # NEW_COEFFS = 0.5 * (lambdas * t_opt - t_opt.exp() - lambdas * u)
-        # NEW_COEFFS = 0.5 * (- t_opt.exp() + lambdas * (t_opt  - u))
-        NEW_COEFFS = 0.5 * (lambdas * (t_opt  - u - 1))
-        NEW_COEFFS += 0.5 * u.exp()  # inplace
-
-        INTERCEPT = (t_opt.exp() - lambdas * t_opt)
-        if not ((NEW_CONSTS - INTERCEPT)[different_bool] >= -1e-4).all():
-            a = 5
-
-        assert ((NEW_CONSTS - INTERCEPT)[different_bool] >= -1e-4).all(), \
-            f"exp_mark: diff < 0. diff min = {(NEW_CONSTS - INTERCEPT)[different_bool].min()}, " \
-            f"const min = {NEW_CONSTS[different_bool].min()},  intercept.max = {INTERCEPT.max()}"
-        assert (NEW_COEFFS[different_bool] >= -1e-4).all(), "exp_mark: NEW_COEFFS is negative. min = %f" % NEW_COEFFS[different_bool].min().item()
+        # Float32 versions for output storage (only NEW_COEFFS needs to be float32 for return)
+        NEW_COEFFS = NEW_COEFFS_f64.float()
+        NEW_COEFFS[equal_bool] = 0
 
         cleanup_memory()
 
@@ -1371,41 +1386,32 @@ class Zonotope:
             # Re-use the input zonotope tensor
             transformed_x = self.zonotope_w
 
-            # Center
-            transformed_x[0] *= lambdas  # inplace
-            transformed_x[0] += NEW_CONSTS  # inplace
+            # Center: compute λ*a0 + b in float64 (lambdas can overflow float32)
+            transformed_x[0] = (lambdas * transformed_x[0].double() + NEW_CONSTS_f64).float()
             transformed_x[0, equal_bool] = l[equal_bool].exp()
 
-            # transformed_x[1:1 + self.num_error_terms] = self.zonotope_w[1:]  # Copy everthing
-            # inplace
-            transformed_x[1:, equal_bool] = 0.0  # But set the error terms of the exact values (l = u) to 0
-            transformed_x[1:] *= lambdas  # Then multiply by lambda. This basically multiplies everything by lambda
+            # Error rows: λ * e_k  (also done in float64 to avoid float32 overflow)
+            transformed_x[1:, equal_bool] = 0.0
+            transformed_x[1:] = (lambdas * transformed_x[1:].double()).float()
 
-            NEW_COEFFS[equal_bool] = 0
             return transformed_x, NEW_COEFFS
         else:
             transformed_x = torch.zeros(shape, device=self.args.device)
 
-            # Step 1) new bias
-            # for the equality case, we put the value 1/x
-            # for the difference case, we put the center λ a0 + (T + B)/2
+            # Step 1) new bias — compute fused λ*a0 + b in float64 then cast to float32
+            transformed_x[0] = (lambdas * self.zonotope_w[0].double() + NEW_CONSTS_f64).float()
             # inplace
-            transformed_x[0] = lambdas * self.zonotope_w[0] + NEW_CONSTS
-            # inplace
-            transformed_x[0, equal_bool] = l[equal_bool].exp()
+            transformed_x[0, equal_bool] = l64[equal_bool].exp().float()
 
-            # Step 2) updated error weights
-            # for the equality case, there are no error terms
-            # for the difference case, we multiply the current error terms by λ
+            # Step 2) updated error weights — also done in float64 to avoid overflow
             import gc; gc.collect(); torch.cuda.empty_cache()
 
             # This is done this way to avoid creating unneeded tensors, which blow up the memory requirement
-            # inplace
-            transformed_x[1:1 + self.num_error_terms] = self.zonotope_w[1:]  # Copy everthing
-            # inplace
-            transformed_x[1:1 + self.num_error_terms, equal_bool] = 0.0      # But set the error terms of the exact values (l = u) to 0
-            # inplace
-            transformed_x[1:1 + self.num_error_terms] *= lambdas             # Then multiply by lambda. This basically multiplies everything by lambda
+            transformed_x[1:1 + self.num_error_terms] = self.zonotope_w[1:]  # Copy everything
+            transformed_x[1:1 + self.num_error_terms, equal_bool] = 0.0      # Zero out equal-case error terms
+            transformed_x[1:1 + self.num_error_terms] = (              # λ * e_k in float64, cast to float32
+                lambdas * transformed_x[1:1 + self.num_error_terms].double()
+            ).float()
 
             # Step 3) new error weights
             # Add the new errors terms efficiently using slicing

@@ -109,7 +109,7 @@ def test_tanh_diff_fallback_plain_expr():
     assert torch.allclose(out_diff.ub(), out_std.ub(), atol=1e-6)
     assert torch.allclose(out_diff.lb(), out_std.lb(), atol=1e-6)
 
-_exp_handler = diff_interpret["exp"]
+_exp_handler = diff_interpret["Exp"]
 
 def test_exp_diff_identical_inputs_sound():
     """When x == y, exp diff bounds contain zero (sound)."""
@@ -153,12 +153,12 @@ def test_exp_diff_fallback_plain_expr():
     torch.manual_seed(30)
     x = _zonotope(torch.randn(4) * 0.5, scale=0.3)
     out_diff = _exp_handler(x)
-    std_handler = zono.interpret["exp"]
+    std_handler = zono.interpret["Exp"]
     out_std = std_handler(x)
     assert torch.allclose(out_diff.ub(), out_std.ub(), atol=1e-6)
     assert torch.allclose(out_diff.lb(), out_std.lb(), atol=1e-6)
 
-_reciprocal_handler = diff_interpret["reciprocal"]
+_reciprocal_handler = diff_interpret["Reciprocal"]
 
 def test_reciprocal_diff_identical_inputs_sound():
     """When x == y (both positive), reciprocal diff bounds contain zero."""
@@ -205,7 +205,7 @@ def test_reciprocal_diff_fallback_plain_expr():
     c = torch.rand(4) * 2 + 1.0
     x = _zonotope(c, scale=0.2)
     out_diff = _reciprocal_handler(x)
-    std_handler = zono.interpret["reciprocal"]
+    std_handler = zono.interpret["Reciprocal"]
     out_std = std_handler(x)
     assert torch.allclose(out_diff.ub(), out_std.ub(), atol=1e-6)
     assert torch.allclose(out_diff.lb(), out_std.lb(), atol=1e-6)

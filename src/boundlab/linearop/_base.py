@@ -339,30 +339,28 @@ class ComposedOp(LinearOp):
                 
     
     def norm_input(self, p=1):
+        assert p == 1
         if self.purify():
             op = self.ops[-1].norm_input(p)
             for other_op in reversed(self.ops[:-1]):
-                assert op.input_shape == torch.Size([]), f"{self}"
-                op = other_op @ op
-                
+                op = other_op.abs() @ op
             return op
         else:
             return super().norm_input(p)
     
     def norm_output(self, p=1):
+        assert p == 1
         if self.purify():
             op = self.ops[0].norm_output(p)
             for other_op in self.ops[1:]:
-                op = op @ other_op
+                op = op @ other_op.abs()
             return op
         else:
             return super().norm_output(p)
 
-    # Fallback purification hook used by SumOp.purify.  ComposedOp does
-    # not currently fuse with other ops, so we simply signal no change.
     def purify_with(self, other):
-        return (self, other)
-    
+        """Materialize as EinsumOp and delegate to EinsumOp.purify_with."""
+        return self.einsum_op().purify_with(other)
 
 
 
@@ -381,7 +379,7 @@ class SumOp(LinearOp):
         inner = self.ops[0]
         outer = self.ops[0]
         assert all(op.input_shape == inner.input_shape and op.output_shape == inner.output_shape for op in self.ops), \
-            f"Shape mismatch in SumOp: {inner.input_shape}->{inner.output_shape} vs {self.ops[1].input_shape}->{self.ops[1].output_shape}"
+            f"Shape mismatch in SumOp: {self.ops} {[op.input_shape for op in self.ops]} -> {[op.output_shape for op in self.ops]}"
         super().__init__(inner.input_shape, outer.output_shape)
 
         if all(op.flags & LinearOpFlags.IS_NON_NEGATIVE for op in self.ops):
@@ -411,14 +409,14 @@ class SumOp(LinearOp):
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
         from boundlab.linearop._einsum import EinsumOp
         ops = [op @ other for op in self.ops]
-        if not all(isinstance(op, ComposedOp) for op in ops):
+        if not any(isinstance(op, ComposedOp) for op in ops):
             return sum(ops, start=ZeroOp(other.input_shape, self.output_shape))
         return NotImplemented
 
     def __rmatmul__(self, other):
         from boundlab.linearop._einsum import EinsumOp
         ops = [other @ op for op in self.ops]
-        if not all(isinstance(op, ComposedOp) for op in ops):
+        if not any(isinstance(op, ComposedOp) for op in ops):
             return sum(ops, start=ZeroOp(self.input_shape, other.output_shape))
         return super().__rmatmul__(other)
     

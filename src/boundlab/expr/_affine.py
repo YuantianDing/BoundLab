@@ -9,7 +9,7 @@ previous design.
 """
 
 import sys
-from typing import Literal
+from typing import Literal, Union
 
 import torch
 
@@ -136,10 +136,10 @@ class AffineSum(Expr):
     def symmetric_decompose(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
         """Decompose this AffineSum into a constant part and a zero-constant AffineSum."""
         if self.constant is None:
-            return self, None
+            return self, ConstVal(self.shape)
         const_part = ConstVal(self.constant)
         if not self.children_dict:
-            return const_part, None
+            return const_part, ConstVal(self.shape)
         non_const_part = AffineSum(*zip(self.children_dict.values(), self.children_dict.keys()))
         return const_part, non_const_part
 
@@ -151,14 +151,19 @@ class ConstVal(AffineSum):
     absorbed via eager contraction.
     """
 
-    def __init__(self, value=None, name=None, *_pairs, const=None):
+    def __init__(self, value: Union[torch.Tensor, torch.Size], name=None, *_pairs, const=None):
         # Three call patterns:
         # 1. ConstVal(tensor[, name])         — direct construction
-        # 2. ConstVal(const=tensor)           — from AffineSum(const=x), no pairs
+        # 2. ConstVal(const=tensor)           — from ConstVal(x), no pairs
         # 3. ConstVal((op,ch), ..., const=x)  — from AffineSum(*pairs, const=x),
         #                                       all-ConstVal children; value is
         #                                       the first pair tuple, _pairs are the rest
-        if isinstance(value, tuple) or _pairs:
+        if isinstance(value, (torch.Size, list)):
+            # Pattern 2: routed from AffineSum with const= but no pairs
+            const = torch.zeros(value) if const is None else const
+            value = None
+            AffineSum.__init__(self, const=const)
+        elif isinstance(value, tuple) or _pairs:
             # Pattern 3: routed from AffineSum with pairs
             all_pairs = ((value,) + _pairs) if value is not None else _pairs
             AffineSum.__init__(self, *all_pairs, const=const)

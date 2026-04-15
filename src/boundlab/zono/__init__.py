@@ -62,7 +62,7 @@ class ZonoBounds:
     
     def __post_init__(self):
         if isinstance(self.error_coeffs, torch.Tensor):
-            self.error_coeffs = EinsumOp.from_hardmard(self.error_coeffs, len(self.bias.shape))
+            self.error_coeffs = EinsumOp.from_hardmard(self.error_coeffs)
 
 
 def _register_linearizer(name: str):

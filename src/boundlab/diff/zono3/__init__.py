@@ -250,7 +250,7 @@ def _register_linearizer(name: str):
 
 from . import relu as _relu  # noqa: E402  — registers "relu"
 from . import tanh as _tanh  # noqa: E402  — registers "tanh"
-from . import exp as _exp  # noqa: E402  — registers "exp"
+from . import exp as _exp  # noqa: E402  — registers "Exp"
 from . import reciprocal as _reciprocal  # noqa: E402  — registers "Reciprocal"
 from . import heaviside as _heaviside  # noqa: E402  — registers "HeavisidePruning"
 

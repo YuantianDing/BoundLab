@@ -75,7 +75,7 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
         x.diff,
     )
 
-    exp_handler = interpret["exp"]
+    exp_handler = interpret["Exp"]
     exp_out = exp_handler(x_shifted)
 
     # Sum along softmax dim using mean * n

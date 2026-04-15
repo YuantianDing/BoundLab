@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 r"""Utility Functions for BoundLab
 
 This module provides helper functions used throughout the BoundLab framework.
@@ -12,7 +14,10 @@ Examples
 from torch._subclasses.fake_tensor import FakeTensorMode
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, TypeAlias, TypeVar as _TypeVar, Union
+from typing import TYPE_CHECKING, Callable, TypeAlias, TypeVar as _TypeVar, Union
+
+if TYPE_CHECKING:
+    from boundlab.expr import Expr
 
 import torch
 import copy
@@ -41,6 +46,12 @@ def merge_name(name1, op: str, name2) -> str | None:
         return f"({name1} {op} {name2})"
     return None
 
+def is0(input) -> bool:
+    """Helper function to check if a tensor is identically zero."""
+    if isinstance(input, int):
+        return input == 0
+    else:
+        return False
 def not0(input) -> bool:
     """Helper function to check if a tensor is not identically zero."""
     if isinstance(input, int):
@@ -207,3 +218,26 @@ class EQCondition:
 def current_fake_mode():
     mode = torch.utils._python_dispatch._get_current_dispatch_mode()
     return mode if isinstance(mode, FakeTensorMode) else None
+
+def pairwise_diff(x: Expr, dim: int = -1) -> Expr:
+    """Build ``d[..., i, j, ...] = x[..., j, ...] - x[..., i, ...]`` as a
+    single :class:`EinsumOp` applied to *x*.
+
+    Using one LinearOp (rather than two broadcasted terms combined via
+    subtraction) avoids the ``SumOp`` merging two structurally similar
+    :class:`ExpandOp` s that would otherwise cancel the noise contribution.
+    """
+    if dim < 0:
+        dim += len(x.shape)
+    N = x.shape[dim]
+    l = x.unsqueeze(dim).expand_on(dim, N)
+    r = x.unsqueeze(dim+1).expand_on(dim + 1, N)
+    return r - l
+
+def remove_diagonal(tensor: Union[torch.Tensor, Expr], dim1: int=0, dim2: int=1) -> Union[torch.Tensor, Expr]:
+    """Remove the diagonal along the specified dims, returning a tensor with one fewer dimension."""
+    assert dim1 == 0 and dim2 == 1
+    assert tensor.shape[0] == tensor.shape[1]
+    N = tensor.shape[0]
+    tensor = tensor.reshape(N * N, -1)
+    return tensor[1:].reshape(N-1, N+1, -1)[:, :-1].reshape(N, N-1, -1)

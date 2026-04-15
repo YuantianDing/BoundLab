@@ -115,13 +115,15 @@ class EinsumOp(LinearOp):
         return EinsumOp(-self.tensor, self.input_dims, self.output_dims, name=f"-{self}" if self.name and self.name else None)
         
     @staticmethod
-    def from_hardmard(tensor: torch.Tensor, n_input_dims: int, name=None) -> "EinsumOp":
+    def from_hardmard(tensor: torch.Tensor, n_input_dims: int = None, name=None) -> "EinsumOp":
         """Create an EinsumOp for Hadamard-style multiplication with ``tensor``.
 
         Note:
             The constructor name keeps the historical ``hardmard`` spelling for
             backward compatibility.
         """
+        if n_input_dims is None:
+            n_input_dims = tensor.dim()
         output_dims = list(range(tensor.dim()))
         input_dims = output_dims[-n_input_dims:]
         return EinsumOp(tensor, input_dims, output_dims, name=name)
@@ -197,6 +199,7 @@ class EinsumOp(LinearOp):
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose this EinsumOp with another LinearOp: (self ∘ other)(x) = self(other(x))."""
         if self.is_full():
+            assert self.tensor.dim() >= len(other.output_shape), "What's wrong?"
             op = self.permute_for_input()
             idims = op.tensor.dim() - len(op.input_dims)
             assert all(a == b for a, b in zip(op.input_dims, range(idims, op.tensor.dim()))), "Full EinsumOp should have input_dims permuted to the end."
@@ -214,6 +217,7 @@ class EinsumOp(LinearOp):
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose another LinearOp with this EinsumOp: (other ∘ self)(x) = other(self(x))."""
         if self.is_full():
+            assert self.tensor.dim() >= len(other.output_shape), "What's wrong?"
             op = self.permute_for_output()
             odims = len(op.output_dims)
             assert all(a == b for a, b in zip(op.output_dims, range(odims))), "Full EinsumOp should have output_dims permuted to the end."

@@ -171,7 +171,7 @@ def test_exp_linearizer_sound():
     scale = 0.3
     x_expr = _make_input(center_val, scale=scale)
 
-    exp_handler = zono.interpret["exp"]
+    exp_handler = zono.interpret["Exp"]
     y_expr = exp_handler(x_expr)
     ub, lb = y_expr.ublb()
 
@@ -193,7 +193,7 @@ def test_reciprocal_linearizer_sound():
     scale = 0.2  # perturbation won't make it negative
     x_expr = _make_input(center_val, scale=scale)
 
-    recip_handler = zono.interpret["reciprocal"]
+    recip_handler = zono.interpret["Reciprocal"]
     y_expr = recip_handler(x_expr)
     ub, lb = y_expr.ublb()
 

@@ -73,4 +73,4 @@ def test_tiny_pruned_mlp_diff_bounds_sound():
 
 
 def test_heaviside_handler_registered():
-    assert "heaviside_pruning" in diff_interpret.dispatcher
+    assert "HeavisidePruning" in diff_interpret.dispatcher

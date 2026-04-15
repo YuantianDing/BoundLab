@@ -48,6 +48,10 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     >>> C.shape
     torch.Size([2, 4])
     """
+    if len(A.shape) == 1:
+        A = A.unsqueeze(0)
+    elif len(B.shape) == 1:
+        B = B.unsqueeze(1)
     assert len(A.shape) >= 2 and len(B.shape) >= 2, \
         f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
     assert A.shape[-1] == B.shape[-2], \

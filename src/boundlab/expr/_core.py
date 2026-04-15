@@ -13,6 +13,7 @@ from numpy import indices
 import torch
 import enum
 
+from boundlab import utils
 from boundlab.linearop import ScalarOp
 from boundlab.linearop._base import LinearOp
 
@@ -118,7 +119,7 @@ class Expr:
         if isinstance(other, torch.Tensor):
             if other.shape != self.shape:
                 other = other.expand(self.shape)
-            other = AffineSum(const=other)
+            other = ConstVal(other)
         if isinstance(other, Expr):
             assert self.shape == other.shape
             return AffineSum((ScalarOp(1.0, self.shape), self), (ScalarOp(1.0, other.shape), other))
@@ -133,7 +134,7 @@ class Expr:
         if isinstance(other, torch.Tensor):
             if other.shape != self.shape:
                 other = other.expand(self.shape)
-            other = AffineSum(const=other)
+            other = ConstVal(other)
         if isinstance(other, Expr):
             return AffineSum((ScalarOp(1.0, other.shape), other), (ScalarOp(1.0, self.shape), self))
         return NotImplemented
@@ -325,6 +326,7 @@ class Expr:
     def expand_on(self, dim, size) -> "Expr":
         from boundlab.linearop import ExpandOp
         sizes = list(self.shape)
+        assert sizes[dim] == 1, f"Can only expand on size-1 dim, but dim {dim} has size {sizes[dim]}"
         sizes[dim] = size
         return self._apply_op(ExpandOp(self.shape, sizes))
 

@@ -224,6 +224,12 @@ class DiffExpr3:
     y: Expr
     diff: Expr
     def __post_init__(self):
+        if isinstance(self.x, torch.Tensor):
+            self.x = expr.ConstVal(self.x)
+        if isinstance(self.y, torch.Tensor):
+            self.y = expr.ConstVal(self.y)
+        if isinstance(self.diff, torch.Tensor):
+            self.diff = expr.ConstVal(self.diff)
         assert isinstance(self.x, Expr) and isinstance(self.y, Expr), "DiffExpr2 components must be Expr instances"
         assert isinstance(self.diff, Expr), "DiffExpr3 diff component must be an Expr instance"
 

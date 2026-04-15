@@ -90,4 +90,4 @@ class LpEpsilon(Expr):
     def symmetric_decompose(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
         """Decompose this LpEpsilon into a constant part and a zero-constant expression."""
         from boundlab.expr._affine import ConstVal
-        return ConstVal(None), self
+        return ConstVal(self.shape), self
