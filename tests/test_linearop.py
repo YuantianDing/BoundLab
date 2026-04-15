@@ -555,8 +555,18 @@ class TestGetSliceOp:
     def test_backward_vs_vjp(self):
         torch.manual_seed(42)
         input_shape = torch.Size([5, 8, 10])
-        indices = (slice(1, 4), 3, slice(2, 8))
-        op = GetSliceOp(input_shape, indices)
+        slices = [[slice(1, 4)], [slice(0, 8)], [slice(2, 8)]]
+        op = GetSliceOp(input_shape, slices)
+
+        x = torch.randn(input_shape)
+        grad = torch.randn(op.output_shape)
+        check_backward_vs_vjp(op, x, grad)
+
+    def test_multi_slice_backward_vs_vjp(self):
+        torch.manual_seed(43)
+        input_shape = torch.Size([10, 6])
+        slices = [[slice(1, 3), slice(5, 8)], [slice(0, 6)]]
+        op = GetSliceOp(input_shape, slices)
 
         x = torch.randn(input_shape)
         grad = torch.randn(op.output_shape)
@@ -566,12 +576,11 @@ class TestGetSliceOp:
 class TestSetSliceOp:
     def test_backward_vs_vjp(self):
         torch.manual_seed(42)
-        input_shape = torch.Size([3, 6])
         output_shape = torch.Size([5, 8])
-        indices = (slice(1, 4), slice(1, 7))
-        op = SetSliceOp(indices, input_shape, output_shape)
+        slices = [[slice(1, 4)], [slice(1, 7)]]
+        op = SetSliceOp(output_shape, slices)
 
-        x = torch.randn(input_shape)
+        x = torch.randn(op.input_shape)
         grad = torch.randn(op.output_shape)
         check_backward_vs_vjp(op, x, grad)
 
@@ -626,12 +635,22 @@ class TestGetIndicesOp:
     def test_backward_vs_vjp(self):
         torch.manual_seed(42)
         input_shape = torch.Size([5, 6])
-        output_shape = torch.Size([3, 4])
-        indices = (
-            torch.randint(0, 5, output_shape),
-            torch.randint(0, 6, output_shape),
-        )
-        op = GetIndicesOp(indices, input_shape, output_shape)
+        added_shape = torch.Size([3, 4])
+        dim = 0
+        indices = torch.randint(0, 5, added_shape)
+        op = GetIndicesOp(input_shape, dim, indices, added_shape)
+
+        x = torch.randn(input_shape)
+        grad = torch.randn(op.output_shape)
+        check_backward_vs_vjp(op, x, grad)
+
+    def test_backward_vs_vjp_dim1(self):
+        torch.manual_seed(43)
+        input_shape = torch.Size([4, 8, 3])
+        added_shape = torch.Size([5])
+        dim = 1
+        indices = torch.randint(0, 8, added_shape)
+        op = GetIndicesOp(input_shape, dim, indices, added_shape)
 
         x = torch.randn(input_shape)
         grad = torch.randn(op.output_shape)
@@ -641,15 +660,25 @@ class TestGetIndicesOp:
 class TestSetIndicesOp:
     def test_backward_vs_vjp(self):
         torch.manual_seed(42)
-        input_shape = torch.Size([3, 4])
         output_shape = torch.Size([5, 6])
-        indices = (
-            torch.randint(0, 5, input_shape),
-            torch.randint(0, 6, input_shape),
-        )
-        op = SetIndicesOp(indices, input_shape, output_shape)
+        added_shape = torch.Size([3, 4])
+        dim = 0
+        indices = torch.randint(0, 5, added_shape)
+        op = SetIndicesOp(output_shape, dim, indices, added_shape)
 
-        x = torch.randn(input_shape)
+        x = torch.randn(op.input_shape)
+        grad = torch.randn(op.output_shape)
+        check_backward_vs_vjp(op, x, grad)
+
+    def test_backward_vs_vjp_dim1(self):
+        torch.manual_seed(43)
+        output_shape = torch.Size([4, 8, 3])
+        added_shape = torch.Size([5])
+        dim = 1
+        indices = torch.randint(0, 8, added_shape)
+        op = SetIndicesOp(output_shape, dim, indices, added_shape)
+
+        x = torch.randn(op.input_shape)
         grad = torch.randn(op.output_shape)
         check_backward_vs_vjp(op, x, grad)
 

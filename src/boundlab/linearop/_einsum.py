@@ -12,7 +12,7 @@ import torch
 from boundlab import utils
 from boundlab.linearop._base import LinearOp, ComposedOp, ScalarOp, SumOp
 from boundlab.utils import merge_name, EQCondition
-from boundlab.linearop._shape import ExpandOp, PermuteOp
+from boundlab.linearop._permute import PermuteOp
 from boundlab.utils import merge_name
 import warnings
 

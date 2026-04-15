@@ -320,15 +320,20 @@ class Expr:
         return self._apply_op(NarrowOp(self.shape, dim, start, length))
 
     def expand(self, *sizes) -> "Expr":
-        from boundlab.linearop import ExpandOp
-        return self._apply_op(ExpandOp(self.shape, sizes))
+        from boundlab.linearop import ExpandOp, UnsqueezeOp
+        n_new = len(sizes) - len(self.shape)
+        result = self
+        # Add leading size-1 dims if needed
+        for _ in range(n_new):
+            result = result.unsqueeze(0)
+        return result._apply_op(ExpandOp(result.shape, torch.Size(sizes)))
     
     def expand_on(self, dim, size) -> "Expr":
         from boundlab.linearop import ExpandOp
         sizes = list(self.shape)
         assert sizes[dim] == 1, f"Can only expand on size-1 dim, but dim {dim} has size {sizes[dim]}"
         sizes[dim] = size
-        return self._apply_op(ExpandOp(self.shape, sizes))
+        return self._apply_op(ExpandOp(self.shape, torch.Size(sizes)))
 
     def repeat(self, *sizes) -> "Expr":
         from boundlab.linearop import RepeatOp
@@ -351,24 +356,28 @@ class Expr:
         return self._apply_op(DiagOp(self.shape, diagonal))
 
     def __getitem__(self, indices) -> "Expr":
-        from boundlab.linearop import GetItemOp, GetIndicesOp
+        from boundlab.linearop import GetItemOp
         if not isinstance(indices, tuple):
             indices = (indices,)
         if all(isinstance(idx, slice) or isinstance(idx, int) for idx in indices):
             return self._apply_op(GetItemOp(self.shape, indices))
-        elif all(isinstance(idx, torch.Tensor) and idx.dtype == torch.bool for idx in indices):
-            return self._apply_op(GetIndicesOp(self.shape, indices))
         raise ValueError("Invalid indices for item selection")
 
     def zeros_set(self, output_shape) -> Callable[[tuple], "Expr"]:
-        from boundlab.linearop import SetSliceOp, SetIndicesOp
+        from boundlab.linearop import SetSliceOp, make_set_slices, get_int_dims, UnsqueezeOp
         def zeros_set(indices):
             if not isinstance(indices, tuple):
                 indices = (indices,)
             if all(isinstance(idx, slice) or isinstance(idx, int) for idx in indices):
-                return self._apply_op(SetSliceOp(indices, self.shape, output_shape))
-            elif all(isinstance(idx, torch.Tensor) and idx.dtype == torch.bool for idx in indices):
-                return self._apply_op(SetIndicesOp(indices, self.shape, output_shape))
+                int_dims = get_int_dims(indices)
+                # First unsqueeze for any int dims (they will be embedded as length-1)
+                expr = self
+                for i, dim in enumerate(sorted(int_dims)):
+                    adjusted_dim = dim - i
+                    expr = expr.unsqueeze(adjusted_dim)
+                # Now make the slices for the full-dim version
+                slices = make_set_slices(output_shape, indices)
+                return expr._apply_op(SetSliceOp(output_shape, slices))
             else:
                 raise ValueError("Invalid indices for zero setting")
         return zeros_set

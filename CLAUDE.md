@@ -19,8 +19,13 @@ src/boundlab/
 │   ├── __init__.py      # Exports all LinearOp types + convenience aliases (NarrowOp, SelectOp, GetItemOp, PadOp)
 │   ├── _base.py         # LinearOp base, ComposedOp, SumOp, ScalarOp, ZeroOp
 │   ├── _einsum.py       # EinsumOp (general tensor-linear map via Einstein notation)
-│   ├── _shape.py        # Shape ops: ReshapeOp, FlattenOp, PermuteOp, TransposeOp, ExpandOp, RepeatOp, TileOp, FlipOp, RollOp, DiagOp, etc.
-│   └── _indices.py      # Indexing ops: GatherOp, ScatterOp, GetSliceOp, SetSliceOp, GetIndicesOp, SetIndicesOp
+│   ├── _reshape.py      # ReshapeOp (base), FlattenOp, UnflattenOp, SqueezeOp, UnsqueezeOp (subclasses)
+│   ├── _permute.py      # PermuteOp, TransposeOp (unchanged)
+│   ├── _expand.py       # ExpandOp (factory → EinsumOp with ones template tensor)
+│   ├── _slicing.py      # GetSliceOp, SetSliceOp (structured list[list[slice]] API)
+│   ├── _indexing.py     # GetIndicesOp, SetIndicesOp (dim-based index tensor API)
+│   ├── _shape.py        # Remaining shape ops: RepeatOp, TileOp, FlipOp, RollOp, DiagOp + re-exports
+│   └── _indices.py      # GatherOp, ScatterOp, convenience constructors + re-exports
 ├── zono/                # Zonotope-based abstract interpretation
 │   ├── __init__.py      # ZonoBounds, _register_linearizer, interpret (Interpreter instance)
 │   ├── relu.py          # relu_linearizer (triangle relaxation)
@@ -53,11 +58,15 @@ src/boundlab/
 ### Linear Operators (`boundlab.linearop`)
 - **LinearOp**: Base class with forward/backward/vforward/vbackward, composition (`@`), addition (`+`)
 - **EinsumOp**: General tensor-linear map via Einstein notation
+- **ExpandOp**: Factory that returns EinsumOp with ones template tensor; `len(input_shape) == len(output_shape)` enforced (extra dims handled via UnsqueezeOp composition)
 - **ComposedOp**: Composition of linear maps (`outer ∘ inner`)
 - **SumOp**: Sum of linear maps with matching shapes
 - **ScalarOp, ZeroOp**: Scalar multiplication and zero operators
-- Shape ops: ReshapeOp, FlattenOp, PermuteOp, TransposeOp, ExpandOp, RepeatOp, etc.
-- Indexing ops: GatherOp, ScatterOp, GetSliceOp, SetSliceOp, etc.
+- Reshape ops (all subclasses of ReshapeOp): ReshapeOp, FlattenOp, UnflattenOp, SqueezeOp, UnsqueezeOp
+- Permute ops: PermuteOp, TransposeOp (unchanged)
+- Slicing ops: GetSliceOp(`input_shape, slices: list[list[slice]]`), SetSliceOp(`output_shape, slices: list[list[slice]]`)
+- Indexing ops: GetIndicesOp(`input_shape, dim, indices, added_shape`), SetIndicesOp(`output_shape, dim, indices, added_shape`)
+- Other: RepeatOp, TileOp, FlipOp, RollOp, DiagOp, GatherOp, ScatterOp
 
 ### Zonotopes (`boundlab.zono`)
 Zonotope representation: `Z = c + G ε` where c is center, G is generator matrix, ε ∈ [-1, 1]^m
