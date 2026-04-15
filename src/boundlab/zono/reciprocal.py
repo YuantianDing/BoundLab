@@ -12,7 +12,7 @@ from boundlab.linearop._indices import SetIndicesOp
 from . import ZonoBounds, _register_linearizer
 
 
-@_register_linearizer("reciprocal")
+@_register_linearizer("Reciprocal")
 def reciprocal_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Minimal-area reciprocal relaxation (DeepT, Section 4.6).
 

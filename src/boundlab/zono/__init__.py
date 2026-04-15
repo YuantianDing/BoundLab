@@ -23,7 +23,7 @@ import dataclasses
 import torch
 
 from boundlab import expr
-from boundlab.expr._affine import AffineSum
+from boundlab.expr._affine import AffineSum, ConstVal
 from boundlab.expr._core import Expr
 from boundlab.expr._var import LpEpsilon
 from boundlab.interp import ONNX_BASE_INTERPRETER, Interpreter
@@ -68,6 +68,8 @@ class ZonoBounds:
 def _register_linearizer(name: str):
     def decorator(linearizer: callable):
         def handler(*exprs: Expr) -> Expr:
+            if all(isinstance(e, ConstVal) for e in exprs):
+                return NotImplemented
             ubs_lbs = [e.ublb() for e in exprs]
             bounds = linearizer(*[t for ub, lb in ubs_lbs for t in (ub, lb)])
             assert all(w.shape == e.shape for w, e in zip(bounds.input_weights, exprs)), \

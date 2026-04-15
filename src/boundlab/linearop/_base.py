@@ -146,7 +146,7 @@ class LinearOp:
             ``NotImplemented`` for operators that only support implicit
             application.
         """
-        warnings.warn(f"LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.", stacklevel=2)
+        # warnings.warn(f"LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.", stacklevel=2)
         return self.force_jacobian()
     
     def abs(self) -> "LinearOp":
@@ -160,11 +160,15 @@ class LinearOp:
         from boundlab.linearop._einsum import EinsumOp
         if self.flags & LinearOpFlags.IS_PURE_CONTRACTING and self.flags & LinearOpFlags.IS_NON_NEGATIVE:
             tensor = self.forward(torch.ones(self.input_shape))
-            return EinsumOp.from_full(tensor, len(self.input_shape), name=f"norm_input(p={p}) of {self}" if self.name else None)
-        raise NotImplementedError(f"LinearOp {self} does not implement norm_output method.")
+            return EinsumOp.from_full(tensor, 0, name=f"norm_input(p={p}) of {self}" if self.name else None)
+        raise NotImplementedError(f"LinearOp {self} does not implement norm_input method.")
     
     def norm_output(self, p=1) -> "LinearOp":
         """Return a LinearOp that computes the norm over the output dimensions, if supported."""
+        if self.flags & LinearOpFlags.IS_PURE_EXPANDING and self.flags & LinearOpFlags.IS_NON_NEGATIVE:
+            tensor = self.backward(torch.ones(self.output_shape))
+            from boundlab.linearop._einsum import EinsumOp
+            return EinsumOp.from_full(tensor, len(self.input_shape), name=f"norm_output(p={p}) of {self}" if self.name else None)
         raise NotImplementedError(f"LinearOp {self} does not implement norm_output method.")
     
     def __neg__(self):
@@ -338,7 +342,9 @@ class ComposedOp(LinearOp):
         if self.purify():
             op = self.ops[-1].norm_input(p)
             for other_op in reversed(self.ops[:-1]):
+                assert op.input_shape == torch.Size([]), f"{self}"
                 op = other_op @ op
+                
             return op
         else:
             return super().norm_input(p)
@@ -351,6 +357,11 @@ class ComposedOp(LinearOp):
             return op
         else:
             return super().norm_output(p)
+
+    # Fallback purification hook used by SumOp.purify.  ComposedOp does
+    # not currently fuse with other ops, so we simply signal no change.
+    def purify_with(self, other):
+        return (self, other)
     
 
 

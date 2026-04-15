@@ -212,6 +212,8 @@ class ConstVal(AffineSum):
         return super().__rsub__(other)
     
     def __truediv__(self, other):
+        if isinstance(other, (int, float)):
+            other = torch.tensor(other, dtype=self.get_const().dtype, device=self.get_const().device)
         if isinstance(other, torch.Tensor):
             return ConstVal(self.get_const() / other)
         elif isinstance(other, ConstVal):
@@ -219,6 +221,8 @@ class ConstVal(AffineSum):
         return super().__truediv__(other)
     
     def __rtruediv__(self, other):
+        if isinstance(other, (int, float)):
+            other = torch.tensor(other, dtype=self.get_const().dtype, device=self.get_const().device)
         if isinstance(other, torch.Tensor):
             return ConstVal(other / self.get_const())
         elif isinstance(other, ConstVal):
@@ -229,6 +233,8 @@ class ConstVal(AffineSum):
         return ConstVal(abs(self.get_const()))
         
     def __mul__(self, other):
+        if isinstance(other, (int, float)):
+            other = torch.tensor(other, dtype=self.get_const().dtype, device=self.get_const().device)
         if isinstance(other, torch.Tensor):
             return ConstVal(self.get_const() * other)
         elif isinstance(other, ConstVal):

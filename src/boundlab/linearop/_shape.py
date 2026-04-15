@@ -117,7 +117,7 @@ class ReshapeOp(LinearOp):
         return super().__rmatmul__(other)
 
     def __str__(self):
-        return f"reshape({list(self.input_shape)} -> {list(self.target_shape)})"
+        return f"<reshape {list(self.input_shape)} -> {list(self.target_shape)}>"
 
 
 class FlattenOp(LinearOp):
@@ -138,7 +138,7 @@ class FlattenOp(LinearOp):
         return grad.unflatten(self.start_dim, self.original_sizes)
 
     def __str__(self):
-        return f"flatten({self.start_dim}, {self.end_dim})"
+        return f"<flatten {self.start_dim} {self.end_dim}>"
 
 
 class UnflattenOp(LinearOp):
@@ -159,7 +159,7 @@ class UnflattenOp(LinearOp):
         return grad.flatten(self.dim, self.end_dim)
 
     def __str__(self):
-        return f"unflatten({self.dim}, {list(self.sizes)})"
+        return f"<unflatten {self.dim} {list(self.sizes)}>"
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,7 @@ class PermuteOp(LinearOp):
         return super().__rmatmul__(other)
 
     def __str__(self):
-        return f"permute({self.dims})"
+        return f"<permute {self.dims}>"
 
 class TransposeOp(PermuteOp):
     """Swap two dimensions of the input tensor — special case of PermuteOp."""
@@ -225,7 +225,7 @@ class TransposeOp(PermuteOp):
         super().__init__(input_shape, tuple(dims))
 
     def __str__(self):
-        return f"transpose({self.dim0}, {self.dim1})"
+        return f"<transpose {self.dim0} {self.dim1}>"
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ class SqueezeOp(LinearOp):
         return super().__rmatmul__(other)
 
     def __str__(self):
-        return f"squeeze({self.dim})"
+        return f"<squeeze {self.dim}>"
 
 
 class UnsqueezeOp(LinearOp):
@@ -321,7 +321,7 @@ class UnsqueezeOp(LinearOp):
         """Fuse unsqueeze @ einsum: insert a new size-1 output dim."""
         from ._einsum import EinsumOp
         if isinstance(other, EinsumOp):
-            assert self.input_shape == other.output_shape
+            assert self.input_shape == other.output_shape, f"{self}, {other}"
             op = other.unsqueeze_output(self.dim)
             return EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(self, "@", other))
         return NotImplemented
@@ -336,7 +336,7 @@ class UnsqueezeOp(LinearOp):
         return super().__rmatmul__(other)
 
     def __str__(self):
-        return f"unsqueeze({self.dim})"
+        return f"<unsqueeze {list(self.input_shape)} {self.dim}>"
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +463,7 @@ class ExpandOp(LinearOp):
         return super().__rmatmul__(other)
 
     def __str__(self):
-        return f"expand({list(self.input_shape)} -> {list(self.sizes)})"
+        return f"<expand {list(self.input_shape)} -> {list(self.sizes)}>"
 
 
 class RepeatOp(LinearOp):
@@ -491,7 +491,7 @@ class RepeatOp(LinearOp):
         return grad.reshape(self.input_shape)
 
     def __str__(self):
-        return f"repeat({list(self.sizes)})"
+        return f"<repeat {list(self.sizes)}>"
 
 
 class TileOp(RepeatOp):
@@ -505,7 +505,7 @@ class TileOp(RepeatOp):
         super().__init__(input_shape, sizes)
 
     def __str__(self):
-        return f"tile({list(self.sizes)})"
+        return f"<tile {list(self.sizes)}>"
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +526,7 @@ class FlipOp(LinearOp):
         return grad.flip(self.dims)
 
     def __str__(self):
-        return f"flip({self.dims})"
+        return f"<flip {self.dims}>"
 
 
 class RollOp(LinearOp):
@@ -549,7 +549,7 @@ class RollOp(LinearOp):
         return grad.roll(self._inv_shifts, self.dims)
 
     def __str__(self):
-        return f"roll({self.shifts}, {self.dims})"
+        return f"<roll {self.shifts} {self.dims}>"
 
 
 # ---------------------------------------------------------------------------
@@ -586,5 +586,4 @@ class DiagOp(LinearOp):
             return result
 
     def __str__(self):
-        return f"diag({self.diagonal})"
-
+        return f"<diag {self.diagonal}>"

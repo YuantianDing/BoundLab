@@ -98,11 +98,12 @@ class Expr:
         """Return string representation with child strings substituted."""
         return f"{self.__class__.__name__}({', '.join(children_str)})"
 
+    def __repr__(self):
+        width = self.bound_width().max().item()
+        return f"Expr({width})"
+    
     def __str__(self):
         return "bl.Expr {\n" + expr_pretty_print(self, indent=4) + "\n}"
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}(id={self.id}, flags={self.flags})"
 
     # ------------------------------------------------------------------
     # Arithmetic operators — all produce Linear with EinsumOp ops
@@ -319,6 +320,12 @@ class Expr:
 
     def expand(self, *sizes) -> "Expr":
         from boundlab.linearop import ExpandOp
+        return self._apply_op(ExpandOp(self.shape, sizes))
+    
+    def expand_on(self, dim, size) -> "Expr":
+        from boundlab.linearop import ExpandOp
+        sizes = list(self.shape)
+        sizes[dim] = size
         return self._apply_op(ExpandOp(self.shape, sizes))
 
     def repeat(self, *sizes) -> "Expr":

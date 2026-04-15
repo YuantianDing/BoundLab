@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import torch
 
+from boundlab import expr
 from boundlab.expr._core import Expr
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.prop import ublb
@@ -209,12 +210,12 @@ def diff_heaviside_pruning_handler(scores, data):
 
     # Promote scores/data into DiffExpr3 when possible
     if isinstance(scores, DiffExpr2):
-        scores = DiffExpr3(scores.x, scores.y, scores.x - scores.y)
+        sy = scores.y
     elif not isinstance(scores, DiffExpr3):
         # Treat constant scores as identical for both networks
         from boundlab import expr as _expr
-        scores_expr = _expr.ConstVal(scores) if isinstance(scores, torch.Tensor) else scores
-        scores = DiffExpr3(scores_expr, scores_expr, scores_expr * 0)
+        sy = _expr.ConstVal(scores) if isinstance(scores, torch.Tensor) else scores
+    
 
     if isinstance(data, DiffExpr2):
         data = DiffExpr3(data.x, data.y, data.x - data.y)
@@ -223,10 +224,9 @@ def diff_heaviside_pruning_handler(scores, data):
         data_expr = _expr.ConstVal(data) if isinstance(data, torch.Tensor) else data
         data = DiffExpr3(data_expr, data_expr, data_expr * 0)
 
-    assert isinstance(scores, DiffExpr3) and isinstance(data, DiffExpr3), (
-        "heaviside_pruning requires expressions convertible to DiffExpr3")
+    assert isinstance(sy, Expr) and isinstance(data, DiffExpr3), (
+        f"heaviside_pruning requires expressions convertible to DiffExpr3: {scores} vs {data}")
 
-    sy = scores.y
     y = data.y
 
     # Linearise t = h(-sy) * y  →  weights on sy and y
@@ -268,14 +268,14 @@ def diff_heaviside_pruning_handler(scores, data):
     )
 
     from . import _build_triple_from_dzb
-    xs = [scores.x, data.x]
-    ys = [scores.y, data.y]
-    ds = [scores.diff, data.diff]
+    xs = [0, data.x]
+    ys = [sy, data.y]
+    ds = [0, data.diff]
     return _build_triple_from_dzb(dzb, xs, ys, ds)
 
 
 # Register handler
-interpret["heaviside_pruning"] = diff_heaviside_pruning_handler
+interpret["HeavisidePruning"] = diff_heaviside_pruning_handler
 
 
 __all__ = ["diff_heaviside_pruning_handler"]

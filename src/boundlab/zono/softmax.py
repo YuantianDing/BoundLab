@@ -1,37 +1,52 @@
 """Softmax handler for zonotope abstract interpretation.
 
-Implements softmax as a composed operation:
-  softmax(x)_j = exp(x_j) / sum_k exp(x_k)
+Implements softmax following DeepT (Bonaert et al., 2021):
 
-Following DeepT (Bonaert et al., 2021), uses numerical stabilization
-by subtracting the center's max value before applying exp.
+.. math::
+
+   \\mathrm{softmax}(x)_i
+     = \\frac{1}{\\sum_j \\exp(x_j - x_i)}
+
+This avoids a bilinear product: only subtraction, exp, reduce-sum
+and reciprocal are needed.
 """
 
 import torch
 
 from boundlab.expr._core import Expr
-from boundlab.expr._affine import ConstVal
-from boundlab.expr._var import LpEpsilon
-from .bilinear import bilinear_elementwise
+from boundlab.linearop._einsum import EinsumOp
+
+
+def _pairwise_diff(x: Expr, dim: int) -> Expr:
+    """Build ``d[..., i, j, ...] = x[..., j, ...] - x[..., i, ...]`` as a
+    single :class:`EinsumOp` applied to *x*.
+
+    Using one LinearOp (rather than two broadcasted terms combined via
+    subtraction) avoids the ``SumOp`` merging two structurally similar
+    :class:`ExpandOp` s that would otherwise cancel the noise contribution.
+    """
+    N = x.shape[dim]
+    l = x.unsqueeze(dim).expand_on(dim, N)
+    r = x.unsqueeze(dim + 1).expand_on(dim + 1, N)
+    return r - l
 
 
 def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
-    r"""Zonotope softmax transformer built from primitive handlers.
+    r"""Zonotope softmax transformer using the DeepT decomposition.
 
-    Softmax is decomposed as:
+    Softmax is rewritten as:
 
     .. math::
 
-       \mathrm{softmax}(x)_j = \frac{\exp(x_j)}{\sum_k \exp(x_k)}
+       \mathrm{softmax}(x)_i
+         = \frac{\exp(x_i)}{\sum_j \exp(x_j)}
+         = \frac{1}{\sum_j \exp(x_j - x_i)}
 
-    The implementation applies:
-    ``exp -> reduce-sum -> reciprocal -> element-wise product``.
-    For stability, it first shifts by the center maximum along the softmax
-    dimension.
-    Currently, only 2D inputs with ``dim == 1`` are supported.
+    so only subtraction, exp, reduce-sum, and reciprocal are required
+    (no bilinear element-wise product).
 
     Args:
-        x: Input expression with shape (m, n).
+        x: Input expression.
         dim: Dimension along which to apply softmax (default: -1).
         dtype: Ignored (for API compatibility with torch.softmax).
 
@@ -48,35 +63,21 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     >>> y.shape
     torch.Size([2, 3])
     """
+    assert dim == -1 or dim == len(x.shape) - 1
     ndim = len(x.shape)
     if dim < 0:
         dim = ndim + dim
 
-    n = x.shape[dim]
-
-    # Numerical stability: shift by center's max along softmax dim
-    x_center = x.center()
-    x_max = x_center.max(dim=dim, keepdim=True).values
-    x_shifted = x - x_max.expand(*x.shape)
-
-    # Import the registered handlers from the zonotope interpreter
     from . import interpret
-    exp_handler = interpret["exp"]
-    reciprocal_handler = interpret["reciprocal"]
+    exp_handler = interpret["Exp"]
+    reciprocal_handler = interpret["Reciprocal"]
 
-    # Apply exp element-wise
-    exp_x = exp_handler(x_shifted)
+    # Pairwise differences: diff[..., i, j, ...] = x[..., j, ...] - x[..., i, ...].
+    diff = _pairwise_diff(x, dim)
 
-    # Sum along softmax dim using mean * n (ReduceMeanOp is affine)
-    sum_exp = exp_x.sum(dim=dim, keepdim=True)
+    exp_diff = exp_handler(diff)
 
-    # Reciprocal: 1 / sum_exp → (m, 1)
-    inv_sum = reciprocal_handler(sum_exp)
+    # Sum over j (original softmax axis, now at dim+1) -> shape matches x.
+    sum_exp = exp_diff.sum(dim=dim + 1, keepdim=False)
 
-    # Broadcast inv_sum to match exp_x shape: (m, 1) → (m, n)
-    inv_sum_expanded = inv_sum.expand(*exp_x.shape)
-
-    # Element-wise product: exp_x * inv_sum (bilinear)
-    result = bilinear_elementwise(exp_x, inv_sum_expanded)
-
-    return result
+    return reciprocal_handler(sum_exp)

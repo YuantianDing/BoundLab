@@ -12,7 +12,7 @@ from boundlab.linearop._indices import SetIndicesOp
 from . import ZonoBounds, _register_linearizer
 
 
-@_register_linearizer("exp")
+@_register_linearizer("Exp")
 def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Minimal-area exp relaxation (DeepT, Section 4.5).
 

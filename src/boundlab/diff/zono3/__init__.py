@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from boundlab import interp
 from boundlab.diff import expr
 from boundlab.utils import not0
 
@@ -218,11 +219,9 @@ def _register_linearizer(name: str):
     """
 
     def decorator(linearizer):
-        std_handler = std_interpret[name]
-
         def handler(*args):
             if not any(isinstance(a, (DiffExpr3, DiffExpr2)) for a in args):
-                return std_handler(*args)
+                return NotImplemented
             xs, ys, ds = [], [], []
             for a in args:
                 if isinstance(a, DiffExpr3):
@@ -252,8 +251,8 @@ def _register_linearizer(name: str):
 from . import relu as _relu  # noqa: E402  — registers "relu"
 from . import tanh as _tanh  # noqa: E402  — registers "tanh"
 from . import exp as _exp  # noqa: E402  — registers "exp"
-from . import reciprocal as _reciprocal  # noqa: E402  — registers "reciprocal"
-from . import heaviside as _heaviside  # noqa: E402  — registers "heaviside_pruning"
+from . import reciprocal as _reciprocal  # noqa: E402  — registers "Reciprocal"
+from . import heaviside as _heaviside  # noqa: E402  — registers "HeavisidePruning"
 
 # ONNX activation op names
 interpret["Relu"] = interpret["relu"]
@@ -262,22 +261,23 @@ interpret["Tanh"] = interpret["tanh"]
 # diff_pair: converts paired tensors (from boundlab::diff_pair ONNX nodes) to DiffExpr2
 from boundlab.diff.op import diff_pair_handler  # noqa: E402
 
-interpret["diff_pair"] = diff_pair_handler
+interpret["DiffPair"] = diff_pair_handler
 
 # Bilinear handlers (differential mul/matmul)
 from .bilinear import diff_mul_handler, diff_matmul_handler  # noqa: E402
 
-interpret["mul"] = diff_mul_handler
-interpret["matmul"] = diff_matmul_handler
-interpret["bmm"] = diff_matmul_handler
-interpret["mm"] = diff_matmul_handler
+def onnx_boardcasted(fn):
+    return lambda X, Y, *args, **kwargs: fn(*interp._onnx_broadcast(X, Y), *args, **kwargs)
+
+interpret["Mul"] = onnx_boardcasted(diff_mul_handler)
 interpret["MatMul"] = diff_matmul_handler
+interpret["Div"] = onnx_boardcasted(lambda a, b: diff_mul_handler(a, interpret["Reciprocal"](b)))
 
 # Softmax: both call_module (nn.Softmax) and ATen lowered (_softmax.default)
 from .softmax import diff_softmax_handler  # noqa: E402
 
-interpret["softmax"] = diff_softmax_handler
-interpret["_softmax"] = lambda x, dim, _half_to_float=False: diff_softmax_handler(x, dim=dim)
+# interpret["softmax"] = diff_softmax_handler
+# interpret["_softmax"] = lambda x, dim=-1, _half_to_float=False: diff_softmax_handler(x, dim=dim)
 interpret["Softmax"] = lambda X, axis=-1: diff_softmax_handler(X, dim=axis)
 
 # Public re-exports

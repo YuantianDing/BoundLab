@@ -9,76 +9,111 @@ interpreter.  It focuses on the ViT-specific plumbing; unit tests live in
 
 from __future__ import annotations
 
+import argparse
 from typing import Callable, Literal, Optional, Tuple
 
+import onnx_ir
 import torch
 
 import boundlab.expr as expr
-from boundlab.diff.expr import DiffExpr3
-from boundlab.diff.net import diff_net
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
+from boundlab.expr._core import Expr
 from boundlab.interp.onnx import onnx_export
 
 from . import vit_threshold
-
-ViTFactory = Callable[..., torch.nn.Module]
-
-__all__ = [
-    "diff_verify_pruned_vit",
-]
-
-
-def _make_vit_pair(
-    ctor: ViTFactory,
-    layer_norm_type: Literal["standard", "no_var"],
-    pruning_threshold: Optional[float],
-) -> Tuple[torch.nn.Module, torch.nn.Module]:
-    """Instantiate (baseline, pruned) ViT models with shared weights."""
-    base = ctor(layer_norm_type=layer_norm_type, pruning_threshold=None).eval()
-    pruned = ctor(
-        layer_norm_type=layer_norm_type,
-        pruning_threshold=pruning_threshold,
-    ).eval()
-    # Share weights so only the pruning logic differs.
-    pruned.load_state_dict(base.state_dict())
-    return base, pruned
-
+from . import vit
 
 def diff_verify_pruned_vit(
     *,
-    ctor: ViTFactory = vit_threshold.vit_ibp_3_3_8,
+    ctor: Callable[..., torch.nn.Module] = vit_threshold.vit_ibp_3_3_8,
     layer_norm_type: Literal["standard", "no_var"] = "no_var",
-    pruning_threshold: float = 0.05,
+    pruning_threshold: float = 0.00,
     eps: float = 0.002,
     seed: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Run differential verification between unpruned and pruned ViT.
 
-    Returns (diff_ub, diff_lb) tensors bounding f(x) - g(x), where f is the
-    baseline model and g is its pruning-aware counterpart with identical
-    weights but pruning threshold ``pruning_threshold``.
+    A single exported model encodes both branches: ``heaviside_pruning`` keeps
+    the **x** branch unpruned and applies the mask only to the **y** branch.
+    Returns (diff_ub, diff_lb) bounding f(x) - g(x).
     """
     torch.manual_seed(seed)
-    base, pruned = _make_vit_pair(ctor, layer_norm_type, pruning_threshold)
 
-    # Export both models (shared input shape: C=3, H=W=32).
-    onnx_base = onnx_export(base, ([3, 32, 32],))
-    onnx_pruned = onnx_export(pruned, ([3, 32, 32],))
-    merged = diff_net(onnx_base, onnx_pruned)
-    op = diff_interpret(merged)
+    model = ctor(
+        layer_norm_type=layer_norm_type,
+        # pruning_threshold=pruning_threshold,
+    ).eval()
+    onnx_model = onnx_export(model, ([3, 32, 32],))
+    onnx_ir.save(onnx_model, "vit_pruning.onnx")
+
+    
+    op = diff_interpret(onnx_model, verbose=True)
 
     # Shared input noise (tighter bounds than independent noise symbols).
     center = torch.randn(3, 32, 32) * 0.05
     eps_expr = expr.LpEpsilon(list(center.shape))
     x = expr.ConstVal(center) + eps * eps_expr
-    triple = DiffExpr3(x, x, expr.ConstVal(torch.zeros_like(center)))
 
-    out = op(triple)
+    out = op(x)
     diff_ub, diff_lb = out.diff.ublb()
     return diff_ub, diff_lb
 
 
 if __name__ == "__main__":
-    ub, lb = diff_verify_pruned_vit()
+    parser = argparse.ArgumentParser(
+        description="Differentially verify pruning-aware ViT vs unpruned baseline."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["ibp_3_3_8", "pgd_2_3_16"],
+        default="ibp_3_3_8",
+        help="Which ViT checkpoint to load.",
+    )
+    parser.add_argument(
+        "--layer-norm",
+        choices=["standard", "no_var"],
+        default="no_var",
+        help="LayerNorm variant to use (matches checkpoint).",
+    )
+    parser.add_argument(
+        "--pruning-threshold",
+        type=float,
+        default=0.05,
+        help="Threshold applied to class attention scores (None disables pruning).",
+    )
+    parser.add_argument(
+        "--eps",
+        type=float,
+        default=0.002,
+        help="L∞ radius on the input image tensor.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for input center sampling.",
+    )
+
+    args = parser.parse_args()
+
+    ctor = {
+        "ibp_3_3_8": vit.vit_ibp_3_3_8,
+        "pgd_2_3_16": vit.vit_pgd_2_3_16,
+    }[args.model]
+
+    ub, lb = diff_verify_pruned_vit(
+        ctor=ctor,
+        layer_norm_type=args.layer_norm,
+        pruning_threshold=args.pruning_threshold,
+        eps=args.eps,
+        seed=args.seed,
+    )
     width = (ub - lb).max().item()
-    print(f"Max output diff width: {width:.4f}")
+
+    print(f"Model: {args.model}, layer_norm={args.layer_norm}")
+    print(f"Pruning threshold: {args.pruning_threshold}, eps: {args.eps}, seed: {args.seed}")
+    print(f"Max output diff width: {width:.6f}")
+
+    if not torch.isfinite(ub).all() or not torch.isfinite(lb).all():
+        print("Warning: non-finite bounds encountered (NaN/Inf).")

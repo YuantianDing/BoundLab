@@ -14,6 +14,7 @@ introduced only for case-9 neurons.
 
 import torch
 
+from boundlab import utils
 from boundlab.expr._core import Expr
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.prop import ublb
@@ -64,7 +65,7 @@ def relu_linearizer(
     # ------------------------------------------------------------------
     # Standard triangle relaxation for x and y independently
     # ------------------------------------------------------------------
-    lam_x = (torch.relu(x_ub) - torch.relu(x_lb)) / (x_ub - x_lb)
+    lam_x = (torch.relu(x_ub) - torch.relu(x_lb)) / (x_ub - x_lb + 1e-30)
     mu_x  = 0.5 * (torch.relu(x_ub) - lam_x * x_ub)
 
     lam_y = (torch.relu(y_ub) - torch.relu(y_lb)) / (y_ub - y_lb + 1e-30)
@@ -101,8 +102,12 @@ def relu_linearizer(
     sd     = torch.where(case9, lam_d, sd)    # d input weight for diff
     bias_d = torch.where(case9, nu_d - mu_d, bias_d)
     err_d  = torch.where(case9, mu_d, err_d)     # fresh error for case-9 neurons
-
-
+    
+    if not utils.current_fake_mode():
+        assert torch.isfinite(lam_x).all() and torch.isfinite(mu_x).all() and torch.isfinite(lam_y).all() and torch.isfinite(mu_y).all(), "Non-finite values in ReLU linearizer x/y bounds"
+        assert torch.isfinite(dx).all() and torch.isfinite(dy).all() and torch.isfinite(ex).all() and torch.isfinite(ey).all() \
+            and torch.isfinite(sd).all() and torch.isfinite(bias_d).all() and torch.isfinite(err_d).all(), "Non-finite values in ReLU linearizer outputs"
+        
     return DiffZonoBounds(
         x_bounds=ZonoBounds(bias=mu_x, error_coeffs=mu_x, input_weights=[lam_x]),
         y_bounds=ZonoBounds(bias=mu_y, error_coeffs=mu_y, input_weights=[lam_y]),

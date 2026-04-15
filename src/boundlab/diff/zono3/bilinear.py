@@ -38,7 +38,7 @@ def diff_bilinear_matmul(a: DiffExpr3, b: DiffExpr3) -> DiffExpr3:
     out_x = bilinear_matmul(a.x, b.x)
     out_y = bilinear_matmul(a.y, b.y)
 
-    # Diff: A1@ΔB + ΔA@B2
+    # Diff: A1@(B1 - B2) + (A1 - A2)@B2
     term1 = bilinear_matmul(a.x, b.diff)
     term2 = bilinear_matmul(a.diff, b.y)
     out_diff = term1 + term2
@@ -113,9 +113,9 @@ def diff_matmul_handler(a, b):
             return diff_bilinear_matmul(a3, b3)
 
     if isinstance(a, (DiffExpr3, DiffExpr2)):
-        return a @ b
+        return a._map_all(lambda x: std_matmul_handler(x, b))
     if isinstance(b, (DiffExpr3, DiffExpr2)):
-        return a @ b
+        return b._map_all(lambda x: std_matmul_handler(a, x))
 
     return std_matmul_handler(a, b)
 

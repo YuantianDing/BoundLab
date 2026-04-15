@@ -20,7 +20,7 @@ from boundlab.zono.exp import exp_linearizer as std_exp_linearizer
 from . import _register_linearizer, DiffZonoBounds
 
 
-@_register_linearizer("exp")
+@_register_linearizer("Exp")
 def exp_linearizer(
     xs: list[Expr], ys: list[Expr], ds: list[Expr]
 ) -> DiffZonoBounds:

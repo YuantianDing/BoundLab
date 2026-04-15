@@ -371,7 +371,10 @@ class EinsumOp(LinearOp):
         assert len(new_tensor.shape) == len(self.output_dims), f" {self.tensor.shape} - {self.dot_dims} -> {new_tensor.shape}"
         new_input_dims = []
         new_output_dims = [tensor_dims_output_id.index(p) for p in self.output_dims]
-        return EinsumOp(new_tensor, new_input_dims, new_output_dims, name=f"{self}.norm_input(p={p})" if self.name else None)
+        result = EinsumOp(new_tensor, new_input_dims, new_output_dims, name=f"{self}.norm_input(p={p})" if self.name else None)
+        assert result.input_shape == torch.Size([]), f"Norm over input should have scalar input shape, got {result.input_shape}"
+        assert result.output_shape == self.output_shape, f"Norm over input should preserve output shape, got {result.output_shape} vs {self.output_shape}"
+        return result
     
     def norm_output(self, p=1):
         """Return a LinearOp that computes the norm over the output dimensions of this EinsumOp."""
@@ -441,13 +444,11 @@ class EinsumOp(LinearOp):
         assert self.output_shape == other.output_shape
         
         if self.mul_conditions <= other.mul_conditions:
-            print(self.mul_conditions, other.mul_conditions)
             self0 = self.permute_for_output()
             other0 = other.remove_conditions(self.mul_conditions).permute_for_output()
             assert self0.input_dims == other0.input_dims and self0.output_dims == other0.output_dims, f" {self0} {other0}"
             return self0 + other0
         elif other.mul_conditions <= self.mul_conditions:
-            print(self.mul_conditions, other.mul_conditions)
             return self.remove_conditions(other.mul_conditions) + other
         else:
             intersection = self.mul_conditions + other.mul_conditions

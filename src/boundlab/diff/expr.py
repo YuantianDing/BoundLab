@@ -17,12 +17,15 @@ class DiffExpr2:
 
     x: Expr
     y: Expr
+    
+    def __post_init__(self):
+        assert isinstance(self.x, Expr) and isinstance(self.y, Expr), "DiffExpr2 components must be Expr instances"
 
     @property
     def shape(self) -> torch.Size:
         return self.x.shape
 
-    def _map(self, fn):
+    def _map_all(self, fn):
         return DiffExpr2(fn(self.x), fn(self.y))
     
     def get_const(self) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -141,59 +144,65 @@ class DiffExpr2:
         return DiffExpr2(self.x[indices], self.y[indices])
 
     def scatter(self, indices, output_shape):
-        return self._map(lambda e: e.scatter(indices, output_shape))
+        return self._map_all(lambda e: e.scatter(indices, output_shape))
 
     def gather(self, indices):
-        return self._map(lambda e: e.gather(indices))
+        return self._map_all(lambda e: e.gather(indices))
 
     # ------------------------------------------------------------------
     # Shape ops
     # ------------------------------------------------------------------
 
     def reshape(self, *shape):
-        return self._map(lambda e: e.reshape(*shape))
+        return self._map_all(lambda e: e.reshape(*shape))
 
     def permute(self, *dims):
-        return self._map(lambda e: e.permute(*dims))
+        return self._map_all(lambda e: e.permute(*dims))
 
     def transpose(self, dim0, dim1):
-        return self._map(lambda e: e.transpose(dim0, dim1))
+        return self._map_all(lambda e: e.transpose(dim0, dim1))
 
     def flatten(self, start_dim=0, end_dim=-1):
-        return self._map(lambda e: e.flatten(start_dim, end_dim))
+        return self._map_all(lambda e: e.flatten(start_dim, end_dim))
 
     def unflatten(self, dim, sizes):
-        return self._map(lambda e: e.unflatten(dim, sizes))
+        return self._map_all(lambda e: e.unflatten(dim, sizes))
 
     def squeeze(self, dim=None):
-        return self._map(lambda e: e.squeeze(dim))
+        return self._map_all(lambda e: e.squeeze(dim))
 
     def unsqueeze(self, dim):
-        return self._map(lambda e: e.unsqueeze(dim))
+        return self._map_all(lambda e: e.unsqueeze(dim))
 
     def narrow(self, dim, start, length):
-        return self._map(lambda e: e.narrow(dim, start, length))
+        return self._map_all(lambda e: e.narrow(dim, start, length))
 
     def expand(self, *sizes):
-        return self._map(lambda e: e.expand(*sizes))
+        return self._map_all(lambda e: e.expand(*sizes))
 
     def repeat(self, *sizes):
-        return self._map(lambda e: e.repeat(*sizes))
+        return self._map_all(lambda e: e.repeat(*sizes))
 
     def tile(self, *sizes):
-        return self._map(lambda e: e.tile(*sizes))
+        return self._map_all(lambda e: e.tile(*sizes))
 
     def flip(self, dims):
-        return self._map(lambda e: e.flip(dims))
+        return self._map_all(lambda e: e.flip(dims))
 
     def roll(self, shifts, dims):
-        return self._map(lambda e: e.roll(shifts, dims))
+        return self._map_all(lambda e: e.roll(shifts, dims))
 
     def diag(self, diagonal=0):
-        return self._map(lambda e: e.diag(diagonal))
+        return self._map_all(lambda e: e.diag(diagonal))
 
     def mean(self, dim=None, keepdim=False):
-        return self._map(lambda e: e.mean(dim=dim, keepdim=keepdim))
+        return self._map_all(lambda e: e.mean(dim=dim, keepdim=keepdim))
+    
+    def sum(self, dim=None, keepdim=False):
+        return self._map_all(lambda e: e.sum(dim=dim, keepdim=keepdim))
+    
+    def __repr__(self):
+        return f"DiffExpr2(x={self.x.bound_width().max().item()}, y={self.y.bound_width().max().item()})"
 
 
 @dataclasses.dataclass
@@ -214,6 +223,9 @@ class DiffExpr3:
     x: Expr
     y: Expr
     diff: Expr
+    def __post_init__(self):
+        assert isinstance(self.x, Expr) and isinstance(self.y, Expr), "DiffExpr2 components must be Expr instances"
+        assert isinstance(self.diff, Expr), "DiffExpr3 diff component must be an Expr instance"
 
     @property
     def shape(self) -> torch.Size:
@@ -418,5 +430,17 @@ class DiffExpr3:
 
     def mean(self, dim=None, keepdim=False):
         return self._map_all(lambda e: e.mean(dim=dim, keepdim=keepdim))
+    
+    def sum(self, dim=None, keepdim=False):
+        return self._map_all(lambda e: e.sum(dim=dim, keepdim=keepdim))
+    
+    def __str__(self):
+        X = str(self.x).replace("\n", "\n    ")
+        Y = str(self.y).replace("\n", "\n    ")
+        D = str(self.diff).replace("\n", "\n    ")
+        return f"DiffExpr3 {{\n    x: {X},\n    y: {Y},\n    diff: {D}\n}}"
+    
+    def __repr__(self):
+        return f"DiffExpr3(x={self.x.bound_width().max().item()}, y={self.y.bound_width().max().item()}, diff={self.diff.bound_width().max().item()})"
 
 __all__ = ["DiffExpr2", "DiffExpr3"]

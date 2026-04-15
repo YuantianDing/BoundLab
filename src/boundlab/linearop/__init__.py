@@ -85,7 +85,7 @@ class NarrowOp(GetSliceOp):
         self.length = length
 
     def __str__(self):
-        return f"narrow({self.dim}, {self.start}, {self.length})"
+        return f"<narrow {self.dim} {self.start} {self.length}>"
 
 
 class SelectOp(GetSliceOp):
@@ -107,7 +107,7 @@ class SelectOp(GetSliceOp):
         self.index = index
 
     def __str__(self):
-        return f"select({self.dim}, {self.index})"
+        return f"<select {self.dim}, {self.index}>"
 
 
 class GetItemOp(GetSliceOp):
@@ -115,7 +115,7 @@ class GetItemOp(GetSliceOp):
 
     def __str__(self):
         from ._indices import _format_indices
-        return f"getitem({_format_indices(self.indices)})"
+        return f"<getitem {_format_indices(self.indices)}>"
 
 
 
@@ -138,7 +138,7 @@ class PadOp(SetSliceOp):
         super().__init__(indices, input_shape, output_shape)
 
     def __str__(self):
-        return f"pad({self._pad_spec})"
+        return f"<pad {self._pad_spec}>"
 
 
 __all__ = [

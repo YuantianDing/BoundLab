@@ -421,6 +421,15 @@ def _onnx_broadcast(X, Y):
         Y = Y.expand(target)
     return X, Y
 
+def _onnx_expand(data, shape):
+    """ONNX Expand: broadcast *data* to *shape*."""
+    target = _unwrap_shape(shape)
+    if hasattr(data, 'expand'):
+        return data.expand(*target)
+    elif isinstance(data, torch.Tensor):
+        return data.expand(target)
+    else:
+        raise TypeError(f"Cannot expand object of type {type(data)}")
 
 def _as_const(x):
     """Extract a concrete tensor from a DiffExpr2/3 or ConstVal for shape/index constants."""
@@ -487,6 +496,16 @@ class FnList(Generic[E]):
             return tuple(results)
         return FnList(zipped_fn)
 
+class FnListChain:
+
+    def __init__(self, *fli: Callable[..., E]):
+        self.fn_list = fli
+    
+    def __call__(self, *args: E, **kwargs) -> E:
+        result = self.fn_list[0](*args, **kwargs)
+        for fn in self.fn_list[1:]:
+            result = fn(result, **kwargs)
+        return result
 
 # =====================================================================
 # Interpreter
@@ -499,7 +518,7 @@ class Interpreter(Generic[E]):
         The dispatcher maps ONNX operator names to handler functions.
 
         Keys are the ONNX ``op_type`` strings (e.g. ``"Gemm"``, ``"Relu"``,
-        ``"Reshape"``).  Custom-domain ops (e.g. ``"diff_pair"`` from the
+        ``"Reshape"``).  Custom-domain ops (e.g. ``"DiffPair"`` from the
         ``boundlab`` domain) are also keyed by bare ``op_type``.
         """
         if isinstance(dispatcher, Interpreter):
@@ -547,18 +566,27 @@ class Interpreter(Generic[E]):
         """Return a new interpreter that produces tuples of results from this and other interpreters."""
         return Interpreter({k: v.product(*[o[k] for o in other]) for k, v in self.dispatcher.items()})
 
-    def and_then(self, other: Callable[[E], E]) -> Interpreter:
+    def and_then(self, other: Callable[[E], E], with_op_name: bool = False) -> Interpreter:
         """Return a new interpreter that applies another function to the output of this one."""
         result = {}
 
+        class WithOpNameWrapper:
+            def __init__(self, fn, op_name):
+                self.fn = fn
+                self.op_name = op_name
+
+            def __call__(self, *args, **kwargs):
+                return self.fn(*args, op_name=self.op_name, **kwargs)
+
         for k, v in self.dispatcher.items():
-            def chained_fn(*args, **kwargs):
-                return other(v(*args, **kwargs))
-            result[k] = chained_fn
+            if with_op_name:
+                result[k] = FnListChain(v, WithOpNameWrapper(other, k))
+            else:
+                result[k] = FnListChain(v, other)
         return Interpreter(result)
 
     def __call__(
-        self, model: ir.Model | str | Path
+        self, model: ir.Model | str | Path, verbose: bool = False
     ) -> Callable[..., E]:
         """Build an expression-level interpreter for an ONNX model.
 
@@ -580,7 +608,7 @@ class Interpreter(Generic[E]):
               passed as keyword arguments.
             * The dispatcher is keyed on the bare ``op_type`` (domain is
               ignored); e.g. a custom ``boundlab::diff_pair`` node is
-              dispatched as ``"diff_pair"``.
+              dispatched as ``"DiffPair"``.
 
         Returns
         -------
@@ -655,6 +683,20 @@ class Interpreter(Generic[E]):
                 # Dispatch on op_type (ignore domain)
                 handler = self.dispatcher[node.op_type]
                 result = handler(*args, **kwargs)
+                def to_repr(x: Any) -> str:
+                    if isinstance(x, torch.Tensor):
+                        return f"Tensor{list(x.shape)}({x.abs().max().item():.4g})"
+                    return repr(x)
+                if verbose:
+                    outputs = ", ".join("%" + node.name for node in node.outputs if node is not None)
+                    inputs = ", ".join("%" + node.name for node in node.inputs if node is not None)
+                    kwargs = ", ".join(f"{k}={to_repr(v)}" for k, v in kwargs.items())
+                    if kwargs:
+                        kwargs = ", " + kwargs
+                    print(f"{outputs} = {node.op_type}({inputs}{kwargs})")
+                    print(f"{to_repr(result)} <- {", ".join(to_repr(arg) for arg in args)}")
+
+                assert not isinstance(result, tuple), f"Handler for {node.op_type} returned a tuple, but only single outputs are supported. Got: {result}"
 
                 # Bind outputs
                 if len(node.outputs) == 1:
@@ -702,9 +744,11 @@ ONNX_BASE_INTERPRETER = Interpreter({
     "Concat":   _onnx_concat,
     "Identity": lambda X: X,
     "Cast":     _onnx_cast,
+    "Expand":   _onnx_expand,
     # ---- reductions ---------------------------------------------------
     "ReduceSum": _onnx_reduce_sum,
     "ReduceMean": _onnx_reduce_mean,
     # ---- constants ---------------------------------------------
     "Constant": _onnx_constant,
+    "Reciprocal": lambda X: 1 / X,
 })

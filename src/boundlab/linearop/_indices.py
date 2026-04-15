@@ -89,7 +89,7 @@ class GatherOp(LinearOp):
         return result
 
     def __str__(self):
-        return f"gather(dim={self.dim}, index.shape={list(self.index.shape)})"
+        return f"<gather dim={self.dim} index.shape={list(self.index.shape)}>"
 
 
 class ScatterOp(LinearOp):
@@ -139,7 +139,7 @@ class ScatterOp(LinearOp):
         return torch.gather(grad, batch_ndim + self.dim, index)
 
     def __str__(self):
-        return f"scatter(dim={self.dim}, index.shape={list(self.index.shape)})"
+        return f"<scatter dim={self.dim} index.shape={list(self.index.shape)}>"
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +230,7 @@ class GetIndicesOp(LinearOp):
         return result
 
     def __str__(self):
-        return f"get_indices({self.output_shape})"
+        return f"<get_indices {tuple(self.output_shape)}>"
 
 
 class SetIndicesOp(LinearOp):
@@ -297,7 +297,7 @@ class SetIndicesOp(LinearOp):
         return grad[all_indices]
 
     def __str__(self):
-        return f"set_indices({list(self.input_shape)} -> {list(self.output_shape)})"
+        return f"<set_indices {list(self.input_shape)} -> {list(self.output_shape)}>"
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +481,7 @@ class GetSliceOp(LinearOp):
         return result
 
     def __str__(self):
-        return f"getslice({_format_indices(self.indices)})"
+        return f"<getslice {_format_indices(self.indices)}>"
 
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
         """Fuse ``GetSliceOp @ EinsumOp`` by slicing the einsum tensor along
@@ -528,7 +528,10 @@ class GetSliceOp(LinearOp):
             new_input_dims = [adj(d) for d in other.input_dims]
             return EinsumOp(new_tensor, new_input_dims, new_output_dims,
                             name=merge_name(self, "@", other))
-        return NotImplemented
+        return other.__rmatmul__(self)
+    
+    def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
+        return super().__rmatmul__(other)
 
 
 class SetSliceOp(LinearOp):
@@ -579,7 +582,7 @@ class SetSliceOp(LinearOp):
         return grad[full_indices]
 
     def __str__(self):
-        return f"setslice({_format_indices(self.indices)})"
+        return f"<setslice {_format_indices(self.indices)}>"
 
     def __rmatmul__(self, other: "LinearOp") -> "LinearOp":
         """Fuse ``EinsumOp @ SetSliceOp`` by slicing the einsum tensor along

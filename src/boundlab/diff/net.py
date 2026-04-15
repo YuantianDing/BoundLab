@@ -95,7 +95,7 @@ def diff_net(
     >>> from pathlib import Path
     >>> nets = Path("compare/verydiff/examples/nets")
     >>> merged = diff_net(nets / "single_layer_ref.onnx", nets / "single_layer_alt.onnx")
-    >>> any(n.domain == "boundlab" and n.op_type == "diff_pair" for n in merged.graph)
+    >>> any(n.domain == "boundlab" and n.op_type == "DiffPair" for n in merged.graph)
     True
     """
     net1 = _load_onnx(net1)
@@ -138,7 +138,7 @@ def diff_net(
         new_nodes.append(
             ir.Node(
                 "boundlab",
-                "diff_pair",
+                "DiffPair",
                 [_value_ref(name1), _value_ref(new_name)],
                 outputs=[ir.Value(name=out_name)],
             )

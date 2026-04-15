@@ -9,6 +9,7 @@ Examples
 '(x + y)'
 """
 
+from torch._subclasses.fake_tensor import FakeTensorMode
 from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, TypeAlias, TypeVar as _TypeVar, Union
@@ -203,3 +204,6 @@ class EQCondition:
     def all_pairs(self):
         return all(len(tup) <= 2 for tup in self.eqclasses)
     
+def current_fake_mode():
+    mode = torch.utils._python_dispatch._get_current_dispatch_mode()
+    return mode if isinstance(mode, FakeTensorMode) else None

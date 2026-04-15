@@ -58,6 +58,7 @@ class Attention(nn.Module):
     
     def prunned_softmax(self, attn, last_score, dim=-1):
         assert dim == -1
+        attn = attn - attn.mean(dim=dim, keepdim=True)
         attn = torch.exp(attn)
         attn = heaviside_pruning(last_score, attn)
         attn_sum = attn.sum(dim=dim, keepdim=True) + 1e-6
@@ -114,7 +115,7 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x: Tensor, score: Tensor) -> Tensor:
         res, score = self.attn(self.attn_norm(x), score)
-        res += x
+        x += res
         x = self.ff(self.ff_norm(x)) + x
         return x, score
 

@@ -58,11 +58,11 @@ def diff_pair(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     ...         return self.fc(p)
     >>> model = PairedModel()
     >>> gm = torch.export.export(model, (torch.zeros(4), torch.zeros(4)))
-    >>> any("diff_pair" in str(n.target) for n in gm.graph.nodes)
+    >>> any("DiffPair" in str(n.target) for n in gm.graph.nodes)
     True
     """
     return torch.onnx.ops.symbolic(
-        "boundlab::diff_pair",
+        "boundlab::DiffPair",
         (x, y),
         dtype=x.dtype,
         shape=x.shape,
@@ -86,7 +86,7 @@ def heaviside_pruning(scores: torch.Tensor, data: torch.Tensor) -> torch.Tensor:
     """
     assert scores.shape == data.shape[-scores.dim():], "scores and data must have the same shape"
     return torch.onnx.ops.symbolic(
-        "boundlab::heaviside_pruning",
+        "boundlab::HeavisidePruning",
         (scores, data),
         dtype=data.dtype,
         shape=data.shape,
@@ -112,7 +112,7 @@ def topk_pruning(scores: torch.Tensor, data: torch.Tensor, k: int, dim: int = -1
     assert scores.shape == data.shape, "scores and data must have the same shape"
     dim = dim if dim >= 0 else scores.dim() + dim
     return torch.onnx.ops.symbolic(
-        "boundlab::topk_pruning",
+        "boundlab::TopKPruning",
         (scores, data),
         attrs={"k": k, "dim": dim},
         dtype=data.dtype,
@@ -184,4 +184,4 @@ def diff_pair_handler(x, y) -> DiffExpr2:
     return DiffExpr2(x, y)
 
 
-__all__ = ["diff_pair", "DiffLinear", "heaviside_pruning", "topk_pruning"]
+__all__ = ["DiffPair", "DiffLinear", "HeavisidePruning", "TopKPruning"]

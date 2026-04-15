@@ -21,7 +21,7 @@ from boundlab.zono.reciprocal import reciprocal_linearizer as std_reciprocal_lin
 from . import _register_linearizer, DiffZonoBounds
 
 
-@_register_linearizer("reciprocal")
+@_register_linearizer("Reciprocal")
 def reciprocal_linearizer(
     xs: list[Expr], ys: list[Expr], ds: list[Expr]
 ) -> DiffZonoBounds:
