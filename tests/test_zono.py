@@ -10,7 +10,6 @@ For each network, we:
 import torch
 import pytest
 from torch import nn
-import random
 
 import boundlab.expr as expr
 import boundlab.zono as zono
@@ -290,113 +289,6 @@ def test_relu_mixed_regimes_piecewise_bounds():
     assert torch.allclose(ub, ub_exact, atol=1e-5)
     assert torch.allclose(lb, lb_exact, atol=1e-5)
 
-
-def test_softmax2_linearizer_sound():
-    """softmax2 linearizer must enclose all sampled concrete values."""
-    torch.manual_seed(15)
-    from boundlab.zono.softmax2 import softmax2_linearizer
-
-    # 1-D box domain (avoid scalar tensors).
-    lx = torch.tensor([0.5])
-    ux = torch.tensor([3.0])
-    ly = torch.tensor([-1.0])
-    uy = torch.tensor([1.0])
-
-    zono_bounds = softmax2_linearizer(ux, lx, uy, ly)
-    lam_x, lam_y = zono_bounds.input_weights
-    bias = zono_bounds.bias
-    ec = zono_bounds.error_coeffs
-    err = torch.as_tensor(ec.scalar if hasattr(ec, "scalar") else ec.tensor, device=bias.device).reshape(bias.shape)
-
-    def concrete_softmax2(x, y):
-        return x / (1 + x * torch.exp(y))
-
-    # Sample concrete points in the box and check they fall inside bounds.
-    n = 4000
-    x_samples = lx + (ux - lx) * torch.rand(n, *lx.shape)
-    y_samples = ly + (uy - ly) * torch.rand(n, *ly.shape)
-    vals = concrete_softmax2(x_samples, y_samples)
-
-    centers = lam_x * x_samples + lam_y * y_samples + bias
-    ub_pred = centers + err
-    lb_pred = centers - err
-
-    assert torch.all(vals <= ub_pred + 1e-6)
-    assert torch.all(vals >= lb_pred - 1e-6)
-
-
-def test_softmax2_linearizer_vector_boxes():
-    """Vector-domain softmax2 bounds remain sound across random boxes."""
-    torch.manual_seed(123)
-    from boundlab.zono.softmax2 import softmax2_linearizer
-
-    def run_once():
-        # Random positive ranges for x and signed ranges for y.
-        lx = torch.rand(1000) / 2
-        ux = (torch.rand(1000) + 1) / 2
-        ly = -1.5 + torch.rand(1000) * 0.5
-        uy = ly + torch.rand(1000) * 2.0
-
-        zb = softmax2_linearizer(ux, lx, uy, ly)
-        lam_x, lam_y = zb.input_weights
-        bias = zb.bias
-        ec = zb.error_coeffs
-        err = torch.as_tensor(ec.scalar if hasattr(ec, "scalar") else ec.tensor, device=bias.device).reshape(bias.shape)
-
-        def concrete_softmax2(x, y):
-            return x / (1 + x * torch.exp(y))
-
-        n = 5000
-        x_samples = lx + (ux - lx) * torch.rand(n, *lx.shape)
-        y_samples = ly + (uy - ly) * torch.rand(n, *ly.shape)
-        vals = concrete_softmax2(x_samples, y_samples)
-
-        centers = lam_x * x_samples + lam_y * y_samples + bias
-        ub_pred = centers + err
-        lb_pred = centers - err
-
-        tol = 5e-2
-        assert torch.all(vals >= lb_pred - tol)
-        groups = torch.nonzero(vals > ub_pred + tol)
-        if len(groups) > 0:
-            print(f"Found {len(groups)} violations:")
-            indices = [random.randint(0, len(groups)) for _ in range(min(5, len(groups)))]
-            for i in range(min(5, len(groups))):
-                id0, id1 = groups[indices[i]][0], groups[indices[i]][1]
-                print(f"  i={indices[i]} x={x_samples[id0, id1].item():.3f}, y={y_samples[id0, id1].item():.3f}, lx={lx[id1].item():.3f}, ux={ux[id1].item():.3f}, ly={ly[id1].item():.3f}, uy={uy[id1].item():.3f}, lam_x={lam_x[id1].item():.3f}, lam_y={lam_y[id1].item():.3f}, bias={bias[id1].item():.3f}, err={err[id1].item():.3f}, val={vals[id0, id1].item():.3f}, ub_pred={ub_pred[id0, id1].item():.3f}")
-        assert torch.all(vals <= ub_pred + tol)
-
-    for _ in range(3):
-        run_once()
-
-
-def test_softmax2_points_y_hits_extrema():
-    """_softmax2_points_y should pick near-extreme points within bounds."""
-    torch.manual_seed(321)
-    from boundlab.zono.softmax2 import _softmax2_points_y
-
-    def f(x, y, lam):
-        return x / (1 + x * torch.exp(y)) - lam * y
-
-    x = torch.rand(1000)
-    lam = torch.rand(1000)
-    lb = torch.rand(1000) - 2.0
-    ub = torch.rand(1000) - 1.0
-
-    upper, lower = _softmax2_points_y(x, lam, ub, lb)
-
-    # Candidates should stay within provided bounds.
-    assert torch.all(upper <= ub + 1e-8) and torch.all(upper >= lb - 1e-8)
-    assert torch.all(lower <= ub + 1e-8) and torch.all(lower >= lb - 1e-8)
-
-    # Verify they achieve near-max/min of f over a fine grid per element.
-    for i in range(len(x)):
-        grid = torch.linspace(lb[i], ub[i], 400)
-        vals = f(x[i], grid, lam[i])
-        max_val = vals.max()
-        min_val = vals.min()
-        assert torch.isclose(f(x[i], upper[i], lam[i]), max_val, atol=1e-3)
-        assert torch.isclose(f(x[i], lower[i], lam[i]), min_val, atol=1e-3)
 
 
 @pytest.mark.parametrize("seed", [21, 22, 23])

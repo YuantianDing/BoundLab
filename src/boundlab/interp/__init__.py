@@ -712,19 +712,24 @@ class Interpreter(Generic[E]):
                 }
 
                 # Dispatch on op_type (ignore domain)
-                handler = self.dispatcher[node.op_type]
-                result = handler(*args, **kwargs)
                 def to_repr(x: Any) -> str:
                     if isinstance(x, torch.Tensor):
                         return f"Tensor{list(x.shape)}({x.abs().max().item():.4g})"
                     return repr(x)
+                
                 if verbose:
                     outputs = ", ".join("%" + node.name for node in node.outputs if node is not None)
                     inputs = ", ".join("%" + node.name for node in node.inputs if node is not None)
-                    kwargs = ", ".join(f"{k}={to_repr(v)}" for k, v in kwargs.items())
-                    if kwargs:
-                        kwargs = ", " + kwargs
-                    print(f"{outputs} = {node.op_type}({inputs}{kwargs})")
+                    kwargs_str = ", ".join(f"{k}={to_repr(v)}" for k, v in kwargs.items())
+                    if kwargs_str:
+                        kwargs_str = ", " + kwargs_str
+                    print(f"{outputs} = {node.op_type}({inputs}{kwargs_str})")
+
+                handler = self.dispatcher[node.op_type]
+                result = handler(*args, **kwargs)
+                
+
+                if verbose:
                     arg_str = ", ".join(to_repr(arg) for arg in args)
                     print(f"{to_repr(result)} <- {arg_str}")
 

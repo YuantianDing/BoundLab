@@ -98,7 +98,10 @@ class ReshapeOp(LinearOp):
 
             output_dims = list(range(len(self.output_shape)))
             input_dims = [dims_map(d) for d in op.input_dims]
-            return EinsumOp(tensor, input_dims, output_dims, name=merge_name(self, "@", other))
+            result = EinsumOp(tensor, input_dims, output_dims, name=merge_name(self, "@", other))
+            assert result.input_shape == other.input_shape, f"ReshapeOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
+            assert result.output_shape == self.output_shape, f"ReshapeOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
+            return result
         return NotImplemented
 
     def __rmatmul__(self, other):
@@ -117,7 +120,10 @@ class ReshapeOp(LinearOp):
 
             input_dims = list(range(n_non_input, n_non_input + len(self.input_shape)))
             output_dims = [dims_map_inv(d - n_non_input) + n_non_input for d in op.output_dims]
-            return EinsumOp(tensor, input_dims, output_dims, name=merge_name(other, "@", self))
+            result = EinsumOp(tensor, input_dims, output_dims, name=merge_name(other, "@", self))
+            assert result.input_shape == self.input_shape, f"ReshapeOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
+            assert result.output_shape == other.output_shape, f"ReshapeOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
+            return result
         return super().__rmatmul__(other)
 
     def __str__(self):
@@ -207,7 +213,10 @@ class SqueezeOp(ReshapeOp):
             op = other
             for pos in sorted(squeezed, reverse=True):
                 op = op.squeeze_output(pos)
-            return EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(self, "@", other))
+            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(self, "@", other))
+            assert result.input_shape == other.input_shape, f"SqueezeOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
+            assert result.output_shape == self.output_shape, f"SqueezeOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
+            return result
         return NotImplemented
 
     def __rmatmul__(self, other):
@@ -221,7 +230,10 @@ class SqueezeOp(ReshapeOp):
             op = other
             for pos in sorted(squeezed):
                 op = op.unsqueeze_input(pos)
-            return EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(other, "@", self))
+            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(other, "@", self))
+            assert result.input_shape == self.input_shape, f"SqueezeOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
+            assert result.output_shape == other.output_shape, f"SqueezeOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
+            return result
         return super().__rmatmul__(other)
 
     def __str__(self):
@@ -257,7 +269,10 @@ class UnsqueezeOp(ReshapeOp):
         if isinstance(other, EinsumOp):
             assert self.input_shape == other.output_shape, f"{self}, {other}"
             op = other.unsqueeze_output(self.dim)
-            return EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(self, "@", other))
+            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(self, "@", other))
+            assert result.input_shape == other.input_shape, f"UnsqueezeOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
+            assert result.output_shape == self.output_shape, f"UnsqueezeOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
+            return result
         return NotImplemented
 
     def __rmatmul__(self, other):
@@ -265,7 +280,10 @@ class UnsqueezeOp(ReshapeOp):
         if isinstance(other, EinsumOp):
             assert self.output_shape == other.input_shape
             op = other.squeeze_input(self.dim)
-            return EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(other, "@", self))
+            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(other, "@", self))
+            assert result.input_shape == self.input_shape, f"UnsqueezeOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
+            assert result.output_shape == other.output_shape, f"UnsqueezeOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
+            return result
         return super().__rmatmul__(other)
 
     def __str__(self):

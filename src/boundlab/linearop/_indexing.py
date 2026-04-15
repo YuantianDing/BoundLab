@@ -103,12 +103,7 @@ class GetIndicesOp(LinearOp):
         if isinstance(other, EinsumOp):
             assert self.input_shape == other.output_shape
             tensor_dim = other.output_dims[self.dim]
-            if tensor_dim in other.mul_dims:
-                # Mul dim: swap past einsum
-                return _swap_getindices_einsum(self, other)
-            else:
-                # Dot/batch dim: fuse by indexing tensor
-                return _fuse_getindices_einsum(self, other)
+            return _apply_getindices_einsum(self, other, is_mul=tensor_dim in other.mul_dims)
         if isinstance(other, GetIndicesOp):
             # Compose: self gathers from other's output
             if self.dim == other.dim:
@@ -197,10 +192,7 @@ class SetIndicesOp(LinearOp):
         from boundlab.linearop._einsum import EinsumOp
         if isinstance(other, EinsumOp) and self.output_shape == other.input_shape:
             tensor_dim = other.input_dims[self.dim]
-            if tensor_dim in other.mul_dims:
-                return _swap_einsum_setindices(other, self)
-            else:
-                return _fuse_einsum_setindices(other, self)
+            return _apply_einsum_setindices(other, self, is_mul=tensor_dim in other.mul_dims)
         return super().__rmatmul__(other)
 
     def __str__(self):
@@ -226,149 +218,119 @@ def _index_tensor_along_dim(tensor, tensor_dim, indices):
     return result
 
 
-def _fuse_getindices_einsum(gi: GetIndicesOp, einsum):
-    """Fuse GetIndicesOp @ EinsumOp when indexed dim is dot/batch."""
+def _remap_dims_after_index(dims, tensor_dim, added_shape):
+    """Remap a list of tensor dims after indexing tensor_dim with added_shape.
+
+    tensor_dim in the original tensor becomes len(added_shape) dims starting at tensor_dim.
+    All dims > tensor_dim shift by (len(added_shape) - 1).
+    """
+    shift = len(added_shape) - 1
+    result = []
+    for d in dims:
+        if d > tensor_dim:
+            result.append(d + shift)
+        else:
+            result.append(d)
+    return result
+
+
+def _apply_getindices_einsum(gi: GetIndicesOp, einsum, is_mul: bool):
+    """Fuse/swap GetIndicesOp @ EinsumOp.
+
+    For dot/batch dims (is_mul=False): fuse by indexing the tensor, no input op.
+    For mul dims (is_mul=True): index the tensor AND add a GetIndicesOp on the input side.
+    """
     from boundlab.linearop._einsum import EinsumOp
 
     tensor_dim = einsum.output_dims[gi.dim]
+    n_added = len(gi.added_shape)
     new_tensor = _index_tensor_along_dim(einsum.tensor, tensor_dim, gi.indices)
 
-    # Update output_dims: dim is replaced by added_shape dims
-    n_added = len(gi.added_shape)
-    n_replace = 1
-    # The tensor now has added_shape dims instead of 1 dim at tensor_dim
-    # But we indexed along tensor_dim, so tensor_dim now has size len(indices.flatten())
-    # If added_shape is multi-dim, we need to reshape
-
     if n_added == 1:
-        return EinsumOp(new_tensor, einsum.input_dims, einsum.output_dims,
-                        name=merge_name(gi, "@", einsum))
+        new_input_dims = einsum.input_dims
+        new_output_dims = einsum.output_dims
     else:
-        # Multi-dim added_shape: need to unflatten tensor_dim
         shape = list(new_tensor.shape)
         shape[tensor_dim:tensor_dim + 1] = list(gi.added_shape)
         new_tensor = new_tensor.reshape(shape)
-
-        # Remap dims: dims after tensor_dim shift by (n_added - 1)
         shift = n_added - 1
         new_output_dims = []
         for i, d in enumerate(einsum.output_dims):
             if i < gi.dim:
                 new_output_dims.append(d if d < tensor_dim else d + shift)
             elif i == gi.dim:
-                for k in range(n_added):
-                    new_output_dims.append(tensor_dim + k)
+                new_output_dims.extend(tensor_dim + k for k in range(n_added))
             else:
                 new_output_dims.append(d + shift if d >= tensor_dim else d)
-        new_input_dims = [d + shift if d > tensor_dim else d for d in einsum.input_dims]
+        if is_mul:
+            new_input_dims = list(einsum.input_dims)
+            for j in range(len(new_input_dims)):
+                if new_input_dims[j] > tensor_dim:
+                    new_input_dims[j] += shift
+                # input dim == tensor_dim stays (handled by the input GetIndicesOp)
+        else:
+            new_input_dims = _remap_dims_after_index(einsum.input_dims, tensor_dim, gi.added_shape)
 
-        return EinsumOp(new_tensor, new_input_dims, new_output_dims,
-                        name=merge_name(gi, "@", einsum))
+    new_einsum = EinsumOp(new_tensor, new_input_dims, new_output_dims,
+                          name=merge_name(gi, "@", einsum))
+    assert new_einsum.output_shape == gi.output_shape, \
+        f"_apply_getindices_einsum: output_shape {new_einsum.output_shape} != {gi.output_shape}"
 
-
-def _swap_getindices_einsum(gi: GetIndicesOp, einsum):
-    """Swap GetIndicesOp past EinsumOp for mul dim."""
-    from boundlab.linearop._einsum import EinsumOp
-
-    tensor_dim = einsum.output_dims[gi.dim]
-    new_tensor = _index_tensor_along_dim(einsum.tensor, tensor_dim, gi.indices)
-
-    # Find the input dim that shares tensor_dim
-    input_d = einsum.input_dims.index(tensor_dim)
-
-    if len(gi.added_shape) == 1:
-        new_einsum = EinsumOp(new_tensor, einsum.input_dims, einsum.output_dims,
-                              name=merge_name(gi, "@swap@", einsum))
-    else:
-        shape = list(new_tensor.shape)
-        shape[tensor_dim:tensor_dim + 1] = list(gi.added_shape)
-        new_tensor = new_tensor.reshape(shape)
-        shift = len(gi.added_shape) - 1
-        new_output_dims = []
-        for i, d in enumerate(einsum.output_dims):
-            if i < gi.dim:
-                new_output_dims.append(d if d < tensor_dim else d + shift)
-            elif i == gi.dim:
-                for k in range(len(gi.added_shape)):
-                    new_output_dims.append(tensor_dim + k)
-            else:
-                new_output_dims.append(d + shift if d >= tensor_dim else d)
-        new_input_dims = list(einsum.input_dims)
-        for j in range(len(new_input_dims)):
-            if new_input_dims[j] > tensor_dim:
-                new_input_dims[j] += shift
-            elif new_input_dims[j] == tensor_dim:
-                # This input dim now corresponds to the flattened added_shape
-                # We'll handle this via a GetIndicesOp on input
-                pass
-        new_einsum = EinsumOp(new_tensor, new_input_dims, new_output_dims,
-                              name=merge_name(gi, "@swap@", einsum))
-
-    # Add GetIndicesOp on input side
-    input_gi = GetIndicesOp(einsum.input_shape, input_d, gi.indices, gi.added_shape)
-    return ComposedOp(new_einsum, input_gi)
+    if is_mul:
+        input_d = einsum.input_dims.index(tensor_dim)
+        input_gi = GetIndicesOp(einsum.input_shape, input_d, gi.indices, gi.added_shape)
+        return ComposedOp(new_einsum, input_gi)
+    assert new_einsum.input_shape == einsum.input_shape, \
+        f"_apply_getindices_einsum: input_shape {new_einsum.input_shape} != {einsum.input_shape}"
+    return new_einsum
 
 
-def _fuse_einsum_setindices(einsum, si: SetIndicesOp):
-    """Fuse EinsumOp @ SetIndicesOp when indexed dim is dot/batch."""
+def _apply_einsum_setindices(einsum, si: SetIndicesOp, is_mul: bool):
+    """Fuse/swap EinsumOp @ SetIndicesOp.
+
+    For dot/batch dims (is_mul=False): fuse by indexing the tensor, no output op.
+    For mul dims (is_mul=True): index the tensor AND add a SetIndicesOp on the output side.
+    """
     from boundlab.linearop._einsum import EinsumOp
 
     tensor_dim = einsum.input_dims[si.dim]
+    n_added = len(si.added_shape)
     new_tensor = _index_tensor_along_dim(einsum.tensor, tensor_dim, si.indices)
 
-    if len(si.added_shape) == 1:
-        return EinsumOp(new_tensor, einsum.input_dims, einsum.output_dims,
-                        name=merge_name(einsum, "@", si))
+    if n_added == 1:
+        new_input_dims = einsum.input_dims
+        new_output_dims = einsum.output_dims
     else:
         shape = list(new_tensor.shape)
         shape[tensor_dim:tensor_dim + 1] = list(si.added_shape)
         new_tensor = new_tensor.reshape(shape)
-        shift = len(si.added_shape) - 1
+        shift = n_added - 1
         new_input_dims = []
         for i, d in enumerate(einsum.input_dims):
             if i < si.dim:
                 new_input_dims.append(d if d < tensor_dim else d + shift)
             elif i == si.dim:
-                for k in range(len(si.added_shape)):
-                    new_input_dims.append(tensor_dim + k)
+                new_input_dims.extend(tensor_dim + k for k in range(n_added))
             else:
                 new_input_dims.append(d + shift if d >= tensor_dim else d)
-        new_output_dims = [d + shift if d > tensor_dim else d for d in einsum.output_dims]
-        return EinsumOp(new_tensor, new_input_dims, new_output_dims,
-                        name=merge_name(einsum, "@", si))
+        if is_mul:
+            new_output_dims = list(einsum.output_dims)
+            for j in range(len(new_output_dims)):
+                if new_output_dims[j] > tensor_dim:
+                    new_output_dims[j] += shift
+            # output dim == tensor_dim stays (handled by the output SetIndicesOp)
+        else:
+            new_output_dims = _remap_dims_after_index(einsum.output_dims, tensor_dim, si.added_shape)
 
+    new_einsum = EinsumOp(new_tensor, new_input_dims, new_output_dims,
+                          name=merge_name(einsum, "@", si))
+    assert new_einsum.input_shape == si.input_shape, \
+        f"_apply_einsum_setindices: input_shape {new_einsum.input_shape} != {si.input_shape}"
 
-def _swap_einsum_setindices(einsum, si: SetIndicesOp):
-    """Swap SetIndicesOp past EinsumOp for mul dim."""
-    from boundlab.linearop._einsum import EinsumOp
-
-    tensor_dim = einsum.input_dims[si.dim]
-    new_tensor = _index_tensor_along_dim(einsum.tensor, tensor_dim, si.indices)
-    output_d = einsum.output_dims.index(tensor_dim)
-
-    if len(si.added_shape) == 1:
-        new_einsum = EinsumOp(new_tensor, einsum.input_dims, einsum.output_dims,
-                              name=merge_name(einsum, "@swap@", si))
-    else:
-        shape = list(new_tensor.shape)
-        shape[tensor_dim:tensor_dim + 1] = list(si.added_shape)
-        new_tensor = new_tensor.reshape(shape)
-        shift = len(si.added_shape) - 1
-        new_input_dims = []
-        for i, d in enumerate(einsum.input_dims):
-            if i < si.dim:
-                new_input_dims.append(d if d < tensor_dim else d + shift)
-            elif i == si.dim:
-                for k in range(len(si.added_shape)):
-                    new_input_dims.append(tensor_dim + k)
-            else:
-                new_input_dims.append(d + shift if d >= tensor_dim else d)
-        new_output_dims = list(einsum.output_dims)
-        for j in range(len(new_output_dims)):
-            if new_output_dims[j] > tensor_dim:
-                new_output_dims[j] += shift
-        new_einsum = EinsumOp(new_tensor, new_input_dims, new_output_dims,
-                              name=merge_name(einsum, "@swap@", si))
-
-    output_si = SetIndicesOp(einsum.output_shape, output_d, si.indices, si.added_shape)
-    return ComposedOp(output_si, new_einsum)
+    if is_mul:
+        output_d = einsum.output_dims.index(tensor_dim)
+        output_si = SetIndicesOp(einsum.output_shape, output_d, si.indices, si.added_shape)
+        return ComposedOp(output_si, new_einsum)
+    assert new_einsum.output_shape == einsum.output_shape, \
+        f"_apply_einsum_setindices: output_shape {new_einsum.output_shape} != {einsum.output_shape}"
+    return new_einsum

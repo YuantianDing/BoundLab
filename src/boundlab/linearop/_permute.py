@@ -40,7 +40,10 @@ class PermuteOp(LinearOp):
         if isinstance(other, EinsumOp):
             assert self.input_shape == other.output_shape
             new_output_dims = [other.output_dims[self.dims[i]] for i in range(len(other.output_dims))]
-            return EinsumOp(other.tensor, other.input_dims, new_output_dims, name=merge_name(self, "@", other))
+            result = EinsumOp(other.tensor, other.input_dims, new_output_dims, name=merge_name(self, "@", other))
+            assert result.input_shape == other.input_shape, f"PermuteOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
+            assert result.output_shape == self.output_shape, f"PermuteOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
+            return result
         return NotImplemented
 
     def __rmatmul__(self, other):
@@ -48,7 +51,10 @@ class PermuteOp(LinearOp):
         if isinstance(other, EinsumOp):
             assert self.output_shape == other.input_shape
             new_input_dims = [other.input_dims[self.inv_dims[i]] for i in range(len(other.input_dims))]
-            return EinsumOp(other.tensor, new_input_dims, other.output_dims, name=merge_name(other, "@", self))
+            result = EinsumOp(other.tensor, new_input_dims, other.output_dims, name=merge_name(other, "@", self))
+            assert result.input_shape == self.input_shape, f"PermuteOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
+            assert result.output_shape == other.output_shape, f"PermuteOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
+            return result
         return super().__rmatmul__(other)
 
     def __str__(self):

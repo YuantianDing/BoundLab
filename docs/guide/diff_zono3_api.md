@@ -109,7 +109,7 @@ class Model(torch.nn.Module):
         return diff_pair(x, y)
 
 exported = torch.export.export(Model(), (torch.zeros(4), torch.zeros(4)))
-any("diff_pair" in n.target.__name__
+any("DiffPair" in n.target.__name__
     for n in exported.graph.nodes if n.op == "call_function")  # True
 ```
 

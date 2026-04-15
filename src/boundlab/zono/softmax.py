@@ -13,22 +13,10 @@ and reciprocal are needed.
 
 import torch
 
+from boundlab import utils
 from boundlab.expr._core import Expr
-from boundlab.linearop._einsum import EinsumOp
 
 
-def _pairwise_diff(x: Expr, dim: int) -> Expr:
-    """Build ``d[..., i, j, ...] = x[..., j, ...] - x[..., i, ...]`` as a
-    single :class:`EinsumOp` applied to *x*.
-
-    Using one LinearOp (rather than two broadcasted terms combined via
-    subtraction) avoids the ``SumOp`` merging two structurally similar
-    :class:`ExpandOp` s that would otherwise cancel the noise contribution.
-    """
-    N = x.shape[dim]
-    l = x.unsqueeze(dim).expand_on(dim, N)
-    r = x.unsqueeze(dim + 1).expand_on(dim + 1, N)
-    return r - l
 
 
 def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
@@ -63,21 +51,16 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     >>> y.shape
     torch.Size([2, 3])
     """
-    assert dim == -1 or dim == len(x.shape) - 1
-    ndim = len(x.shape)
     if dim < 0:
-        dim = ndim + dim
+        dim += len(x.shape)
+    assert dim == len(x.shape) - 1, "softmax_handler only supports the last dimension"
 
     from . import interpret
     exp_handler = interpret["Exp"]
     reciprocal_handler = interpret["Reciprocal"]
 
-    # Pairwise differences: diff[..., i, j, ...] = x[..., j, ...] - x[..., i, ...].
-    diff = _pairwise_diff(x, dim)
-
-    exp_diff = exp_handler(diff)
-
-    # Sum over j (original softmax axis, now at dim+1) -> shape matches x.
-    sum_exp = exp_diff.sum(dim=dim + 1, keepdim=False)
-
+    # pairwise_diff gives diff[..., i, j] = x[..., i] - x[..., j]
+    # softmax(x)[i] = 1 / sum_j exp(x[j] - x[i]) = 1 / sum_j exp(-diff[..., i, j])
+    diff = utils.pairwise_diff(x, dim)
+    sum_exp = exp_handler(-diff).sum(dim=dim + 1, keepdim=False)
     return reciprocal_handler(sum_exp)

@@ -15,12 +15,14 @@ import time
 from argparse import Namespace
 from pathlib import Path
 
+import onnx_ir
 import torch
 import torch.nn as nn
 
 import boundlab.expr as expr
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
+from pyinstrument import Profiler
 from Zonotope import Zonotope as DeepTZonotope  # type: ignore
 from Zonotope import make_zonotope_new_weights_same_args  # type: ignore
 
@@ -140,14 +142,13 @@ def build_input_from_embeddings(
     return center, perturbed_idx
 
 
-def boundlab_bounds(model: nn.Module, center: torch.Tensor, perturbed_idx: int, eps: float):
-    exported = onnx_export(model, (center,))
+def boundlab_bounds(exported: onnx_ir.Model, center: torch.Tensor, perturbed_idx: int, eps: float):
     op_types = sorted({node.op_type for node in exported.graph})
     unsupported = [op for op in op_types if op not in zono.interpret]
     if unsupported:
         raise RuntimeError(f"Unsupported ONNX ops for zono.interpret: {unsupported}")
 
-    op = zono.interpret(exported)
+    op = zono.interpret(exported, verbose=True)
     noise = expr.LpEpsilon(list(center.shape), p="inf")
     mask = torch.zeros_like(center)
     mask[perturbed_idx] = 1.0
@@ -195,9 +196,15 @@ def main() -> None:
     tokens = ["[CLS]", "a", "very", "good", "movie", "[SEP]"]
     center, perturbed_idx = build_input_from_embeddings(state, vocab, tokens)
     eps = 0.01
+    ir = onnx_export(model, (center,))
 
     t0 = time.perf_counter()
-    bl_ub, bl_lb, op_types = boundlab_bounds(model, center, perturbed_idx, eps)
+    profiler = Profiler()
+    profiler.start()
+    bl_ub, bl_lb, op_types = boundlab_bounds(ir, center, perturbed_idx, eps)
+    profiler.stop()
+    bl_time = profiler.last_session.duration
+    profiler.open_in_browser()
     bl_time = time.perf_counter() - t0
     max_bl_width = torch.max(bl_ub - bl_lb).item()
 

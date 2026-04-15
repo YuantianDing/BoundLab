@@ -30,13 +30,9 @@ class GatherOp(LinearOp):
         super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape != self.input_shape:
-            return self.vforward(x)
         return torch.gather(x, self.dim, self.index)
 
     def backward(self, grad: torch.Tensor) -> torch.Tensor:
-        if grad.shape != self.output_shape:
-            return self.vbackward(grad)
         result = torch.zeros(self.input_shape, dtype=grad.dtype, device=grad.device)
         result.scatter_add_(self.dim, self.index, grad)
         return result
@@ -74,15 +70,11 @@ class ScatterOp(LinearOp):
         super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape != self.input_shape:
-            return self.vforward(x)
         result = torch.zeros(self.output_shape, dtype=x.dtype, device=x.device)
         result.scatter_(self.dim, self.index, x)
         return result
 
     def backward(self, grad: torch.Tensor) -> torch.Tensor:
-        if grad.shape != self.output_shape:
-            return self.vbackward(grad)
         return torch.gather(grad, self.dim, self.index)
 
     def vforward(self, x: torch.Tensor) -> torch.Tensor:

@@ -205,7 +205,10 @@ class EinsumOp(LinearOp):
             assert all(a == b for a, b in zip(op.input_dims, range(idims, op.tensor.dim()))), "Full EinsumOp should have input_dims permuted to the end."
             tensor = other.vbackward(op.tensor)
             input_dims = list(range(idims, tensor.dim()))
-            return EinsumOp(tensor, input_dims, op.output_dims, name=merge_name(self, "@", other))
+            result = EinsumOp(tensor, input_dims, op.output_dims, name=merge_name(self, "@", other))
+            assert result.input_shape == other.input_shape, f"EinsumOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
+            assert result.output_shape == self.output_shape, f"EinsumOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
+            return result
         if isinstance(other, EinsumOp):
             return merge_einsumop(self, other)
         if isinstance(other, ScalarOp):
@@ -225,7 +228,10 @@ class EinsumOp(LinearOp):
             new_odims = len(other.output_shape)
             output_dims = list(range(0, new_odims))
             input_dims = list(range(new_odims, tensor.dim()))
-            return EinsumOp(tensor, input_dims, output_dims, name=merge_name(other, "@", self))
+            result = EinsumOp(tensor, input_dims, output_dims, name=merge_name(other, "@", self))
+            assert result.input_shape == self.input_shape, f"EinsumOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
+            assert result.output_shape == other.output_shape, f"EinsumOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
+            return result
         if isinstance(other, EinsumOp):
             return merge_einsumop(other, self)
         if isinstance(other, ScalarOp):
@@ -484,7 +490,10 @@ def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
 
     y_idx, x_idx, new_tensor_idx = _to_ascii_letters(y_idx, x_idx, new_tensor_idx)
     tensor = torch.einsum(f"{y_idx},{x_idx}->{new_tensor_idx}", y.tensor, x.tensor)
-    return EinsumOp(tensor, input_dims, output_dims, name=merge_name(x, "@", y))
+    result = EinsumOp(tensor, input_dims, output_dims, name=merge_name(x, "@", y))
+    assert result.input_shape == y.input_shape, f"merge_einsumop: input_shape mismatch {result.input_shape} != {y.input_shape}"
+    assert result.output_shape == x.output_shape, f"merge_einsumop: output_shape mismatch {result.output_shape} != {x.output_shape}"
+    return result
 
 def _to_ascii_letters(*args: list[int]) -> tuple[str, ...]:
     return tuple("".join(string.ascii_letters[i] for i in a) for a in args)

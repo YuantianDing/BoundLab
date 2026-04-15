@@ -117,12 +117,7 @@ class GetSliceOp(LinearOp):
                 if tensor_dim in other.mul_dims:
                     mul_slice_dims.append(d)
 
-            if not mul_slice_dims:
-                # All sliced dims are dot/batch: fuse directly
-                return _fuse_getslice_einsum(self, other)
-            else:
-                # Mul dims need swapping: slice tensor AND add GetSliceOp on input side
-                return _swap_getslice_einsum(self, other, mul_slice_dims)
+            return _apply_getslice_einsum(self, other, mul_slice_dims)
         return NotImplemented
 
     def __rmatmul__(self, other):
@@ -186,10 +181,7 @@ class SetSliceOp(LinearOp):
                 if tensor_dim in other.mul_dims:
                     mul_slice_dims.append(d)
 
-            if not mul_slice_dims:
-                return _fuse_einsum_setslice(other, self)
-            else:
-                return _swap_einsum_setslice(other, self, mul_slice_dims)
+            return _apply_einsum_setslice(other, self, mul_slice_dims)
         return super().__rmatmul__(other)
 
     def __matmul__(self, other):
@@ -247,22 +239,6 @@ def _gather_slices_batched(grad: torch.Tensor, slices: list[list[slice]], batch_
 
 def _scatter_slices(result: torch.Tensor, x: torch.Tensor, slices: list[list[slice]]) -> None:
     """Scatter x into result at slice positions (in-place)."""
-    # Process one dim at a time: split x along dim, place pieces
-    for d in range(len(slices)):
-        dim_slices = slices[d]
-        if _is_full(dim_slices, result.shape[d]):
-            continue
-        sizes = [s.stop - s.start for s in dim_slices]
-        parts = x.split(sizes, dim=d) if len(dim_slices) > 1 else [x]
-        # Zero out result and place parts
-        temp = torch.zeros_like(result)
-        for s, part in zip(dim_slices, parts):
-            # Need to handle the fact that result already has the right shape
-            # We scatter along this dim only
-            pass
-
-    # Simpler approach: compute the tuple index for the intersection of all slices
-    # For each combo of one slice per dim, assign the corresponding block
     _recursive_scatter(result, x, slices, 0, [], [])
 
 
@@ -359,77 +335,52 @@ def _merge_adjacent_slices(slices: list[slice]) -> list[slice]:
 # ---------------------------------------------------------------------------
 
 
-def _fuse_getslice_einsum(gs: GetSliceOp, einsum):
-    """Fuse GetSliceOp @ EinsumOp when all sliced dims are dot/batch."""
-    from boundlab.linearop._einsum import EinsumOp
-
-    tensor_slices = [slice(None)] * einsum.tensor.dim()
-    for d, dim_slices in enumerate(gs.slices):
-        if _is_full(dim_slices, gs.input_shape[d]):
-            continue
-        tensor_dim = einsum.output_dims[d]
-        # Slice the tensor along this dim
-        if len(dim_slices) == 1:
-            s = dim_slices[0]
-            tensor_slices[tensor_dim] = slice(s.start, s.stop)
-        else:
-            # Multiple slices: need to gather and cat
-            return _fuse_getslice_einsum_multi(gs, einsum)
-
-    new_tensor = einsum.tensor[tuple(tensor_slices)]
-    return EinsumOp(new_tensor, einsum.input_dims, einsum.output_dims,
-                    name=merge_name(gs, "@", einsum))
-
-
-def _fuse_getslice_einsum_multi(gs: GetSliceOp, einsum):
-    """Handle fusion when slices have multiple ranges per dim."""
-    from boundlab.linearop._einsum import EinsumOp
-
-    tensor = einsum.tensor
-    for d, dim_slices in enumerate(gs.slices):
-        if _is_full(dim_slices, gs.input_shape[d]):
-            continue
-        tensor_dim = einsum.output_dims[d]
-        parts = [tensor.narrow(tensor_dim, s.start, s.stop - s.start) for s in dim_slices]
-        tensor = torch.cat(parts, dim=tensor_dim)
-
-    return EinsumOp(tensor, einsum.input_dims, einsum.output_dims,
-                    name=merge_name(gs, "@", einsum))
-
-
-def _swap_getslice_einsum(gs: GetSliceOp, einsum, mul_dims: list[int]):
-    """Swap GetSliceOp past EinsumOp for mul dims.
-
-    Slices tensor on all dims, and adds GetSliceOp on input side for mul dims.
-    """
-    from boundlab.linearop._einsum import EinsumOp
-
-    # Slice tensor on all dims (both batch and mul)
-    tensor = einsum.tensor
-    input_side_slices = [[slice(0, einsum.input_shape[d])] for d in range(len(einsum.input_shape))]
-
-    for d, dim_slices in enumerate(gs.slices):
-        if _is_full(dim_slices, gs.input_shape[d]):
-            continue
-        tensor_dim = einsum.output_dims[d]
-        # Slice tensor
+def _slice_tensor_along_dims(tensor, dims_map, slices_map):
+    """Slice tensor along multiple dims. dims_map[output_d] = tensor_dim; slices_map[output_d] = dim_slices."""
+    for output_d, tensor_dim in dims_map.items():
+        dim_slices = slices_map[output_d]
         if len(dim_slices) == 1:
             s = dim_slices[0]
             tensor = tensor.narrow(tensor_dim, s.start, s.stop - s.start)
         else:
             parts = [tensor.narrow(tensor_dim, s.start, s.stop - s.start) for s in dim_slices]
             tensor = torch.cat(parts, dim=tensor_dim)
+    return tensor
 
-        # For mul dims, also record the input-side slice
-        if d in mul_dims:
-            # Find which input dim corresponds to this mul tensor dim
-            input_d = einsum.input_dims.index(tensor_dim)
-            input_side_slices[input_d] = dim_slices
 
+def _apply_getslice_einsum(gs: GetSliceOp, einsum, mul_dims: list[int]):
+    """Fuse/swap GetSliceOp @ EinsumOp.
+
+    Slices the tensor on all non-trivial dims. For mul dims, also adds a
+    GetSliceOp on the input side (swap). For dot/batch dims, no input op needed (fuse).
+    """
+    from boundlab.linearop._einsum import EinsumOp
+
+    dims_map = {}
+    slices_map = {}
+    for d, dim_slices in enumerate(gs.slices):
+        if not _is_full(dim_slices, gs.input_shape[d]):
+            dims_map[d] = einsum.output_dims[d]
+            slices_map[d] = dim_slices
+
+    tensor = _slice_tensor_along_dims(einsum.tensor, dims_map, slices_map)
     new_einsum = EinsumOp(tensor, einsum.input_dims, einsum.output_dims,
-                          name=merge_name(gs, "@swap@", einsum))
+                          name=merge_name(gs, "@", einsum))
+    assert new_einsum.output_shape == gs.output_shape, \
+        f"_apply_getslice_einsum: output_shape {new_einsum.output_shape} != {gs.output_shape}"
 
-    # Check if we need an input-side GetSliceOp
+    if not mul_dims:
+        assert new_einsum.input_shape == einsum.input_shape, \
+            f"_apply_getslice_einsum: input_shape {new_einsum.input_shape} != {einsum.input_shape}"
+        return new_einsum
+
+    # Build input-side slices for mul dims
+    input_side_slices = [[slice(0, einsum.input_shape[d])] for d in range(len(einsum.input_shape))]
+    for d in mul_dims:
+        tensor_dim = einsum.output_dims[d]
+        input_d = einsum.input_dims.index(tensor_dim)
+        input_side_slices[input_d] = gs.slices[d]
+
     needs_input_slice = any(
         not _is_full(input_side_slices[d], einsum.input_shape[d])
         for d in range(len(einsum.input_shape))
@@ -440,50 +391,38 @@ def _swap_getslice_einsum(gs: GetSliceOp, einsum, mul_dims: list[int]):
     return new_einsum
 
 
-def _fuse_einsum_setslice(einsum, ss: SetSliceOp):
-    """Fuse EinsumOp @ SetSliceOp when all sliced dims are dot/batch."""
+def _apply_einsum_setslice(einsum, ss: SetSliceOp, mul_dims: list[int]):
+    """Fuse/swap EinsumOp @ SetSliceOp.
+
+    Slices the tensor on all non-trivial dims. For mul dims, also adds a
+    SetSliceOp on the output side (swap). For dot/batch dims, no output op needed (fuse).
+    """
     from boundlab.linearop._einsum import EinsumOp
 
-    tensor = einsum.tensor
+    dims_map = {}
+    slices_map = {}
     for d, dim_slices in enumerate(ss.slices):
-        if _is_full(dim_slices, ss.output_shape[d]):
-            continue
-        tensor_dim = einsum.input_dims[d]
-        if len(dim_slices) == 1:
-            s = dim_slices[0]
-            tensor = tensor.narrow(tensor_dim, s.start, s.stop - s.start)
-        else:
-            parts = [tensor.narrow(tensor_dim, s.start, s.stop - s.start) for s in dim_slices]
-            tensor = torch.cat(parts, dim=tensor_dim)
+        if not _is_full(dim_slices, ss.output_shape[d]):
+            dims_map[d] = einsum.input_dims[d]
+            slices_map[d] = dim_slices
 
-    return EinsumOp(tensor, einsum.input_dims, einsum.output_dims,
-                    name=merge_name(einsum, "@", ss))
-
-
-def _swap_einsum_setslice(einsum, ss: SetSliceOp, mul_dims: list[int]):
-    """Swap SetSliceOp past EinsumOp for mul dims."""
-    from boundlab.linearop._einsum import EinsumOp
-
-    tensor = einsum.tensor
-    output_side_slices = [[slice(0, einsum.output_shape[d])] for d in range(len(einsum.output_shape))]
-
-    for d, dim_slices in enumerate(ss.slices):
-        if _is_full(dim_slices, ss.output_shape[d]):
-            continue
-        tensor_dim = einsum.input_dims[d]
-        if len(dim_slices) == 1:
-            s = dim_slices[0]
-            tensor = tensor.narrow(tensor_dim, s.start, s.stop - s.start)
-        else:
-            parts = [tensor.narrow(tensor_dim, s.start, s.stop - s.start) for s in dim_slices]
-            tensor = torch.cat(parts, dim=tensor_dim)
-
-        if d in mul_dims:
-            output_d = einsum.output_dims.index(tensor_dim)
-            output_side_slices[output_d] = dim_slices
-
+    tensor = _slice_tensor_along_dims(einsum.tensor, dims_map, slices_map)
     new_einsum = EinsumOp(tensor, einsum.input_dims, einsum.output_dims,
-                          name=merge_name(einsum, "@swap@", ss))
+                          name=merge_name(einsum, "@", ss))
+    assert new_einsum.input_shape == ss.input_shape, \
+        f"_apply_einsum_setslice: input_shape {new_einsum.input_shape} != {ss.input_shape}"
+
+    if not mul_dims:
+        assert new_einsum.output_shape == einsum.output_shape, \
+            f"_apply_einsum_setslice: output_shape {new_einsum.output_shape} != {einsum.output_shape}"
+        return new_einsum
+
+    # Build output-side slices for mul dims
+    output_side_slices = [[slice(0, einsum.output_shape[d])] for d in range(len(einsum.output_shape))]
+    for d in mul_dims:
+        tensor_dim = einsum.input_dims[d]
+        output_d = einsum.output_dims.index(tensor_dim)
+        output_side_slices[output_d] = ss.slices[d]
 
     needs_output_slice = any(
         not _is_full(output_side_slices[d], einsum.output_shape[d])
