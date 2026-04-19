@@ -22,7 +22,7 @@ import boundlab.expr as expr
 from boundlab.interp.onnx import onnx_export
 
 import boundlab.zono as zono
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.net import diff_net
 from boundlab.diff.op import DiffLinear, diff_pair
 from boundlab.diff.zono3 import interpret as diff_interpret

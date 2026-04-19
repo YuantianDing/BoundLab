@@ -6,9 +6,9 @@ softmax as ``exp → reduce-sum → reciprocal → element-wise product''
 
 import torch
 
-from boundlab.diff import expr
+from boundlab.diff.zono3 import expr
 from boundlab.expr import Expr, ConstVal
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from .bilinear import diff_bilinear_elementwise
 
 
@@ -37,7 +37,7 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     >>> import torch
     >>> import boundlab.expr as expr
     >>> from boundlab.diff.expr import DiffExpr3
-    >>> from boundlab.diff.zono3.softmax import diff_softmax_handler
+    >>> from boundlab.diff.zono3.default.softmax import diff_softmax_handler
     >>> x = expr.ConstVal(torch.zeros(2, 3)) + 0.1 * expr.LpEpsilon([2, 3])
     >>> y = expr.ConstVal(torch.ones(2, 3)) + 0.1 * expr.LpEpsilon([2, 3])
     >>> t = DiffExpr3(x, y, x - y)
@@ -45,7 +45,7 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     >>> out.diff.shape
     torch.Size([2, 3])
     """
-    from . import interpret
+    from .. import interpret
     
     if isinstance(x, torch.Tensor):
         x = ConstVal(x)

@@ -11,7 +11,7 @@ Dot Product / Matrix Multiply:
 import torch
 
 from boundlab.expr._core import Expr
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.zono.bilinear import (
     bilinear_elementwise,
     bilinear_matmul,
@@ -98,11 +98,7 @@ def diff_matmul_handler(a, b):
             return diff_bilinear_matmul(a, b3)
 
     if isinstance(a, DiffExpr2) and isinstance(b, DiffExpr3):
-        try:
-            return a @ b
-        except TypeError:
-            a3 = DiffExpr3(a.x, a.y, a.x - a.y)
-            return diff_bilinear_matmul(a3, b)
+        return a @ b
 
     if isinstance(a, DiffExpr2) and isinstance(b, DiffExpr2):
         try:

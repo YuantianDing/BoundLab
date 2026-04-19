@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from boundlab import interp
-from boundlab.diff import expr
+from boundlab.diff.zono3 import expr, gradlin
 from boundlab.utils import not0
 
 r"""Triple-Zonotope-Based Abstract Interpretation for Differential Verification
@@ -51,7 +51,7 @@ from boundlab.expr._core import Expr
 from boundlab.expr._affine import ConstVal
 from boundlab.expr._var import LpEpsilon
 from boundlab.interp import Interpreter  # noqa: F401
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.linearop._base import LinearOp
 from boundlab.zono import ZonoBounds, interpret as std_interpret
 
@@ -194,7 +194,7 @@ class DiffZonoBounds:
 # Lineariser registration
 # =====================================================================
 
-def _register_linearizer(name: str):
+def linearizer_to_hander(linearizer):
     """Register a differential lineariser for a non-linear activation.
 
     The decorated function receives ``(xs, ys, ds)`` — three parallel lists of
@@ -218,53 +218,63 @@ def _register_linearizer(name: str):
     inputs have their diff synthesised as ``x − y``.
     """
 
-    def decorator(linearizer):
-        def handler(*args):
-            if not any(isinstance(a, (DiffExpr3, DiffExpr2)) for a in args):
-                return NotImplemented
-            xs, ys, ds = [], [], []
-            for a in args:
-                if isinstance(a, DiffExpr3):
-                    xs.append(a.x);
-                    ys.append(a.y);
-                    ds.append(a.diff)
-                elif isinstance(a, DiffExpr2):
-                    xs.append(a.x);
-                    ys.append(a.y);
-                    ds.append(a.x - a.y)
-                else:
-                    xs.append(a);
-                    ys.append(a);
-                    ds.append(expr.ConstVal(None))  # constant: diff is 0
-            return _build_triple_from_dzb(linearizer(xs, ys, ds), xs, ys, ds)
-
-        interpret[name] = handler
-        return linearizer
-
-    return decorator
+    def handler(*args):
+        if not any(isinstance(a, (DiffExpr3, DiffExpr2)) for a in args):
+            return NotImplemented
+        xs, ys, ds = [], [], []
+        for a in args:
+            if isinstance(a, DiffExpr3):
+                xs.append(a.x);
+                ys.append(a.y);
+                ds.append(a.diff)
+            elif isinstance(a, DiffExpr2):
+                xs.append(a.x);
+                ys.append(a.y);
+                ds.append(a.x - a.y)
+            else:
+                xs.append(a);
+                ys.append(a);
+                ds.append(expr.ConstVal(None))  # constant: diff is 0
+        return _build_triple_from_dzb(linearizer(xs, ys, ds), xs, ys, ds)
+    return handler
 
 
 # =====================================================================
 # Activation modules (imported last so helpers are already defined)
 # =====================================================================
 
-from . import relu as _relu  # noqa: E402  — registers "relu"
-from . import tanh as _tanh  # noqa: E402  — registers "tanh"
-from . import exp as _exp  # noqa: E402  — registers "Exp"
-from . import reciprocal as _reciprocal  # noqa: E402  — registers "Reciprocal"
-from . import heaviside as _heaviside  # noqa: E402  — registers "HeavisidePruning"
+from .default import (  # noqa: E402
+    relu_linearizer,
+    tanh_linearizer,
+    exp_linearizer,
+    reciprocal_linearizer,
+    diff_mul_handler,
+    diff_matmul_handler,
+    diff_bilinear_elementwise,
+    diff_bilinear_matmul,
+    diff_softmax_handler,
+    diff_heaviside_pruning_handler,
+)
 
-# ONNX activation op names
-interpret["Relu"] = interpret["relu"]
-interpret["Tanh"] = interpret["tanh"]
+# Activation op names — both ATen (lowercase) and ONNX (capitalised) forms.
+_relu_diff = linearizer_to_hander(relu_linearizer)
+_tanh_diff = linearizer_to_hander(tanh_linearizer)
+_exp_diff = linearizer_to_hander(exp_linearizer)
+_reciprocal_diff = linearizer_to_hander(reciprocal_linearizer)
+
+interpret["relu"] = _relu_diff
+interpret["Relu"] = _relu_diff
+interpret["tanh"] = _tanh_diff
+interpret["Tanh"] = _tanh_diff
+interpret["exp"] = _exp_diff
+interpret["Exp"] = _exp_diff
+interpret["reciprocal"] = _reciprocal_diff
+interpret["Reciprocal"] = _reciprocal_diff
 
 # diff_pair: converts paired tensors (from boundlab::diff_pair ONNX nodes) to DiffExpr2
 from boundlab.diff.op import diff_pair_handler  # noqa: E402
 
 interpret["DiffPair"] = diff_pair_handler
-
-# Bilinear handlers (differential mul/matmul)
-from .bilinear import diff_mul_handler, diff_matmul_handler  # noqa: E402
 
 def onnx_boardcasted(fn):
     return lambda X, Y, *args, **kwargs: fn(*interp._onnx_broadcast(X, Y), *args, **kwargs)
@@ -273,27 +283,16 @@ interpret["Mul"] = onnx_boardcasted(diff_mul_handler)
 interpret["MatMul"] = diff_matmul_handler
 interpret["Div"] = onnx_boardcasted(lambda a, b: diff_mul_handler(a, interpret["Reciprocal"](b)))
 
-# Softmax: both call_module (nn.Softmax) and ATen lowered (_softmax.default)
-from .softmax import diff_softmax_handler  # noqa: E402
-
-# interpret["softmax"] = diff_softmax_handler
-# interpret["_softmax"] = lambda x, dim=-1, _half_to_float=False: diff_softmax_handler(x, dim=dim)
 interpret["Softmax"] = lambda X, axis=-1: diff_softmax_handler(X, dim=axis)
 
-# Public re-exports
-from .relu import relu_linearizer  # noqa: E402, F401
-from .tanh import tanh_linearizer  # noqa: E402, F401
-from .exp import exp_linearizer  # noqa: E402, F401
-from .reciprocal import reciprocal_linearizer  # noqa: E402, F401
-from .bilinear import (  # noqa: E402, F401
-    diff_bilinear_elementwise,
-    diff_bilinear_matmul,
-)
+interpret_gradlin = Interpreter(interpret)
+gradlin.register_all(interpret_gradlin, linearizer_to_hander)
 
 __all__ = [
     "interpret",
     "DiffZonoBounds",
-    "_register_linearizer",
+    "expr",
+    "linearizer_to_hander",
     "relu_linearizer",
     "tanh_linearizer",
     "exp_linearizer",

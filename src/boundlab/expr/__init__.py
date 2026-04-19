@@ -44,6 +44,7 @@ from ._core import Expr, ExprFlags, expr_pretty_print
 from ._affine import AffineSum, ConstVal
 from ._var import LpEpsilon
 from ._cat import Cat, Stack
+from ._tuple import TupleExpr, MakeTuple, GetTupleItem
 
 
 def Add(*children: Expr) -> AffineSum:
@@ -93,4 +94,7 @@ __all__ = [
     # Concatenation
     "Cat",
     "Stack",
+    "TupleExpr",
+    "MakeTuple",
+    "GetTupleItem",
 ]

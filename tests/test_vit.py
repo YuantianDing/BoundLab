@@ -154,7 +154,7 @@ def test_vit_differential_sound():
     torch.manual_seed(704)
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     from boundlab.diff.net import diff_net
-    from boundlab.diff.expr import DiffExpr3
+    from boundlab.diff.zono3.expr import DiffExpr3
     from boundlab.diff.zono3 import interpret as diff_interpret
 
     model1 = SmallViT().eval()

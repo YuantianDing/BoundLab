@@ -13,7 +13,7 @@ import pytest
 from torch import nn
 
 import boundlab.expr as expr
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
 from boundlab.interp.onnx import onnx_export
 
@@ -210,7 +210,7 @@ def test_reciprocal_diff_fallback_plain_expr():
     assert torch.allclose(out_diff.ub(), out_std.ub(), atol=1e-6)
     assert torch.allclose(out_diff.lb(), out_std.lb(), atol=1e-6)
 
-from boundlab.diff.zono3.bilinear import (
+from boundlab.diff.zono3.default.bilinear import (
     diff_bilinear_elementwise,
     diff_bilinear_matmul,
     diff_mul_handler,
@@ -291,7 +291,7 @@ def test_diff_matmul_handler_fallback():
     assert isinstance(out, expr.Expr)
     assert out.shape == torch.Size([3])
 
-from boundlab.diff.zono3.softmax import diff_softmax_handler
+from boundlab.diff.zono3.default.softmax import diff_softmax_handler
 
 @pytest.mark.parametrize("seed", [10, 11, 12])
 def test_softmax_diff_sound(seed: int):

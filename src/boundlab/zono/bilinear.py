@@ -4,6 +4,8 @@ Provides McCormick-style linearization for matmul and element-wise product
 when both operands are symbolic expressions (Expr @ Expr or Expr * Expr).
 """
 
+from typing import Union
+
 import torch
 
 from boundlab.expr._core import Expr
@@ -48,10 +50,6 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     >>> C.shape
     torch.Size([2, 4])
     """
-    if len(A.shape) == 1:
-        A = A.unsqueeze(0)
-    elif len(B.shape) == 1:
-        B = B.unsqueeze(1)
     assert len(A.shape) >= 2 and len(B.shape) >= 2, \
         f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
     assert A.shape[-1] == B.shape[-2], \
@@ -78,7 +76,6 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
 
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
-
     return result
 
 
@@ -165,13 +162,16 @@ def matmul_handler(A, B):
     >>> matmul_handler(A, B).shape
     torch.Size([1, 1])
     """
-    if isinstance(A, Expr) and isinstance(B, Expr):
-        return bilinear_matmul(A, B)
-    elif isinstance(A, Expr) and isinstance(B, torch.Tensor):
+    if isinstance(A, Expr) and _is_const(B):
         return A @ B  # Expr.__matmul__(Tensor)
-    elif isinstance(A, torch.Tensor) and isinstance(B, Expr):
+    elif _is_const(A) and isinstance(B, Expr):
         return A @ B  # Tensor.__matmul__ → Expr.__rmatmul__(Tensor)
-    elif isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor):
+    elif _is_const(A) and _is_const(B):
         return torch.matmul(A, B)
+    elif isinstance(A, Expr) and isinstance(B, Expr):
+        return bilinear_matmul(A, B)
     else:
         return A @ B
+
+def _is_const(tensor: Union[torch.Tensor, Expr]) -> bool:
+    return isinstance(tensor, torch.Tensor) or isinstance(tensor, ConstVal)

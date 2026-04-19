@@ -17,10 +17,9 @@ from boundlab.linearop._einsum import EinsumOp
 from boundlab.prop import ublb
 from boundlab.zono import ZonoBounds
 from boundlab.zono.exp import exp_linearizer as std_exp_linearizer
-from . import _register_linearizer, DiffZonoBounds
+from .. import DiffZonoBounds
 
 
-@_register_linearizer("Exp")
 def exp_linearizer(
     xs: list[Expr], ys: list[Expr], ds: list[Expr]
 ) -> DiffZonoBounds:
@@ -34,7 +33,7 @@ def exp_linearizer(
     --------
     >>> import torch
     >>> import boundlab.expr as expr
-    >>> from boundlab.diff.zono3.exp import exp_linearizer
+    >>> from boundlab.diff.zono3.default.exp import exp_linearizer
     >>> x = expr.ConstVal(torch.tensor([1.0])) + 0.2 * expr.LpEpsilon([1])
     >>> y = expr.ConstVal(torch.tensor([0.5])) + 0.2 * expr.LpEpsilon([1])
     >>> d = x - y

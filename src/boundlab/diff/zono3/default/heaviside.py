@@ -38,7 +38,7 @@ from boundlab.expr._core import Expr
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.prop import ublb
 from boundlab.zono import ZonoBounds
-from . import DiffZonoBounds, interpret
+from .. import DiffZonoBounds, interpret
 
 
 _EPS = 1e-30
@@ -206,7 +206,7 @@ def diff_heaviside_pruning_handler(scores, data):
                 **y** component participates in masking.
         data:   DiffExpr3 / DiffExpr2 providing the tensor to prune.
     """
-    from boundlab.diff.expr import DiffExpr2, DiffExpr3
+    from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 
     # Promote scores/data into DiffExpr3 when possible
     if isinstance(scores, DiffExpr2):
@@ -267,7 +267,7 @@ def diff_heaviside_pruning_handler(scores, data):
         diff_y_weights=[-w_sy, w_y],
     )
 
-    from . import _build_triple_from_dzb
+    from .. import _build_triple_from_dzb
     xs = [0, data.x]
     ys = [sy, data.y]
     ds = [0, data.diff]

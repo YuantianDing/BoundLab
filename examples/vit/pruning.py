@@ -16,7 +16,7 @@ import onnx_ir
 import torch
 
 import boundlab.expr as expr
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
 from boundlab.expr._core import Expr
 from boundlab.interp.onnx import onnx_export

@@ -225,8 +225,15 @@ def _extract_abcrown_result(output: str) -> str:
     return "error"
 
 
+_MINIMAL_CONFIG = """\
+general:
+  device: cpu
+  conv_mode: matrix
+"""
+
+
 def _write_minimal_config(path: Path) -> None:
-    path.write_text("general:\n  device: cpu\n")
+    path.write_text(_MINIMAL_CONFIG)
 
 
 def abcrown_verify(

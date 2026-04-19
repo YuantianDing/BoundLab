@@ -18,10 +18,9 @@ from boundlab.linearop._einsum import EinsumOp
 from boundlab.prop import ublb
 from boundlab.zono import ZonoBounds
 from boundlab.zono.reciprocal import reciprocal_linearizer as std_reciprocal_linearizer
-from . import _register_linearizer, DiffZonoBounds
+from .. import DiffZonoBounds
 
 
-@_register_linearizer("Reciprocal")
 def reciprocal_linearizer(
     xs: list[Expr], ys: list[Expr], ds: list[Expr]
 ) -> DiffZonoBounds:
@@ -36,7 +35,7 @@ def reciprocal_linearizer(
     --------
     >>> import torch
     >>> import boundlab.expr as expr
-    >>> from boundlab.diff.zono3.reciprocal import reciprocal_linearizer
+    >>> from boundlab.diff.zono3.default.reciprocal import reciprocal_linearizer
     >>> x = expr.ConstVal(torch.tensor([2.0])) + 0.1 * expr.LpEpsilon([1])
     >>> y = expr.ConstVal(torch.tensor([3.0])) + 0.1 * expr.LpEpsilon([1])
     >>> d = x - y

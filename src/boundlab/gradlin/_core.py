@@ -180,6 +180,7 @@ def gradlin(
     b_extra: torch.Tensor | None = None,
     iters: int = 200,
     lr: float = 0.1,
+    lam_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Tighten linear bounds on ``f`` over a box + extra-constraints region.
 
@@ -198,6 +199,10 @@ def gradlin(
         Shapes ``(*batch, m, n)`` and ``(*batch, m)``.
     iters : number of Adam steps.
     lr : Adam learning rate.
+    lam_init : optional warm-start for ``lam`` with shape ``(*batch, n)``.
+        Defaults to zeros. Useful for seeding with a closed-form slope so the
+        returned bound is guaranteed at least as tight as that seed (best-seen
+        tracking below ensures no regression from the init).
 
     Returns
     -------
@@ -211,20 +216,31 @@ def gradlin(
 
     vertices, vertex_feasible = _enumerate_vertices(A, b)
 
-    lam = torch.zeros(*batch_shape, n, device=device, dtype=dtype, requires_grad=True)
-    optimizer = torch.optim.Adam([lam], lr=lr)
+    if lam_init is None:
+        lam_param = torch.zeros(*batch_shape, n, device=device, dtype=dtype)
+    else:
+        lam_param = lam_init.detach().to(device=device, dtype=dtype).expand(*batch_shape, n).contiguous()
+    lam_param = lam_param.requires_grad_(True)
+    optimizer = torch.optim.Adam([lam_param], lr=lr)
+
+    with torch.no_grad():
+        best_L, best_U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam_param, vertices, vertex_feasible)
+        best_lam = lam_param.detach().clone()
 
     for _ in range(iters):
         optimizer.zero_grad()
-        L, U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam, vertices, vertex_feasible)
+        L, U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam_param, vertices, vertex_feasible)
         loss = (U - L).sum()
         loss.backward()
         optimizer.step()
+        with torch.no_grad():
+            cur_L, cur_U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam_param, vertices, vertex_feasible)
+            improved = (cur_U - cur_L) < (best_U - best_L)
+            best_lam = torch.where(improved.unsqueeze(-1), lam_param.detach(), best_lam)
+            best_L = torch.where(improved, cur_L, best_L)
+            best_U = torch.where(improved, cur_U, best_U)
 
-    with torch.no_grad():
-        lam_final = lam.detach()
-        L, U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam_final, vertices, vertex_feasible)
-    return lam_final, L, U
+    return best_lam, best_L, best_U
 
 
 def trapezoid_region(
