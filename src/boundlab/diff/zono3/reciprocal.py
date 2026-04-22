@@ -1,14 +1,17 @@
-"""
+"""Differential reciprocal linearizer — hexagon-Chebyshev.
 
-zmin = min(lx, ly) > 0,  zmax = max(ux, uy)
-Smin = −1/zmin²,  Smax = −1/zmax²
-δ = max(|l∆|, |u∆|)
-λ∆ = (Smin + Smax) / 2,  µ∆ = 0,  β∆ = (Smax − Smin) / 2 · δ
+Output form (unchanged from paper):
+    Ẑ_Δ = λ_Δ · Z_Δ + μ_Δ + β_Δ · ε_new,   μ_Δ = 0
 
-For all lx ≤ x ≤ ux, ly ≤ y ≤ uy, l∆ ≤ x−y ≤ u∆, 0 < lx, 0 < ly:
+Change: (λ_Δ, β_Δ) computed from the range of the slope function
+    S(x, y) = -1 / (x y)
+over the feasible hexagon P, rather than from [-1/z_min², -1/z_max²] where
+z_min = min(lx, ly), z_max = max(ux, uy). Since {xy : (x,y) ∈ P} is pinned
+by the corners (x y monotone ↑ in both), we get S(P) ⊆ [-1/(z_min²), -1/(z_max²)]
+strictly.
 
-(Smin+Smax)/2 · (x−y) − (Smax−Smin)/2 · δ  ≤  1/x − 1/y  ≤  (Smin+Smax)/2 · (x−y) + (Smax−Smin)/2 · δ
-
+Soundness: for all (x, y) ∈ P, 0 < lx, 0 < ly:
+    λ_Δ (x - y) - β_Δ  ≤  1/x - 1/y  ≤  λ_Δ (x - y) + β_Δ.
 """
 
 import torch
@@ -19,18 +22,16 @@ from boundlab.prop import ublb
 from boundlab.zono import ZonoBounds
 from boundlab.zono.reciprocal import reciprocal_linearizer as std_reciprocal_linearizer
 from . import _register_linearizer, DiffZonoBounds
+from ._hex_cheby import hex_chebyshev_transfer, slope_recip
 
 
 @_register_linearizer("Reciprocal")
 def reciprocal_linearizer(
     xs: list[Expr], ys: list[Expr], ds: list[Expr]
 ) -> DiffZonoBounds:
-    """Return a :class:`DiffZonoBounds` for differential reciprocal.
+    """Differential 1/x linearizer using hexagon-Chebyshev β.
 
     Assumes both x and y are strictly positive.
-    *x_bounds* and *y_bounds* are standard DeepT reciprocal linearizations.
-    *diff_bounds* over-approximates ``1/x − 1/y`` using the
-    derivative-range relaxation from the synthesis document.
 
     Examples
     --------
@@ -51,39 +52,29 @@ def reciprocal_linearizer(
     d_ub, d_lb = ublb(diff)
     ndim = len(x_ub.shape)
 
-    # Standard per-branch linearizations
+    # Clamp to strictly positive for safety.
+    x_lb = torch.clamp(x_lb, min=1e-9)
+    x_ub = torch.clamp(x_ub, min=x_lb + 1e-12)
+    y_lb = torch.clamp(y_lb, min=1e-9)
+    y_ub = torch.clamp(y_ub, min=y_lb + 1e-12)
+
     x_bounds = std_reciprocal_linearizer(x_ub, x_lb)
     y_bounds = std_reciprocal_linearizer(y_ub, y_lb)
 
-    # zmin = min(lx, ly) > 0,  zmax = max(ux, uy)
-    z_min = torch.clamp(torch.minimum(x_lb, y_lb), min=1e-9)
-    z_max = torch.clamp(torch.maximum(x_ub, y_ub), min=z_min + 1e-12)
+    lambda_d, mu_d, beta_d = hex_chebyshev_transfer(
+        slope_recip, x_lb, x_ub, y_lb, y_ub, d_lb, d_ub,
+    )
 
-    # Smin = −1/zmin²,  Smax = −1/zmax²
-    # Note: since zmin < zmax, |Smin| > |Smax|, so Smin < Smax < 0
-    s_min = -1.0 / (z_min ** 2)
-    s_max = -1.0 / (z_max ** 2)
-
-    # δ = max(|l∆|, |u∆|)
-    delta = torch.maximum(d_lb.abs(), d_ub.abs())
-
-    # λ∆ = (Smin + Smax) / 2,  µ∆ = 0,  β∆ = (Smax − Smin) / 2 · δ
-    sd = (s_min + s_max) / 2.0
-    bias = torch.zeros_like(x_ub)
-    err = (s_max - s_min) / 2.0 * delta  # Smax > Smin so this is positive
-
-    # degenerate case
-    degen = delta < 1e-15
-    sd = torch.where(degen, s_min, sd)
-    err = torch.where(degen, torch.zeros_like(err), err)
+    degen = torch.maximum(d_lb.abs(), d_ub.abs()) < 1e-15
+    beta_d = torch.where(degen, torch.zeros_like(beta_d), beta_d)
 
     return DiffZonoBounds(
         x_bounds=x_bounds,
         y_bounds=y_bounds,
         diff_bounds=ZonoBounds(
-            bias=bias,
-            error_coeffs=EinsumOp.from_hardmard(err, ndim),
-            input_weights=[sd],
+            bias=mu_d,
+            error_coeffs=EinsumOp.from_hardmard(beta_d, ndim),
+            input_weights=[lambda_d],
         ),
         diff_x_error=0,
         diff_x_weights=0,

@@ -66,27 +66,43 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
 
     n = x.shape[dim]
 
-    x_center = x.x.center()
-    x_max = x_center.max(dim=dim, keepdim=True).values
-    shift = x_max.expand(*x.shape)
-    x_shifted = DiffExpr3(
-        x.x - shift,
-        x.y - shift,
-        x.diff,
-    )
+    # DeepT-style rewrite: σ_i(ν) = 1 / Σ_j exp(ν_j - ν_i)
+    # Vectorized: reshape ν to (..., N, 1) and (..., 1, N), broadcast-subtract
+    # to get an (..., N, N) tensor of ν_j - ν_i, exp, sum over inner dim,
+    # reciprocal. Output IS σ. No bilinear needed.
+
+    # Insert a size-1 axis right AFTER dim and right BEFORE dim to create the
+    # broadcast shapes. Work with dim as a positive axis.
+    # x_i has shape (..., N, 1) — treat as "my row"
+    # x_j has shape (..., 1, N) — treat as "all columns"
+    x_i = x.unsqueeze(dim + 1)          # shape: (..., N, 1, ...)
+    x_j = x.unsqueeze(dim)               # shape: (..., 1, N, ...)
+
+    # BoundLab Expr subtraction requires matching shapes (no auto-broadcast).
+    # Expand both to (..., N, N, ...) explicitly before subtract.
+    broadcast_shape = list(x.shape)
+    broadcast_shape.insert(dim + 1, n)   # add the j axis at dim+1
+    x_i_exp = x_i.expand(*broadcast_shape)
+    x_j_exp = x_j.expand(*broadcast_shape)
+
+    x_shifted = x_j_exp - x_i_exp
 
     exp_handler = interpret["Exp"]
-    exp_out = exp_handler(x_shifted)
-
-    # Sum along softmax dim using mean * n
-    sum_exp = exp_out.mean(dim=dim, keepdim=True) * float(n)
-
     reciprocal_handler = interpret["Reciprocal"]
-    inv_sum = reciprocal_handler(sum_exp)
 
-    inv_sum_expanded = inv_sum.expand(*exp_out.shape)
+    # exp of the pairwise-difference tensor.
+    exp_shifted = exp_handler(x_shifted)
 
-    result = diff_bilinear_elementwise(exp_out, inv_sum_expanded)
+    # Sum along the j-axis (which is now at position dim + 1 since we inserted one
+    # new axis at dim + 1 and one at dim, but the j-axis corresponds to dim + 1
+    # in the unsqueezed layout). Actually, after x.unsqueeze(dim+1) -> N at dim,
+    # 1 at dim+1, then x.unsqueeze(dim) -> 1 at dim, N at dim+1. The SUM we want
+    # is over j, which is the axis of size N that comes from x_j — position dim+1.
+    sum_exp = exp_shifted.sum(dim=dim + 1, keepdim=False)
+    # sum_exp now has shape (..., N, ...) — same as original x.
+
+    # Reciprocal — this IS σ, no bilinear.
+    result = reciprocal_handler(sum_exp)
 
     return result
 

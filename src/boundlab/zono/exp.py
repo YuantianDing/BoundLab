@@ -35,8 +35,8 @@ def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """
     output_shape = ub.shape
 
-    lb_c = torch.clamp(lb, -30, 30)
-    ub_c = torch.clamp(ub, -30, 30)
+    lb_c = torch.clamp(lb, -88, 88)
+    ub_c = torch.clamp(ub, -88, 88)
     el = torch.exp(lb_c)
     eu = torch.exp(ub_c)
 
