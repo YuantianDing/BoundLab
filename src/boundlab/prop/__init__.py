@@ -370,16 +370,19 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
         )
 
         child_weights = None
+        is_split = isinstance(weight, tuple)
 
-        # Try exact propagation first
-        if a := current.backward(weight, direction="=="):
-            b, child_weights_exact = a
-            if not _is0(b):
-                const_result = const_result + b
-            child_weights = child_weights_exact
+        # Try exact propagation first (only valid for single weights)
+        if not is_split:
+            if a := current.backward(weight, direction="=="):
+                b, child_weights_exact = a
+                if not _is0(b):
+                    const_result = const_result + b
+                child_weights = child_weights_exact
 
         if child_weights is None:
-            if (current.flags & boundlab.expr.ExprFlags.SYMMETRIC_TO_0 != 0
+            if (not is_split
+                    and current.flags & boundlab.expr.ExprFlags.SYMMETRIC_TO_0 != 0
                     and len(current.children) == 0):
                 # Leaf symmetric node: compute one-sided bound and reuse via ±
                 result = current.backward(weight, direction="<=")
@@ -389,9 +392,10 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
                         sym_result = sym_result + ubias
                 child_weights = []
             else:
+                u_w, l_w = weight if is_split else (weight, weight)
                 ubias, lbias, child_weights = _ublb_split_results(
-                    current.backward(weight, direction="<="),
-                    current.backward(weight, direction=">="),
+                    current.backward(u_w, direction="<="),
+                    current.backward(l_w, direction=">="),
                 )
                 if not _is0(ubias):
                     ub_result = ub_result + ubias

@@ -67,7 +67,6 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     # softmax(x)[i] = 1 / sum_j exp(x[j] - x[i]) = 1 / sum_j exp(-diff[..., i, j])
     diff = utils.pairwise_diff(x, dim)
     expresult = exp_handler(diff)
-    print("expresult:" + str(expresult))
     assert expresult.ublb()[1].min().item() >= 0, "Expected non-negative lower bound for exponential"
     sum_exp = expresult.sum(dim=dim + 1, keepdim=False)
     print("sum_exp:" + str(sum_exp))
