@@ -55,6 +55,12 @@ class DiffExpr2:
             return self
         if isinstance(other, (torch.Tensor, Expr)):
             return DiffExpr2(other + self.x, other + self.y)
+        if isinstance(other, DiffExpr3):
+            return DiffExpr3(
+                self.x + other.x,
+                self.y + other.y,
+                (self.x - self.y) + other.diff,
+            )
         return NotImplemented
 
     def __neg__(self):
@@ -65,6 +71,12 @@ class DiffExpr2:
             return DiffExpr2(self.x - other, self.y - other)
         if isinstance(other, DiffExpr2):
             return DiffExpr2(self.x - other.x, self.y - other.y)
+        if isinstance(other, DiffExpr3):
+            return DiffExpr3(
+                self.x - other.x,
+                self.y - other.y,
+                (self.x - self.y) - other.diff,
+            )
         return NotImplemented
 
     def __rsub__(self, other):
@@ -267,6 +279,12 @@ class DiffExpr3:
             return self
         if isinstance(other, (torch.Tensor, Expr)):
             return DiffExpr3(other + self.x, other + self.y, self.diff)
+        if isinstance(other, DiffExpr2):
+            return DiffExpr3(
+                other.x + self.x,
+                other.y + self.y,
+                (other.x - other.y) + self.diff,
+            )
         return NotImplemented
 
     def __neg__(self):

@@ -29,6 +29,7 @@ __all__ = [
     "poly",
     "diff",
     "utils",
+    "gradlin"
 ]
 
 def __getattr__(name: str):

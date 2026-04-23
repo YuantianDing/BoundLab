@@ -359,12 +359,17 @@ def main() -> None:
             predicted = int(model(center).argmax().item())
 
         bl_start = time.perf_counter()
-        cert, margin = boundlab_certify(op, center, predicted, args.eps)
+        try:
+            cert, margin = boundlab_certify(op, center, predicted, args.eps)
+            bl_str = "SAFE" if cert else "UNK"
+        except Exception as e:
+            cert, margin = False, float("nan")
+            bl_str = "ERR"
+            print(f"  [boundlab error: {type(e).__name__}: {e}]", file=sys.stderr)
         bl_elapsed = time.perf_counter() - bl_start
         bl_total += bl_elapsed
         if cert:
             bl_certified += 1
-        bl_str = "SAFE" if cert else "UNK"
 
         ab_str = "N/A"
         ab_elapsed = 0.0

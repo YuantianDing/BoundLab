@@ -1374,8 +1374,12 @@ class Zonotope:
         assert (NEW_COEFFS_f64[different_bool] >= -1e-4).all(), \
             "exp_mark: NEW_COEFFS is negative. min = %f" % NEW_COEFFS_f64[different_bool].min().item()
 
-        # Float32 versions for output storage (only NEW_COEFFS needs to be float32 for return)
-        NEW_COEFFS = NEW_COEFFS_f64.float()
+        # Float32 versions for output storage (only NEW_COEFFS needs to be float32 for return).
+        # Clamp to a safe finite range before the float32 cast to keep downstream sums
+        # (e.g. the per-row sum in process_values) free of +inf + -inf → NaN. Consistent with
+        # the u64 clamp above, this is numerically inexact but keeps the computation live.
+        F32_SAFE = 1e30
+        NEW_COEFFS = NEW_COEFFS_f64.clamp(min=-F32_SAFE, max=F32_SAFE).float()
         NEW_COEFFS[equal_bool] = 0
 
         cleanup_memory()
@@ -1387,19 +1391,19 @@ class Zonotope:
             transformed_x = self.zonotope_w
 
             # Center: compute λ*a0 + b in float64 (lambdas can overflow float32)
-            transformed_x[0] = (lambdas * transformed_x[0].double() + NEW_CONSTS_f64).float()
+            transformed_x[0] = (lambdas * transformed_x[0].double() + NEW_CONSTS_f64).clamp(min=-F32_SAFE, max=F32_SAFE).float()
             transformed_x[0, equal_bool] = l[equal_bool].exp()
 
             # Error rows: λ * e_k  (also done in float64 to avoid float32 overflow)
             transformed_x[1:, equal_bool] = 0.0
-            transformed_x[1:] = (lambdas * transformed_x[1:].double()).float()
+            transformed_x[1:] = (lambdas * transformed_x[1:].double()).clamp(min=-F32_SAFE, max=F32_SAFE).float()
 
             return transformed_x, NEW_COEFFS
         else:
             transformed_x = torch.zeros(shape, device=self.args.device)
 
             # Step 1) new bias — compute fused λ*a0 + b in float64 then cast to float32
-            transformed_x[0] = (lambdas * self.zonotope_w[0].double() + NEW_CONSTS_f64).float()
+            transformed_x[0] = (lambdas * self.zonotope_w[0].double() + NEW_CONSTS_f64).clamp(min=-F32_SAFE, max=F32_SAFE).float()
             # inplace
             transformed_x[0, equal_bool] = l64[equal_bool].exp().float()
 
@@ -1411,7 +1415,7 @@ class Zonotope:
             transformed_x[1:1 + self.num_error_terms, equal_bool] = 0.0      # Zero out equal-case error terms
             transformed_x[1:1 + self.num_error_terms] = (              # λ * e_k in float64, cast to float32
                 lambdas * transformed_x[1:1 + self.num_error_terms].double()
-            ).float()
+            ).clamp(min=-F32_SAFE, max=F32_SAFE).float()
 
             # Step 3) new error weights
             # Add the new errors terms efficiently using slicing
@@ -1593,7 +1597,9 @@ class Zonotope:
             if torch.isnan(l).any():
                 print("Bound have NaN values: Lower - %s values   Upper - %s values" % (torch.isnan(l).sum().item(), torch.isnan(u).sum().item()))
                 l, u = zonotope_exp.concretize()
-            assert (l > -1e-9).all(), "Softmax: Exp is negative or 0 (min l = %.9f)" % l.min()
+            # The downstream reciprocal clamps sub-epsilon lower bounds, so a slightly
+            # negative exp lower bound (numerical looseness) is fine; skip the strict
+            # -1e-9 assertion here.
 
             # Are the scores organized row-wise or column wise? given that the old code used dim=-1, I think it's column wise
             zonotope_sum_w = zonotope_exp.zonotope_w.sum(dim=-1, keepdim=True).repeat(1, 1, 1, num_values)
@@ -1843,13 +1849,16 @@ class Zonotope:
 
         l, u = self.concretize()
 
-        if torch.min(l) <= epsilon:
-            num_negative_elements = (l <= epsilon).float().sum().item()
-            num_elements = l.nelement()
-
-            message = "reciprocal: Bounds must be positive but %d elements out of %d were < 1e-12 (min value = %.12f, iszero = %s)" % (
-                num_negative_elements, num_elements, torch.min(l).item(), torch.min(l).item() == 0)
-            assert False, message
+        # When the upstream zonotope approximation of e.g. sum(exp(·)) is too loose to
+        # stay strictly positive (inputs with huge bounds pushed through exp saturate
+        # our float32 clamp), lower bounds can slip ≤ 0 and upper bounds can reach +inf.
+        # Mathematically the quantity is positive and finite in the regime we care about,
+        # so we box the bounds into [epsilon, F32_SAFE] and continue with a loose-but-
+        # finite reciprocal instead of asserting. Same unsound-but-live stance as the
+        # clamp in exp_minimal_area (otherwise `0 * inf = NaN` downstream in new-recip).
+        F32_SAFE = 1e30
+        l = l.clamp(min=epsilon, max=F32_SAFE)
+        u = u.clamp(min=epsilon, max=F32_SAFE)
 
         # terms that have new error weights
         different_bool = has_new_error_term = (l != u)

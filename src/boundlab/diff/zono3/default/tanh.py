@@ -1,13 +1,19 @@
-"""
+"""Differential tanh linearizer — hexagon-Chebyshev.
 
-σ = min(sech²(min(lx, ly)), sech²(max(ux, uy)))
-δ = max(|l∆|, |u∆|)
-λ∆ = (1+σ)/2,  µ∆ = 0,  β∆ = (1−σ)/2 · δ
+Output form (unchanged from paper):
+    Ẑ_Δ = λ_Δ · Z_Δ + μ_Δ + β_Δ · ε_new,   μ_Δ = 0
 
-For all lx ≤ x ≤ ux, ly ≤ y ≤ uy, l∆ ≤ x−y ≤ u∆:
+Change: (λ_Δ, β_Δ) computed from the range of the slope function
+    S(x, y) = (tanh x - tanh y) / (x - y)
+over the feasible hexagon P, rather than from [σ, 1] where
+σ = min(sech²(L), sech²(U)). The paper's rule uses 1 as an upper bound on
+sech²; the hexagon-Chebyshev form uses the *actual* max slope, which is
+≤ 1 always and ≪ 1 in the saturation regime (|x|, |y| large same sign or
+opposite signs far from 0). This is the case that blows up most dramatically
+for the paper — β shrinks by factors up to ~10^10 for deeply-saturated inputs.
 
-(1+σ)/2 · (x−y) − (1−σ)/2 · δ  ≤  tanh(x) − tanh(y)  ≤  (1+σ)/2 · (x−y) + (1−σ)/2 · δ
-
+Soundness: for all (x, y) ∈ P,
+    λ_Δ (x - y) - β_Δ  ≤  tanh(x) - tanh(y)  ≤  λ_Δ (x - y) + β_Δ.
 """
 
 import torch
@@ -18,16 +24,16 @@ from boundlab.prop import ublb
 from boundlab.zono import ZonoBounds
 from boundlab.zono.tanh import tanh_linearizer as std_tanh_linearizer
 from .. import DiffZonoBounds
+from ._hex_cheby import (
+    hex_chebyshev_transfer, slope_tanh, tanh_extra_candidates,
+    tanh_edge_critical_bounds,
+)
 
 
 def tanh_linearizer(
     xs: list[Expr], ys: list[Expr], ds: list[Expr]
 ) -> DiffZonoBounds:
-    """Return a :class:`DiffZonoBounds` for differential tanh.
-
-    *x_bounds* and *y_bounds* are standard DeepT tanh linearizations.
-    *diff_bounds* over-approximates ``tanh(x) − tanh(y)`` using the
-    minimum-slope relaxation from the synthesis document.
+    """Differential tanh linearizer using hexagon-Chebyshev β.
 
     Examples
     --------
@@ -48,37 +54,25 @@ def tanh_linearizer(
     d_ub, d_lb = ublb(diff)
     ndim = len(x_ub.shape)
 
-    # Standard per-branch linearizations
     x_bounds = std_tanh_linearizer(x_ub, x_lb)
     y_bounds = std_tanh_linearizer(y_ub, y_lb)
 
-    # σ = min(sech²(min(lx, ly)), sech²(max(ux, uy)))
-    z_lo = torch.minimum(x_lb, y_lb)
-    z_hi = torch.maximum(x_ub, y_ub)
-    sech2_lo = 1.0 - torch.tanh(z_lo) ** 2
-    sech2_hi = 1.0 - torch.tanh(z_hi) ** 2
-    sigma = torch.minimum(sech2_lo, sech2_hi)
+    lambda_d, mu_d, beta_d = hex_chebyshev_transfer(
+        slope_tanh, x_lb, x_ub, y_lb, y_ub, d_lb, d_ub,
+        extra_candidates=tanh_extra_candidates(x_lb, x_ub, y_lb, y_ub),
+        extra_smax=tanh_edge_critical_bounds(x_lb, x_ub, y_lb, y_ub, d_lb, d_ub),
+    )
 
-    # δ = max(|l∆|, |u∆|)
-    delta = torch.maximum(d_lb.abs(), d_ub.abs())
-
-    # λ∆ = (1+σ)/2,  µ∆ = 0,  β∆ = (1−σ)/2 · δ
-    sd = (1.0 + sigma) / 2.0
-    bias = torch.zeros_like(x_ub)
-    err = (1.0 - sigma) / 2.0 * delta
-
-    # degenerate case
-    degen = delta < 1e-15
-    sd = torch.where(degen, torch.ones_like(sd), sd)
-    err = torch.where(degen, torch.zeros_like(err), err)
+    degen = torch.maximum(d_lb.abs(), d_ub.abs()) < 1e-15
+    beta_d = torch.where(degen, torch.zeros_like(beta_d), beta_d)
 
     return DiffZonoBounds(
         x_bounds=x_bounds,
         y_bounds=y_bounds,
         diff_bounds=ZonoBounds(
-            bias=bias,
-            error_coeffs=EinsumOp.from_hardmard(err, ndim),
-            input_weights=[sd],
+            bias=mu_d,
+            error_coeffs=EinsumOp.from_hardmard(beta_d, ndim),
+            input_weights=[lambda_d],
         ),
         diff_x_error=0,
         diff_x_weights=0,

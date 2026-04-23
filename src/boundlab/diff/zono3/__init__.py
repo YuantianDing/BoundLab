@@ -134,8 +134,12 @@ def _build_triple_from_dzb(
         eps_d = LpEpsilon(dzb.diff_bounds.error_coeffs.input_shape)
         d_result = d_result + dzb.diff_bounds.error_coeffs(eps_d)
 
-    return DiffExpr3(x_result, y_result, d_result)
+    from boundlab.prop import bound_width
+    sub = x_result - y_result
+    mask = (bound_width(sub) < bound_width(d_result)).float()
+    d_result = mask * sub + (1.0 - mask) * d_result
 
+    return DiffExpr3(x_result, y_result, d_result)
 
 # =====================================================================
 # Interpreter

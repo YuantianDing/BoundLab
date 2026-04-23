@@ -1,13 +1,19 @@
-"""
+"""Differential exp linearizer — hexagon-Chebyshev.
 
-Smin = exp(min(lx, ly)),  Smax = exp(max(ux, uy))
-δ = max(|l∆|, |u∆|)
-λ∆ = (Smin + Smax) / 2,  µ∆ = 0,  β∆ = (Smax − Smin) / 2 · δ
+Output form (unchanged from paper):
+    Ẑ_Δ = λ_Δ · Z_Δ + μ_Δ + β_Δ · ε_new,   μ_Δ = 0
 
-For all lx ≤ x ≤ ux, ly ≤ y ≤ uy, l∆ ≤ x−y ≤ u∆:
+Change: (λ_Δ, β_Δ) computed from the range of the slope function
+    S(x, y) = (e^x - e^y) / (x - y)
+over the feasible hexagon P = [lx, ux]×[ly, uy] ∩ {lΔ ≤ x−y ≤ uΔ}, rather
+than from the range of f' = exp over the merged interval [L, U].
 
-(Smin+Smax)/2 · (x−y) − (Smax−Smin)/2 · δ  ≤  exp(x)−exp(y)  ≤  (Smin+Smax)/2 · (x−y) + (Smax−Smin)/2 · δ
+Since S(P) ⊆ exp([L, U]) with typically strict inclusion, this produces a
+β_Δ never larger than the paper's — and dramatically smaller when the x- and
+y-boxes separate.
 
+Soundness: for all (x, y) ∈ P,
+    λ_Δ (x - y) - β_Δ  ≤  e^x - e^y  ≤  λ_Δ (x - y) + β_Δ.
 """
 
 import torch
@@ -18,16 +24,13 @@ from boundlab.prop import ublb
 from boundlab.zono import ZonoBounds
 from boundlab.zono.exp import exp_linearizer as std_exp_linearizer
 from .. import DiffZonoBounds
+from ._hex_cheby import hex_chebyshev_transfer, slope_exp
 
 
 def exp_linearizer(
     xs: list[Expr], ys: list[Expr], ds: list[Expr]
 ) -> DiffZonoBounds:
-    """Return a :class:`DiffZonoBounds` for differential exp.
-
-    *x_bounds* and *y_bounds* are standard DeepT exp linearizations.
-    *diff_bounds* over-approximates ``exp(x) − exp(y)`` using the
-    mean-derivative relaxation from the synthesis document.
+    """Differential exp linearizer using hexagon-Chebyshev β.
 
     Examples
     --------
@@ -48,38 +51,23 @@ def exp_linearizer(
     d_ub, d_lb = ublb(diff)
     ndim = len(x_ub.shape)
 
-    # Standard per-branch linearizations
     x_bounds = std_exp_linearizer(x_ub, x_lb)
     y_bounds = std_exp_linearizer(y_ub, y_lb)
 
-    # Smin = exp(min(lx, ly)),  Smax = exp(max(ux, uy))
-    z_lo = torch.minimum(x_lb, y_lb)
-    z_hi = torch.maximum(x_ub, y_ub)
-    z_lo_c = torch.clamp(z_lo, -30, 30)
-    z_hi_c = torch.clamp(z_hi, -30, 30)
-    s_min = torch.exp(z_lo_c)
-    s_max = torch.exp(z_hi_c)
+    lambda_d, mu_d, beta_d = hex_chebyshev_transfer(
+        slope_exp, x_lb, x_ub, y_lb, y_ub, d_lb, d_ub,
+    )
 
-    # δ = max(|l∆|, |u∆|)
-    delta = torch.maximum(d_lb.abs(), d_ub.abs())
-
-    # λ∆ = (Smin + Smax) / 2,  µ∆ = 0,  β∆ = (Smax − Smin) / 2 · δ
-    sd = (s_min + s_max) / 2.0
-    bias = torch.zeros_like(x_ub)
-    err = (s_max - s_min) / 2.0 * delta
-
-    # degenerate case
-    degen = delta < 1e-15
-    sd = torch.where(degen, s_min, sd)
-    err = torch.where(degen, torch.zeros_like(err), err)
+    degen = torch.maximum(d_lb.abs(), d_ub.abs()) < 1e-15
+    beta_d = torch.where(degen, torch.zeros_like(beta_d), beta_d)
 
     return DiffZonoBounds(
         x_bounds=x_bounds,
         y_bounds=y_bounds,
         diff_bounds=ZonoBounds(
-            bias=bias,
-            error_coeffs=EinsumOp.from_hardmard(err, ndim),
-            input_weights=[sd],
+            bias=mu_d,
+            error_coeffs=EinsumOp.from_hardmard(beta_d, ndim),
+            input_weights=[lambda_d],
         ),
         diff_x_error=0,
         diff_x_weights=0,

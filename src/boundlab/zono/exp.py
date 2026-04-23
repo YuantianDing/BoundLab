@@ -48,18 +48,14 @@ def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     SAFE = 30.0
     out_dtype = ub.dtype
 
-    # Promote to fp64 to keep fine offsets (e.g. slope·(1 − t_opt)) from
-    # being lost when ``eu`` is many orders of magnitude larger.
-    lb64 = lb.to(torch.float64)
-    ub64 = ub.to(torch.float64)
-    lb_c = torch.clamp(lb64, -SAFE, SAFE)
-    ub_c = torch.clamp(ub64, -SAFE, SAFE)
+    lb_c = torch.clamp(lb, -88, 88)
+    ub_c = torch.clamp(ub, -88, 88)
     el = torch.exp(lb_c)
     eu = torch.exp(ub_c)
 
     degen = torch.abs(ub_c - lb_c) < 1e-12
-    underflow = lb64 < -SAFE
-    overflow = ub64 > SAFE
+    underflow = lb < -SAFE
+    overflow = ub > SAFE
 
     # Tangent-secant (minimal area) relaxation for the normal branch.
     safe_width = torch.clamp(ub_c - lb_c, min=1e-30)
