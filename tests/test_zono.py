@@ -290,7 +290,6 @@ def test_relu_mixed_regimes_piecewise_bounds():
     assert torch.allclose(lb, lb_exact, atol=1e-5)
 
 
-
 @pytest.mark.parametrize("seed", [21, 22, 23])
 def test_interpreter_deeper_network_sound(seed: int):
     """Stress-check soundness on deeper ReLU networks over multiple seeds."""

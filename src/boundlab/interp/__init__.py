@@ -180,6 +180,11 @@ def _onnx_gather(data, indices, axis=0):
                 _onnx_gather(data.y, indices, axis),
                 _onnx_gather(data.diff, indices, axis),
             )
+        if isinstance(data, DiffExpr2):
+            return DiffExpr2(
+                _onnx_gather(data.x, indices, axis),
+                _onnx_gather(data.y, indices, axis),
+            )
     except ImportError:
         pass
 
