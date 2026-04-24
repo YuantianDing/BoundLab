@@ -103,7 +103,7 @@ interpret["Tanh"] = interpret["tanh"]
 from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
 interpret["MatMul"] = matmul_handler
 
-# Softmax
+
 from .softmax import softmax_handler
 interpret["Softmax"] = lambda X, axis=-1: softmax_handler(X, dim=axis)
 

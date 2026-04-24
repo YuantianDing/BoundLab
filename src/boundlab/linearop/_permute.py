@@ -37,6 +37,10 @@ class PermuteOp(LinearOp):
 
     def __matmul__(self, other):
         from ._einsum import EinsumOp
+        if isinstance(other, PermuteOp):
+            assert self.input_shape == other.output_shape
+            new_dims = [other.dims[self.dims[i]] for i in range(len(self.dims))]
+            return PermuteOp(other.input_shape, tuple(new_dims))
         if isinstance(other, EinsumOp):
             assert self.input_shape == other.output_shape
             new_output_dims = [other.output_dims[self.dims[i]] for i in range(len(other.output_dims))]

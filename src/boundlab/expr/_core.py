@@ -101,7 +101,6 @@ class Expr:
         return f"{self.__class__.__name__}({', '.join(children_str)})"
 
     def _metric(self) -> float:
-        center = self.center()
         width = self.bound_width()
         max_width = width.max().item()
         return max_width
@@ -127,7 +126,7 @@ class Expr:
                 other = other.expand(self.shape)
             other = ConstVal(other)
         if isinstance(other, Expr):
-            assert self.shape == other.shape
+            assert self.shape == other.shape, f"Shape mismatch for addition: {self.shape} vs {other.shape}"
             return AffineSum((ScalarOp(1.0, self.shape), self), (ScalarOp(1.0, other.shape), other))
         return NotImplemented
 
