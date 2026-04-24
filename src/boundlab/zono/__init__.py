@@ -98,6 +98,8 @@ from .tanh import tanh_linearizer
 # ONNX activation handlers
 interpret["Relu"] = interpret["relu"]
 interpret["Tanh"] = interpret["tanh"]
+interpret["exp"] = interpret["Exp"]
+interpret["reciprocal"] = interpret["Reciprocal"]
 
 # Bilinear matmul handler (supports Expr @ Expr)
 from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
