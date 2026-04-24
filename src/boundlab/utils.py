@@ -241,3 +241,10 @@ def remove_diagonal(tensor: Union[torch.Tensor, Expr], dim1: int=0, dim2: int=1)
     N = tensor.shape[0]
     tensor = tensor.reshape(N * N, -1)
     return tensor[1:].reshape(N-1, N+1, -1)[:, :-1].reshape(N, N-1, -1)
+
+def inverse_permutation(perm: list[int]) -> list[int]:
+    """Return the inverse of a permutation."""
+    inv = [0] * len(perm)
+    for i, p in enumerate(perm):
+        inv[p] = i
+    return inv

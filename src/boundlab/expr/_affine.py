@@ -132,6 +132,7 @@ class AffineSum(Expr):
     
     def simplify_ops_(self):
         self.children_dict = {child: op.einsum_op() for child, op in self.children_dict.items()}
+        super().simplify_ops_()
 
     def symmetric_decompose(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
         """Decompose this AffineSum into a constant part and a zero-constant AffineSum."""

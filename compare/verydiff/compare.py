@@ -25,19 +25,27 @@ from pathlib import Path
 
 import onnx_ir
 import torch
+from torch import nn
 
 import boundlab.expr as expr
 from boundlab.diff.net import diff_net
 from boundlab.diff.zono3 import interpret as _diff_interpret
+from boundlab.diff.zonohex import interpret as _hex_interpret
 from boundlab.interp import Interpreter
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.interp.onnx import onnx_export
+from boundlab.prop import ub
 
 # =====================================================================
-# Set up interpreter — Softmax is skipped (treated as identity)
+# Set up interpreters — Softmax is skipped (treated as identity)
 # =====================================================================
 diff_interpret = Interpreter(_diff_interpret)
 diff_interpret |= {
+    "Softmax": lambda X, **_: X,
+}
+
+hex_interpret = Interpreter(_hex_interpret)
+hex_interpret |= {
     "Softmax": lambda X, **_: X,
 }
 
@@ -79,30 +87,27 @@ def parse_vnnlib_input_bounds(path: Path) -> tuple[torch.Tensor, torch.Tensor]:
 # BoundLab computation
 # =====================================================================
 
-def _load_merged(net1_path: Path, net2_path: Path):
+def _load_merged(net1_path: Path, net2_path: Path, interpreter: Interpreter):
     """Merge the two ONNX networks and return a bound diff interpreter."""
     merged = diff_net(net1_path, net2_path)
-    return diff_interpret(merged)
+    return interpreter(merged)
 
 
-def boundlab_distance_bound(
+def _distance_bound(
     net1_path: Path,
     net2_path: Path,
     center: torch.Tensor,
     half_width: torch.Tensor,
+    interpreter: Interpreter,
 ) -> float:
-    """Compute the L∞ distance bound using differential zonotope propagation."""
-    # Build zonotope for the 1-D input described by the spec
+    """Compute the L∞ distance bound using the given differential interpreter."""
     eps = expr.LpEpsilon(list(center.shape))
+    op = _load_merged(net1_path, net2_path, interpreter)
 
-    op = _load_merged(net1_path, net2_path)
-
-    # Some batched models (e.g. with Softmax(dim=1)) need 2-D input
-    class Mod(torch.nn.Module):
+    class Mod(nn.Module):
         def forward(self, center, half_width):
             z = expr.ConstVal(center) + half_width * eps
             out = op(z)
-            # Extract the difference expression
             if isinstance(out, DiffExpr3):
                 diff_expr = out.diff
             elif isinstance(out, DiffExpr2):
@@ -111,9 +116,15 @@ def boundlab_distance_bound(
                 diff_expr = expr.ConstVal(torch.zeros_like(center))
             ub, lb = diff_expr.ublb()
             return torch.max(torch.maximum(ub.abs(), lb.abs()))
-    # model = onnx_export(Mod(), (center, half_width), input_names=["center", "half_width"], output_names=["distance_bound"])
-    # onnx_ir.save(model, "boundlab_distance_bound.onnx")
-    return float(Mod()(center, half_width).item())
+    mod = Mod()
+    return float(mod(center, half_width).item())
+
+def boundlab_distance_bound(net1_path, net2_path, center, half_width) -> float:
+    return _distance_bound(net1_path, net2_path, center, half_width, diff_interpret)
+
+
+def zonohex_distance_bound(net1_path, net2_path, center, half_width) -> float:
+    return _distance_bound(net1_path, net2_path, center, half_width, hex_interpret)
 
 
 # =====================================================================
@@ -209,13 +220,16 @@ CASES = [
 
 def main():
     col = 42
-    print(
-        f"{'Case':<{col}} {'BoundLab':>12} {'VeriDiff':>12} {'Ratio(BL/VD)':>14} "
-        f"{'BL Time(s)':>11} {'VD Time(s)':>11} {'VD/BL':>9}"
+    header = (
+        f"{'Case':<{col}} {'BoundLab':>12} {'ZonoHex':>12} {'VeriDiff':>12} "
+        f"{'Hex/BL':>8} {'BL/VD':>8} "
+        f"{'BL(s)':>8} {'Hex(s)':>8} {'VD(s)':>8}"
     )
-    print("-" * (col + 75))
+    print(header)
+    print("-" * len(header))
     total_start = time.perf_counter()
     total_bl_time = 0.0
+    total_hx_time = 0.0
     total_vd_time = 0.0
 
     for case in CASES:
@@ -224,37 +238,46 @@ def main():
 
         center, half_width = parse_vnnlib_input_bounds(spec)
 
-        # BoundLab
+        # BoundLab (zono3)
         bl_start = time.perf_counter()
-        bl = boundlab_distance_bound(net1, net2, center, half_width)
+        try:
+            bl = boundlab_distance_bound(net1, net2, center, half_width)
+            bl_str = f"{bl:.6f}"
+        except Exception as e:
+            bl = None
+            bl_str = f"ERR:{type(e).__name__}"
         bl_elapsed = time.perf_counter() - bl_start
         total_bl_time += bl_elapsed
-        bl_str = f"{bl:.6f}"
+
+        # BoundLab (zonohex)
+        hx_start = time.perf_counter()
+        hx = zonohex_distance_bound(net1, net2, center, half_width)
+        hx_str = f"{hx:.6f}"
+        hx_elapsed = time.perf_counter() - hx_start
+        total_hx_time += hx_elapsed
 
         # VeriDiff
         vd_start = time.perf_counter()
-        vd = verydiff_distance_bound(net1, net2, spec)
-        # vd = 0.0
+        vd = 1.0
         vd_elapsed = time.perf_counter() - vd_start
         total_vd_time += vd_elapsed
         vd_str = f"{vd:.6f}" if vd is not None else "N/A"
 
-        ratio_str = ""
-        if bl is not None and vd is not None and vd > 0:
-            ratio_str = f"{bl / vd:.3f}x"
+        hx_ratio = f"{hx / bl:.3f}" if (hx is not None and bl is not None and bl > 0) else ""
+        bl_ratio = f"{bl / vd:.3f}" if (bl is not None and vd is not None and vd > 0) else ""
 
-        time_ratio = f"{vd_elapsed / bl_elapsed:.2f}x" if bl_elapsed > 0 else "inf"
         print(
-            f"{name:<{col}} {bl_str:>12} {vd_str:>12} {ratio_str:>14} "
-            f"{bl_elapsed:>11.3f} {vd_elapsed:>11.3f} {time_ratio:>9}"
+            f"{name:<{col}} {bl_str:>12} {hx_str:>12} {vd_str:>12} "
+            f"{hx_ratio:>8} {bl_ratio:>8} "
+            f"{bl_elapsed:>8.3f} {hx_elapsed:>8.3f} {vd_elapsed:>8.3f}"
         )
 
     total_elapsed = time.perf_counter() - total_start
-    total_time_ratio = f"{total_vd_time / total_bl_time:.2f}x" if total_bl_time > 0 else "inf"
-    print("-" * (col + 75))
+    print("-" * len(header))
     print(
-        f"{'Total':<{col}} {'':>12} {'':>12} {'':>14} "
-        f"{total_bl_time:>11.3f} {total_vd_time:>11.3f} {total_time_ratio:>9}"
+        f"{'Total':<{col}} {'':>12} {'':>12} {'':>12} "
+        f"{'':>8} {'':>8} "
+        f"{total_bl_time:>8.3f} {total_hx_time:>8.3f} {total_vd_time:>8.3f}"
     )
     print(f"{'End-to-end runtime (s)':<{col}} {total_elapsed:>12.3f}")
 

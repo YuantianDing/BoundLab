@@ -11,6 +11,8 @@ This avoids a bilinear product: only subtraction, exp, reduce-sum
 and reciprocal are needed.
 """
 
+from sys import stderr
+
 import torch
 
 from boundlab import utils
@@ -58,9 +60,14 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     from . import interpret
     exp_handler = interpret["Exp"]
     reciprocal_handler = interpret["Reciprocal"]
+    ub, lb = x.ublb()
+    x.simplify_ops_()
 
     # pairwise_diff gives diff[..., i, j] = x[..., i] - x[..., j]
     # softmax(x)[i] = 1 / sum_j exp(x[j] - x[i]) = 1 / sum_j exp(-diff[..., i, j])
     diff = utils.pairwise_diff(x, dim)
-    sum_exp = exp_handler(-diff).sum(dim=dim + 1, keepdim=False)
+    expresult = exp_handler(-diff)
+    assert expresult.ublb()[1].min().item() >= 0, "Expected non-negative lower bound for exponential"
+    sum_exp = expresult.sum(dim=dim + 1, keepdim=False)
+    assert sum_exp.ublb()[1].min().item() >= 0, "Expected non-negative lower bound for sum of exponentials"
     return reciprocal_handler(sum_exp)

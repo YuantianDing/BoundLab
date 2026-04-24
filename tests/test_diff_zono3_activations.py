@@ -13,7 +13,7 @@ import pytest
 from torch import nn
 
 import boundlab.expr as expr
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
 from boundlab.interp.onnx import onnx_export
 
@@ -109,7 +109,7 @@ def test_tanh_diff_fallback_plain_expr():
     assert torch.allclose(out_diff.ub(), out_std.ub(), atol=1e-6)
     assert torch.allclose(out_diff.lb(), out_std.lb(), atol=1e-6)
 
-_exp_handler = diff_interpret["Exp"]
+_exp_handler = diff_interpret["exp"]
 
 def test_exp_diff_identical_inputs_sound():
     """When x == y, exp diff bounds contain zero (sound)."""
@@ -153,12 +153,12 @@ def test_exp_diff_fallback_plain_expr():
     torch.manual_seed(30)
     x = _zonotope(torch.randn(4) * 0.5, scale=0.3)
     out_diff = _exp_handler(x)
-    std_handler = zono.interpret["Exp"]
+    std_handler = zono.interpret["exp"]
     out_std = std_handler(x)
     assert torch.allclose(out_diff.ub(), out_std.ub(), atol=1e-6)
     assert torch.allclose(out_diff.lb(), out_std.lb(), atol=1e-6)
 
-_reciprocal_handler = diff_interpret["Reciprocal"]
+_reciprocal_handler = diff_interpret["reciprocal"]
 
 def test_reciprocal_diff_identical_inputs_sound():
     """When x == y (both positive), reciprocal diff bounds contain zero."""
@@ -205,12 +205,12 @@ def test_reciprocal_diff_fallback_plain_expr():
     c = torch.rand(4) * 2 + 1.0
     x = _zonotope(c, scale=0.2)
     out_diff = _reciprocal_handler(x)
-    std_handler = zono.interpret["Reciprocal"]
+    std_handler = zono.interpret["reciprocal"]
     out_std = std_handler(x)
     assert torch.allclose(out_diff.ub(), out_std.ub(), atol=1e-6)
     assert torch.allclose(out_diff.lb(), out_std.lb(), atol=1e-6)
 
-from boundlab.diff.zono3.bilinear import (
+from boundlab.diff.zono3.default.bilinear import (
     diff_bilinear_elementwise,
     diff_bilinear_matmul,
     diff_mul_handler,
@@ -291,7 +291,7 @@ def test_diff_matmul_handler_fallback():
     assert isinstance(out, expr.Expr)
     assert out.shape == torch.Size([3])
 
-from boundlab.diff.zono3.softmax import diff_softmax_handler
+from boundlab.diff.zono3.default.softmax import diff_softmax_handler
 
 @pytest.mark.parametrize("seed", [10, 11, 12])
 def test_softmax_diff_sound(seed: int):

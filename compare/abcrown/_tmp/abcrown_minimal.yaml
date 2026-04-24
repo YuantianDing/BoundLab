@@ -1,0 +1,3 @@
+general:
+  device: cpu
+  conv_mode: matrix

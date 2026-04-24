@@ -11,7 +11,7 @@ confirming the improvement factor (never worse, typically much better).
 import math
 import torch
 
-from boundlab.diff.zono3._hex_cheby import (
+from boundlab.diff.zono3.default._hex_cheby import (
     hex_chebyshev_transfer, slope_exp, slope_recip, slope_tanh,
     tanh_extra_candidates, tanh_edge_critical_bounds,
 )

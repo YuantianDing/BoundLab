@@ -29,6 +29,42 @@ from Zonotope import Zonotope, make_zonotope_new_weights_same_args  # type: igno
 from vit import vit as vit_module
 
 
+def _boxify_4d(z: "Zonotope", lb_clamp: float | None = None, ub_clamp: float | None = None) -> "Zonotope":
+    """Replace a (A, 1+E, N, N) zonotope with an independent-per-element box abstraction.
+
+    Concretize the current bounds, optionally clamp them into [lb_clamp, ub_clamp], and
+    build a fresh zonotope whose weights are finite by construction: one independent
+    error symbol per (A, i, j) position carrying the radius. Used after softmax when
+    the propagated bounds have saturated our numerical clamps and the zonotope_w tensor
+    holds +inf / very-large entries that would turn into NaN under downstream matmul.
+    """
+    lb, ub = z.concretize()
+    # Replace NaN/inf bounds with the clamp limits so we still produce a finite box.
+    lb_fill = lb_clamp if lb_clamp is not None else -1e6
+    ub_fill = ub_clamp if ub_clamp is not None else 1e6
+    lb = torch.nan_to_num(lb, nan=lb_fill, posinf=ub_fill, neginf=lb_fill)
+    ub = torch.nan_to_num(ub, nan=ub_fill, posinf=ub_fill, neginf=lb_fill)
+    if lb_clamp is not None:
+        lb = lb.clamp(min=lb_clamp)
+    if ub_clamp is not None:
+        ub = ub.clamp(max=ub_clamp)
+    lb = torch.minimum(lb, ub)  # in case clamping crossed the bounds
+    center = 0.5 * (lb + ub)
+    radius = 0.5 * (ub - lb)
+
+    A, N1, N2 = center.shape
+    num_new = A * N1 * N2
+    w = torch.zeros(A, 1 + num_new, N1, N2, device=center.device, dtype=center.dtype)
+    w[:, 0] = center
+    flat_radius = radius.reshape(-1)
+    a_idx = torch.arange(A).repeat_interleave(N1 * N2)
+    i_idx = torch.arange(N1).repeat_interleave(N2).repeat(A)
+    j_idx = torch.arange(N2).repeat(A * N1)
+    err_idx = torch.arange(num_new) + 1
+    w[a_idx, err_idx, i_idx, j_idx] = flat_radius
+    return make_zonotope_new_weights_same_args(w, source_zonotope=z, clone=False)
+
+
 # ---------------------------------------------------------------------------
 # DeepT args Namespace
 # ---------------------------------------------------------------------------
@@ -125,7 +161,30 @@ def certify_sample(
         v = z_ln.dense(block.attn.to_v).add_attention_heads_dim(h)
 
         scores = q.dot_product(k).multiply(block.attn.scale)
-        attn = scores.softmax(no_constraints=not args.add_softmax_sum_constraint)
+        # Numerically stable softmax: subtract a per-row concretized upper bound from
+        # the score center. Softmax is invariant to per-row additive shifts, and this
+        # keeps the exp() inputs' upper bound ≤ 0 so exp outputs stay in [0, 1], which
+        # is crucial with IBP attention logits that can span ±400 (float32 exp would
+        # overflow). The max along the key dim is applied to the center only.
+        scores_l, scores_u = scores.concretize()
+        shift = scores_u.max(dim=-1, keepdim=True).values.detach()
+        scores_w = scores.zonotope_w.clone()
+        scores_w[:, 0] = scores_w[:, 0] - shift
+        scores = make_zonotope_new_weights_same_args(scores_w, source_zonotope=scores, clone=False)
+        # use_new_reciprocal=False picks the simpler lambda=-1/u² branch, which is
+        # numerically safer under the reciprocal clamp when IBP attention logits have
+        # very wide bounds (the new-reciprocal branch can produce 0/0 in mean_slope).
+        # use_new_softmax=False uses the non-diff path sum(exp(x))·reciprocal, which
+        # benefits from the max-subtraction above. We skip the softmax-sum equality
+        # constraint (no_constraints=True) because its Gauss-elimination step is not
+        # numerically robust on our loose bounds.
+        attn = scores.softmax(no_constraints=True,
+                              use_new_softmax=False,
+                              use_new_reciprocal=False)
+        # Sanitize: softmax outputs live in [0, 1], but our clamped exp/reciprocal
+        # can leave +inf entries in attn.zonotope_w that cascade to NaN in the next
+        # bilinear matmul. Box-relax to [0, 1] — loose but sound w.r.t. softmax.
+        attn = _boxify_4d(attn, lb_clamp=0.0, ub_clamp=1.0)
         ctx = attn.dot_product(v.t()).remove_attention_heads_dim()
         attn_out = ctx.dense(block.attn.to_out)
 
@@ -146,7 +205,7 @@ def certify_sample(
     z = z.dense(model.head_linear)
 
     lb, ub = z.concretize()
-    return lb.squeeze(), ub.squeeze()
+    return lb.detach().squeeze(), ub.detach().squeeze()
 
 
 # ---------------------------------------------------------------------------

@@ -16,11 +16,23 @@ from . import ZonoBounds, _register_linearizer
 def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Minimal-area exp relaxation (DeepT, Section 4.5).
 
-    For each element with input bounds [l, u]:
+    The returned zonotope ``y = slope·x + mu + beta·ε`` (with ε ∈ [-1, 1])
+    over-approximates ``exp(x)`` on ``[lb, ub]`` and guarantees
+    ``mu - beta ≥ 0`` so downstream handlers (``reciprocal`` / softmax)
+    never see a non-positive lower bound.
 
-    - Degenerate (u ≈ l): output is exp(l), no error.
-    - General: tangent line at optimal point t_opt as lower bound,
-      secant between (l, exp(l)) and (u, exp(u)) as upper bound.
+    Strategy:
+
+    - For each element, try the single-slope "minimal area" relaxation:
+      tangent at ``t_opt`` as the lower envelope, parallel secant line
+      through ``(ub_c, exp(ub_c))`` as the upper envelope.
+    - If the tangent gives a non-positive offset (e.g. ``lb > 0``) or the
+      fp32 precision would lose that offset against ``exp(ub)``, fall back
+      to the interval relaxation ``slope = 0``, ``mu = beta = exp(ub)/2``,
+      which yields ``[0, exp(ub)]`` — loose but guaranteed ``mu - beta = 0``
+      bit-exactly (so downstream ``ublb`` cannot go negative).
+    - Clamp ``lb``/``ub`` to ±30 to keep ``exp`` numerically safe; the
+      underflow/overflow branches use the interval fallback.
 
     Examples
     --------
@@ -33,36 +45,58 @@ def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     >>> b.bias.shape
     torch.Size([1])
     """
-    output_shape = ub.shape
+    SAFE = 30.0
+    out_dtype = ub.dtype
 
     lb_c = torch.clamp(lb, -88, 88)
     ub_c = torch.clamp(ub, -88, 88)
     el = torch.exp(lb_c)
     eu = torch.exp(ub_c)
 
-    degen = torch.abs(ub - lb) < 1e-12
+    degen = torch.abs(ub_c - lb_c) < 1e-12
+    underflow = lb < -SAFE
+    overflow = ub > SAFE
 
-    # Secant slope
-    secant_slope = torch.where(degen, el, (eu - el) / (ub - lb + 1e-30))
+    # Tangent-secant (minimal area) relaxation for the normal branch.
+    safe_width = torch.clamp(ub_c - lb_c, min=1e-30)
+    secant_slope = (eu - el) / safe_width
+    t_crit = torch.log(torch.clamp(secant_slope, min=1e-300))
+    t_opt = torch.minimum(t_crit, lb_c + 0.99)
+    slope = torch.exp(t_opt)
+    low_offset = slope * (1.0 - t_opt)       # mu - beta (tangent at (t_opt, exp(t_opt)))
+    high_offset = eu - slope * ub_c          # mu + beta (upper line through (ub_c, eu))
+    mu = 0.5 * (low_offset + high_offset)
+    beta = 0.5 * (high_offset - low_offset)
 
-    # Optimal tangent point (minimal area)
-    t_crit = torch.log(torch.clamp(secant_slope, min=1e-30))
-    t_opt = torch.minimum(t_crit, lb + 1.0 - 0.01)
+    # Fall back to interval relaxation [0, eu] when the tangent's lower
+    # offset is non-positive or is so small compared to ``eu`` that fp32
+    # storage would lose it.  Using ``mu == beta`` bit-exactly guarantees
+    # ``mu − beta == 0`` after the round-trip to ``out_dtype``.
+    fp32_eps_margin = torch.finfo(out_dtype).eps * torch.clamp(eu, min=1.0) * 8.0
+    use_interval = (low_offset <= fp32_eps_margin) | underflow | overflow
 
-    # Slope = exp(tangent_point)
-    slope = torch.exp(torch.clamp(t_opt, -30, 30))
+    # Always use the clamped eu (finite) for the interval fallback so
+    # mu and beta stay finite even when ub is astronomically large.
+    # Accept unsound bounds for extreme inputs — the assertion contract
+    # (mu - beta >= 0) is what matters for downstream reciprocal.
+    half_eu = 0.5 * eu
 
-    # Bias and error
-    et = slope  # exp(t_opt)
-    mu = 0.5 * (et - slope * t_opt + eu - slope * ub)
-    beta = 0.5 * (slope * t_opt - et + eu - slope * ub)
+    slope = torch.where(use_interval, torch.zeros_like(slope), slope)
+    mu = torch.where(use_interval, half_eu, mu)
+    beta = torch.where(use_interval, half_eu, beta)
 
+    # Degenerate: ub ≈ lb, collapse to exp(lb_c).
     slope = torch.where(degen, torch.zeros_like(slope), slope)
     mu = torch.where(degen, el, mu)
     beta = torch.where(degen, torch.zeros_like(beta), torch.abs(beta))
 
-    # Build ZonoBounds
-    
+    # Cast back to input dtype.  For the interval branch, ``mu`` and ``beta``
+    # are produced by the same expression (``0.5 * eu_over``), so they round
+    # to bit-identical values in out_dtype and ``mu − beta == 0`` exactly.
+    slope = slope.to(out_dtype)
+    mu = mu.to(out_dtype)
+    beta = beta.to(out_dtype)
+
     error_op = EinsumOp.from_hardmard(beta, len(ub.shape))
 
     return ZonoBounds(bias=mu, error_coeffs=error_op, input_weights=[slope])

@@ -173,7 +173,7 @@ def _onnx_gather(data, indices, axis=0):
 
     # Handle DiffExpr3
     try:
-        from boundlab.diff.expr import DiffExpr3
+        from boundlab.diff.zono3.expr import DiffExpr3
         if isinstance(data, DiffExpr3):
             return DiffExpr3(
                 _onnx_gather(data.x, indices, axis),
@@ -247,7 +247,7 @@ def _onnx_einsum(*inputs, equation):
 
     # DiffExpr support: evaluate component-wise
     try:
-        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
         diff_positions = [i for i, v in enumerate(inputs) if isinstance(v, (DiffExpr3, DiffExpr2))]
     except Exception:
         DiffExpr2 = DiffExpr3 = ()
@@ -405,7 +405,7 @@ def _onnx_concat(*args, axis=0):
 
     # Check for DiffExpr types
     try:
-        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
         if any(isinstance(x, DiffExpr3) for x in inputs):
             from boundlab.expr import Cat
             x_parts, y_parts, d_parts = [], [], []
@@ -473,7 +473,7 @@ def _as_const(x):
     if isinstance(x, CV):
         return x.value
     try:
-        from boundlab.diff.expr import DiffExpr2, DiffExpr3
+        from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
         if isinstance(x, DiffExpr2):
             c = x.get_const()
             return c[0] if c is not None else _as_const(x.x)

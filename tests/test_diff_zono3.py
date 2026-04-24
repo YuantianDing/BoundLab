@@ -22,7 +22,7 @@ import boundlab.expr as expr
 from boundlab.interp.onnx import onnx_export
 
 import boundlab.zono as zono
-from boundlab.diff.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.net import diff_net
 from boundlab.diff.op import DiffLinear, diff_pair
 from boundlab.diff.zono3 import interpret as diff_interpret
@@ -476,7 +476,7 @@ def test_diff_linear_exports_diff_pair():
     onnx_model = _export(model, [4])
     diff_pair_nodes = [
         n for n in onnx_model.graph
-        if n.domain == "boundlab" and n.op_type == "DiffPair"
+        if n.domain == "boundlab" and n.op_type == "diff_pair"
     ]
     assert len(diff_pair_nodes) >= 1
 
@@ -617,7 +617,7 @@ def test_diff_net_merges_linear_layers_with_difflinear():
     gm2 = _export(model2, [4])
 
     merged = diff_net(gm1, gm2)
-    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "DiffPair"]
+    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "diff_pair"]
     assert len(diff_pair_nodes) == 2
 
     op = diff_interpret(merged)
@@ -653,12 +653,12 @@ def test_diff_net_deep_mlp_conversion_and_concrete_semantics():
     gm2 = _export(model2, [5])
 
     merged = diff_net(gm1, gm2)
-    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "DiffPair"]
+    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "diff_pair"]
     assert len(diff_pair_nodes) == 6
 
     # Concrete semantics: use a concrete interpreter where diff_pair is a no-op.
     concrete_interpret = Interpreter(ONNX_BASE_INTERPRETER)
-    concrete_interpret["DiffPair"] = lambda x, _: x
+    concrete_interpret["diff_pair"] = lambda x, _: x
     concrete_interpret["Relu"] = lambda x: torch.relu(x)
     merged_concrete = concrete_interpret(merged)
 
@@ -690,12 +690,12 @@ def test_diff_net_merges_matmul_add_affine_pattern():
     gm2 = _export(model2, [4])
 
     merged = diff_net(gm1, gm2)
-    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "DiffPair"]
+    diff_pair_nodes = [n for n in merged.graph if n.domain == "boundlab" and n.op_type == "diff_pair"]
     assert len(diff_pair_nodes) == 2
 
     # Concrete semantics: use a concrete interpreter where diff_pair is a no-op.
     concrete_interpret = Interpreter(ONNX_BASE_INTERPRETER)
-    concrete_interpret["DiffPair"] = lambda x, _: x
+    concrete_interpret["diff_pair"] = lambda x, _: x
     merged_concrete = concrete_interpret(merged)
 
     x = torch.randn(4)

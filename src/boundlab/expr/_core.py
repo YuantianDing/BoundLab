@@ -16,6 +16,7 @@ import enum
 from boundlab import utils
 from boundlab.linearop import ScalarOp
 from boundlab.linearop._base import LinearOp
+from boundlab.prop import ub
 
 
 class ExprFlags(enum.Flag):
@@ -99,9 +100,14 @@ class Expr:
         """Return string representation with child strings substituted."""
         return f"{self.__class__.__name__}({', '.join(children_str)})"
 
+    def _metric(self) -> float:
+        center = self.center()
+        width = self.bound_width()
+        max_width = width.max().item()
+        return max_width
+
     def __repr__(self):
-        width = self.bound_width().max().item()
-        return f"Expr({width})"
+        return f"Expr({self._metric():.2e})"
     
     def __str__(self):
         return "bl.Expr {\n" + expr_pretty_print(self, indent=4) + "\n}"
@@ -495,7 +501,8 @@ class Expr:
     
     def simplify_ops_(self):
         """Recursively compute simplified ops for affine expressions."""
-        pass
+        for child in self.children:
+            child.simplify_ops_()
 
     def is_symmetric_to_0(self) -> bool:
         """Return True if this expression is symmetric about zero, else False."""
