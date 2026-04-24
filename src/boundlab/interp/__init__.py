@@ -173,7 +173,7 @@ def _onnx_gather(data, indices, axis=0):
 
     # Handle DiffExpr3
     try:
-        from boundlab.diff.expr import DiffExpr3
+        from boundlab.diff.expr import DiffExpr3, DiffExpr2
         if isinstance(data, DiffExpr3):
             return DiffExpr3(
                 _onnx_gather(data.x, indices, axis),
