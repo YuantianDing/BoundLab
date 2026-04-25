@@ -62,7 +62,9 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
 
     result = Ac @ Bs + As @ Bc + Ac @ Bc
 
-    # Error bound: |E| ≤ hw(A) * hw(B) where hw = half-width
+    # Error bound: |E| ≤ hw(A) @ hw(B)
+    # Must bound each operand independently BEFORE contracting over k,
+    # otherwise cancellations across the k dimension can cause unsoundness.
     if As.is_symmetric_to_0():
         Ahw = As.ub()
     else:
@@ -70,11 +72,12 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
         Ahw = (A_ub - A_lb) / 2.0
 
     if Bs.is_symmetric_to_0():
-        error_bound = (Ahw @ Bs).ub()
+        Bhw = Bs.ub()
     else:
         B_ub, B_lb = Bs.ublb()
         Bhw = (B_ub - B_lb) / 2.0
-        error_bound = Ahw @ Bhw
+
+    error_bound = Ahw @ Bhw
 
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
