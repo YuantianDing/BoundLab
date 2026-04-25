@@ -59,3 +59,4 @@ Thumbs.db
 .old# pixi environments
 .pixi/*
 !.pixi/config.toml
+.claude/

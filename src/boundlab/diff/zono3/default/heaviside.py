@@ -206,7 +206,7 @@ def diff_heaviside_pruning_handler(scores, data):
                 **y** component participates in masking.
         data:   DiffExpr3 / DiffExpr2 providing the tensor to prune.
     """
-    from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+    from boundlab.diff.expr import DiffExpr2, DiffExpr3
 
     # Promote scores/data into DiffExpr3 when possible
     if isinstance(scores, DiffExpr2):
@@ -245,7 +245,7 @@ def diff_heaviside_pruning_handler(scores, data):
     y_bounds = ZonoBounds(
         bias=-bias_t,
         error_coeffs=err_t,
-        input_weights=[-w_sy, torch.ones_like(w_y) - w_y],
+        input_weights=[w_sy, torch.ones_like(w_y) - w_y],
     )
 
     # diff component: d + t
@@ -264,7 +264,7 @@ def diff_heaviside_pruning_handler(scores, data):
         diff_x_error=EinsumOp.from_hardmard(zeros, len(err_t.shape)),
         diff_x_weights=[0, 0],
         diff_y_error=err_op,
-        diff_y_weights=[w_sy, w_y],
+        diff_y_weights=[-w_sy, w_y],
     )
 
     from .. import _build_triple_from_dzb
