@@ -246,9 +246,8 @@ def matmul_handler(A, B):
     elif _is_const(A) and _is_const(B):
         return torch.matmul(A, B)
     elif isinstance(A, Expr) and isinstance(B, Expr):
-        precise = deept_precise_matmul(A, B)
+        # precise = deept_precise_matmul(A, B)
         normal = bilinear_matmul(A, B)
-        assert False
         return normal
     else:
         return A @ B
