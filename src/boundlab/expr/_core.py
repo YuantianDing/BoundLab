@@ -101,7 +101,6 @@ class Expr:
         return f"{self.__class__.__name__}({', '.join(children_str)})"
 
     def _metric(self) -> float:
-        center = self.center()
         width = self.bound_width()
         max_width = width.max().item()
         return max_width
@@ -127,7 +126,7 @@ class Expr:
                 other = other.expand(self.shape)
             other = ConstVal(other)
         if isinstance(other, Expr):
-            assert self.shape == other.shape
+            assert self.shape == other.shape, f"Shape mismatch for addition: {self.shape} vs {other.shape}"
             return AffineSum((ScalarOp(1.0, self.shape), self), (ScalarOp(1.0, other.shape), other))
         return NotImplemented
 
@@ -508,7 +507,7 @@ class Expr:
         """Return True if this expression is symmetric about zero, else False."""
         return bool(self.flags & ExprFlags.SYMMETRIC_TO_0)
 
-    def symmetric_decompose(self) -> tuple["Expr | 0", "Expr | 0"]:
+    def split_const(self) -> tuple["Expr | 0", "Expr | 0"]:
         """Decompose this expression into a constant part and a zero-constant part.
 
         If the expression is symmetric about zero, the constant part is zero.
@@ -517,7 +516,7 @@ class Expr:
         Returns:
             A tuple ``(non_const_part, const_part)`` where exactly one of the two is zero.
         """
-        raise NotImplementedError(f"The :code:`symmetric_decompose` method is not implemented for {self.__class__.__name__}.")
+        raise NotImplementedError(f"The :code:`split_const` method is not implemented for {self.__class__.__name__}.")
 
 
 def expr_pretty_print(expr: Expr, indent: int = 0) -> str:

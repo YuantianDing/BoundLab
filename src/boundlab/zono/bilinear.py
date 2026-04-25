@@ -1,16 +1,20 @@
 """Bilinear operation handlers for zonotope abstract interpretation.
 
 Provides McCormick-style linearization for matmul and element-wise product
-when both operands are symbolic expressions (Expr @ Expr or Expr * Expr).
+when both operands are symbolic expressions (Expr @ Expr or Expr * Expr),
+plus the tighter DeepT-Precise relaxation from Bonaert et al. (2021).
 """
 
+from functools import reduce
+import operator
 from typing import Union
 
 import torch
 
 from boundlab.expr._core import Expr
-from boundlab.expr._affine import ConstVal
+from boundlab.expr._affine import AffineSum, ConstVal
 from boundlab.expr._var import LpEpsilon
+from boundlab.linearop._base import LinearOp
 
 
 def bilinear_matmul(A: Expr, B: Expr) -> Expr:
@@ -55,25 +59,18 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     assert A.shape[-1] == B.shape[-2], \
         f"Inner dims must match: {A.shape} @ {B.shape}"
 
-    Ac, As = A.symmetric_decompose()  # Ac: constant part, As: epsilon part
-    Bc, Bs = B.symmetric_decompose()  # Bc: constant part, Bs: epsilon part
+    Ac, As = A.split_const()  # Ac: constant part, As: epsilon part
+    Bc, Bs = B.split_const()  # Bc: constant part, Bs: epsilon part
 
     result = Ac @ Bs + As @ Bc + Ac @ Bc
 
     # Error bound: |E| ≤ hw(A) * hw(B) where hw = half-width
-    if As.is_symmetric_to_0():
-        Ahw = As.ub()
-    else:
-        A_ub, A_lb = As.ublb()
-        Ahw = (A_ub - A_lb) / 2.0
+    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
+    
+    error_bound = As.ub() @ Bs.ub()
 
-    if Bs.is_symmetric_to_0():
-        error_bound = (Ahw @ Bs).ub()
-    else:
-        B_ub, B_lb = Bs.ublb()
-        Bhw = (B_ub - B_lb) / 2.0
-        error_bound = Ahw @ Bhw
 
+    print(error_bound.max().item())
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
     return result
@@ -117,8 +114,8 @@ def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
     assert A.shape == B.shape, \
         f"Shapes must match for element-wise product: {A.shape} vs {B.shape}"
 
-    Ac, As = A.symmetric_decompose()  # Ac: constant part, As: zero-constant part
-    Bc, Bs = B.symmetric_decompose()  # Bc: constant part, Bs: zero-constant part
+    Ac, As = A.split_const()  # Ac: constant part, As: zero-constant part
+    Bc, Bs = B.split_const()  # Bc: constant part, Bs: zero-constant part
 
     result = Ac * Bs + As * Bc + Ac * Bc
 
@@ -136,10 +133,90 @@ def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
         Bhw = (B_ub - B_lb) / 2.0
 
     error_bound = Ahw * Bhw
-
+    print(error_bound.max().item())
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
 
+    return result
+
+
+def _eps_children(e: Expr) -> dict[LpEpsilon, LinearOp]:
+    """Return ``{LpEpsilon: LinearOp}`` for the symbolic part of ``e``.
+
+    ``e`` is assumed to be the zero-constant half of a symmetric decomposition:
+    either an :class:`AffineSum` whose children are :class:`LpEpsilon` nodes,
+    or a :class:`ConstVal` (empty children).
+    """
+    if isinstance(e, AffineSum):
+        children = dict(e.children_dict)
+        for child in children:
+            assert isinstance(child, LpEpsilon), \
+                f"DeepT-Precise requires LpEpsilon children, got {type(child).__name__}"
+        return children
+    return {}
+
+def deept_precise_matmul(A: Expr, B: Expr) -> Expr:
+    r"""DeepT-Precise relaxation of ``A @ B`` (2D operands only).
+
+    The bilinear error :math:`A_s B_s` is expanded by enumerating every pair
+    of noise symbols ``(eps_A, eps_B)`` with ``eps_A`` drawn from ``A`` and
+    ``eps_B`` from ``B``. For each pair:
+
+    1. Materialise both jacobians.
+    2. Contract the ``k`` dim per matmul rules to get
+       :math:`T[i, j, s_A, s_B] = \sum_l \alpha_{eps_A, s_A}[i, l]\,
+                                         \beta_{eps_B, s_B}[l, j]`.
+    3. If ``eps_A is eps_B`` (shared epsilon), the positions where
+       ``s_A == s_B`` represent :math:`\epsilon^2 \in [0, 1]`: they contribute
+       ``relu(T)`` to the upper-error tensor and ``relu(-T)`` to the
+       lower-error tensor. Everywhere else (and every position of mismatched
+       pairs) corresponds to :math:`\epsilon_i \epsilon_j \in [-1, 1]` and
+       contributes ``|T|`` to both.
+    4. Sum over all input dims and accumulate into ``upper_err`` / ``lower_err``.
+
+    The resulting asymmetric bilinear interval ``[-lower_err, +upper_err]``
+    is repackaged as ``center + half_width · ε_new`` where
+    ``center = (upper_err - lower_err) / 2`` and
+    ``half_width = (upper_err + lower_err) / 2``.
+
+    Args:
+        A: Left operand with shape ``(m, k)``.
+        B: Right operand with shape ``(k, n)``.
+
+    Returns:
+        An expression over-approximating ``A @ B``.
+    """
+    assert len(A.shape) >= 2 and len(B.shape) >= 2, \
+        f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
+    assert A.shape[:-2] == B.shape[:-2], \
+        f"Batch dims must match: {A.shape} @ {B.shape}"
+    assert A.shape[-1] == B.shape[-2], \
+        f"Inner dims must match: {A.shape} @ {B.shape}"
+
+    print(A, B)
+    Ac, As = A.split_const()
+    Bc, Bs = B.split_const()
+
+    result = Ac @ Bs + As @ Bc + Ac @ Bc
+
+    A_children = _eps_children(As)
+    B_children = _eps_children(Bs)
+    
+    b = reduce(operator.mul, A.shape[:-2], 1)
+    m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
+
+    err = torch.zeros(b, m, n)
+    for eps_A, op_A in A_children.items():
+        jac_A = op_A.jacobian().reshape(b, m, k, -1)
+        for eps_B, op_B in B_children.items():
+            jac_B = op_B.jacobian().reshape(b, k, n, -1)
+            T = torch.einsum("bmki, bknj->bmnij", jac_A, jac_B)
+            err += T.abs().sum(dim=(-2, -1))
+
+    err = err.reshape(A.shape[:-2] + (m, n))
+    new_eps = LpEpsilon(err.shape)
+    print(err.max().item())
+    result = result + err * new_eps
     return result
 
 
@@ -169,9 +246,12 @@ def matmul_handler(A, B):
     elif _is_const(A) and _is_const(B):
         return torch.matmul(A, B)
     elif isinstance(A, Expr) and isinstance(B, Expr):
-        return bilinear_matmul(A, B)
+        precise = deept_precise_matmul(A, B)
+        normal = bilinear_matmul(A, B)
+        assert False
+        return normal
     else:
         return A @ B
 
-def _is_const(tensor: Union[torch.Tensor, Expr]) -> bool:
-    return isinstance(tensor, torch.Tensor) or isinstance(tensor, ConstVal)
+def _is_const(tensor: Union[torch.Tensor, Expr, int]) -> bool:
+    return isinstance(tensor, torch.Tensor) or isinstance(tensor, ConstVal) or isinstance(tensor, int)

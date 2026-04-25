@@ -15,10 +15,10 @@ from sys import stderr
 
 import torch
 
-from boundlab import utils
+from boundlab import expr, utils
+from boundlab.expr._var import LpEpsilon
+from boundlab.zono.exp import exp_linearizer
 from boundlab.expr._core import Expr
-
-
 
 
 def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
@@ -58,16 +58,29 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     assert dim == len(x.shape) - 1, "softmax_handler only supports the last dimension"
 
     from . import interpret
-    exp_handler = interpret["Exp"]
-    reciprocal_handler = interpret["Reciprocal"]
     ub, lb = x.ublb()
     x.simplify_ops_()
 
     # pairwise_diff gives diff[..., i, j] = x[..., i] - x[..., j]
-    # softmax(x)[i] = 1 / sum_j exp(x[j] - x[i]) = 1 / sum_j exp(-diff[..., i, j])
+    # softmax(x)[i] = 1 / sum_j exp(x[j] - x[i]) = 1 / sum_j exp(diff[..., i, j])
     diff = utils.pairwise_diff(x, dim)
-    expresult = exp_handler(-diff)
-    assert expresult.ublb()[1].min().item() >= 0, "Expected non-negative lower bound for exponential"
-    sum_exp = expresult.sum(dim=dim + 1, keepdim=False)
-    assert sum_exp.ublb()[1].min().item() >= 0, "Expected non-negative lower bound for sum of exponentials"
-    return reciprocal_handler(sum_exp)
+    ub, lb = diff.ublb()
+
+    expbounds = exp_linearizer(ub, lb)
+    bias = expbounds.bias
+    error = expbounds.error_coeffs.tensor
+    weights = expbounds.input_weights[0]
+    print(weights.shape, diff.shape)
+
+    finite_mask = torch.isfinite(weights) & torch.isfinite(error) & torch.isfinite(bias) & (lb < 20) & (ub < 20)
+    bias = torch.where(finite_mask, bias, 1)
+    error = torch.where(finite_mask, error, 0)
+    weights = torch.where(finite_mask, weights, 0)
+    assert (weights * lb - error + bias >= -1e-8).all(), f"Softmax denominator has non-positive lower bound, which should be impossible {(weights * lb - error + bias).min()}"
+    exp_exp = weights * diff + error * LpEpsilon(diff.shape[:-2]) + bias
+    # assert exp_exp.ublb()[1].min() >= -1e-8, f"Softmax denominator has non-positive lower bound, which should be impossible {exp_exp.ublb()[1].min()}"
+    sum_exp = (weights * diff).sum(dim=-1) + error.sum(dim=-1) * LpEpsilon(diff.shape[:-2]) + bias.sum(dim=-1)
+    # assert sum_exp.ublb()[0].min() >= 0, "Softmax output has negative lower bound, which should be impossible"
+    # finite_mask = finite_mask.all(dim=-1)
+    result = interpret["Reciprocal"](sum_exp)
+    return result

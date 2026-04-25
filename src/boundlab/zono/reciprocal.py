@@ -28,8 +28,8 @@ def reciprocal_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     output_shape = ub.shape
 
     # Clamp to positive
-    lb = torch.clamp(lb, min=1e-9)
-    ub = torch.clamp(ub, min=lb + 1e-12)
+    # lb = torch.clamp(lb, min=1e-9)
+    # ub = torch.clamp(ub, min=lb + 1e-12)
 
     degen = torch.abs(ub - lb) < 1e-12
 
