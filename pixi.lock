@@ -963,7 +963,7 @@ packages:
 - pypi: ./
   name: boundlab
   version: 0.1.0
-  sha256: 28e841e0de940e96e0cfa62eda28c61e6418f8e790b02d47d716550497f3f8e5
+  sha256: d6ba3a27d10c3859d7358346d236d713330570bef2170f4e5fcd089f1c987a96
   requires_dist:
   - torch>=2.0
   - sortedcontainers

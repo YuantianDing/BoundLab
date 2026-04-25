@@ -70,7 +70,6 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     error_bound = As.ub() @ Bs.ub()
 
 
-    print(error_bound.max().item())
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
     return result
@@ -133,7 +132,6 @@ def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
         Bhw = (B_ub - B_lb) / 2.0
 
     error_bound = Ahw * Bhw
-    print(error_bound.max().item())
     new_eps = LpEpsilon(error_bound.shape)
     result = result + error_bound * new_eps
 
@@ -193,7 +191,6 @@ def deept_precise_matmul(A: Expr, B: Expr) -> Expr:
     assert A.shape[-1] == B.shape[-2], \
         f"Inner dims must match: {A.shape} @ {B.shape}"
 
-    print(A, B)
     Ac, As = A.split_const()
     Bc, Bs = B.split_const()
 
@@ -215,7 +212,6 @@ def deept_precise_matmul(A: Expr, B: Expr) -> Expr:
 
     err = err.reshape(A.shape[:-2] + (m, n))
     new_eps = LpEpsilon(err.shape)
-    print(err.max().item())
     result = result + err * new_eps
     return result
 

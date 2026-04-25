@@ -44,6 +44,7 @@ where = ["src"]
 include = ["boundlab*"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 filterwarnings = [
     "ignore::UserWarning",
     "ignore::FutureWarning",
