@@ -87,7 +87,7 @@ class LpEpsilon(Expr):
             return f"<𝜀 {list(self.shape)}>#{self.name}"
         return f"<𝜀 {list(self.shape)}>#{self.id:X}"
     
-    def symmetric_decompose(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
+    def split_const(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
         """Decompose this LpEpsilon into a constant part and a zero-constant expression."""
         from boundlab.expr._affine import ConstVal
         return ConstVal(self.shape), self

@@ -72,11 +72,11 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     weights = expbounds.input_weights[0]
     print(weights.shape, diff.shape)
 
-    # finite_mask = torch.isfinite(weights) & torch.isfinite(error) & torch.isfinite(bias) & (lb < 20) & (ub < 20)
-    # bias = torch.where(finite_mask, bias, 1)
-    # error = torch.where(finite_mask, error, 0)
-    # weights = torch.where(finite_mask, weights, 0)
-    # assert (weights * lb - error + bias >= -1e-8).all(), f"Softmax denominator has non-positive lower bound, which should be impossible {(weights * lb - error + bias).min()}"
+    finite_mask = torch.isfinite(weights) & torch.isfinite(error) & torch.isfinite(bias) & (lb < 20) & (ub < 20)
+    bias = torch.where(finite_mask, bias, 1)
+    error = torch.where(finite_mask, error, 0)
+    weights = torch.where(finite_mask, weights, 0)
+    assert (weights * lb - error + bias >= -1e-8).all(), f"Softmax denominator has non-positive lower bound, which should be impossible {(weights * lb - error + bias).min()}"
     exp_exp = weights * diff + error * LpEpsilon(diff.shape[:-2]) + bias
     # assert exp_exp.ublb()[1].min() >= -1e-8, f"Softmax denominator has non-positive lower bound, which should be impossible {exp_exp.ublb()[1].min()}"
     sum_exp = (weights * diff).sum(dim=-1) + error.sum(dim=-1) * LpEpsilon(diff.shape[:-2]) + bias.sum(dim=-1)

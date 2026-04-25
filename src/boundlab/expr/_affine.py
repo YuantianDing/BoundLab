@@ -134,10 +134,10 @@ class AffineSum(Expr):
         self.children_dict = {child: op.einsum_op() for child, op in self.children_dict.items()}
         super().simplify_ops_()
 
-    def symmetric_decompose(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
+    def split_const(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
         """Decompose this AffineSum into a constant part and a zero-constant AffineSum."""
         if self.constant is None:
-            return self, ConstVal(self.shape)
+            return 0, self
         const_part = ConstVal(self.constant)
         if not self.children_dict:
             return const_part, ConstVal(self.shape)
