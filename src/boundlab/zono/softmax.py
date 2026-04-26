@@ -93,10 +93,10 @@ def softmax_handler_basedon_softmax2(x: Expr, dim: int = -1, dtype=None) -> Expr
         dim += len(x.shape)
     assert dim == len(x.shape) - 1, "softmax_handler_basedon_softmax2 only supports the last dimension"
 
-    # Pairwise differences: diff[..., i, j, ...] = x[..., j, ...] - x[..., i, ...].
+    # Pairwise differences for recurrence y = x_j - x_i.
     orig_shape = x.shape
     x = x.reshape(-1, x.shape[-1])
-    diff = utils.pairwise_diff(x, dim=-1) # [T, i, j]
+    diff = -utils.pairwise_diff(x, dim=-1) # [T, i, j]
     diff = diff.permute(1, 2, 0) # [i, j, T]
     diff = utils.remove_diagonal(diff, dim1=0, dim2=1) # [i, j, T]
     diff = diff.permute(1, 2, 0) # [j, T, i]
@@ -112,6 +112,11 @@ def softmax_handler_basedon_softmax2(x: Expr, dim: int = -1, dtype=None) -> Expr
     result = expr.ConstVal(torch.ones(x.shape))
     result_ub, result_lb = result.ublb()
     for i in range(diff.shape[0]):
+        # Domain invariant of this recurrence: result stays in (0, 1].
+        result_ub = torch.clamp(result_ub, min=1e-8, max=1.0)
+        result_lb = torch.clamp(result_lb, min=1e-8, max=1.0)
+        result_lb = torch.minimum(result_lb, result_ub)
+
         zonobounds = softmax2_linearizer(result_ub, result_lb, diff_ub[i], diff_lb[i])
         ub_ibp, lb_ibp = softmax2_ibp(result_ub, result_lb, diff_ub[i], diff_lb[i])
 

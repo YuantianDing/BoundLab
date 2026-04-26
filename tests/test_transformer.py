@@ -244,6 +244,28 @@ def test_softmax_sound():
     _check_bounds(outputs, ub, lb, tol=1e-3)
 
 
+def test_softmax_basedon_softmax2_runs_and_returns_ordered_bounds():
+    """softmax_handler_basedon_softmax2 should produce sound sampled bounds."""
+    torch.manual_seed(1051)
+    prop._UB_CACHE.clear()
+    prop._LB_CACHE.clear()
+
+    seq_len, d = 3, 4
+    center_val = torch.randn(seq_len, d) * 0.2
+    scale = 0.05
+
+    x_expr = _make_input(center_val, scale=scale)
+    y_expr = zono.softmax_handler_basedon_softmax2(x_expr, dim=-1)
+    ub, lb = y_expr.ublb()
+
+    assert torch.isfinite(ub).all() and torch.isfinite(lb).all()
+    assert (ub >= lb).all()
+
+    samples = _sample_inputs(center_val, scale, n=1000)
+    outputs = torch.stack([torch.softmax(s, dim=-1) for s in samples])
+    _check_bounds(outputs, ub, lb, tol=1e-3)
+
+
 def test_softmax2_range_contract():
     """softmax2 helper bounds enforce the current lambda-y sign/range contract."""
     from boundlab.zono.softmax2 import softmax2_lb, softmax2_ub2

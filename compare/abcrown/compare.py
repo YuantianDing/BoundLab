@@ -144,14 +144,17 @@ def _patch_onnx_for_onnx2pytorch(onnx_path: Path) -> None:
 
 def boundlab_certify(
     op, center: torch.Tensor, predicted: int, eps: float
-) -> tuple[bool, float]:
-    """Return (certified, margin) where margin = lb[pred] - max_{j!=pred} ub[j]."""
+) -> tuple[bool, float, float]:
+    """Return (certified, margin, max_width) where
+    margin = lb[pred] - max_{j!=pred} ub[j] and max_width = max_j (ub_j - lb_j).
+    """
     x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
     ub, lb = op(x).ublb()
     ub_others = ub.clone()
     ub_others[predicted] = float("-inf")
     margin = float(lb[predicted] - ub_others.max())
-    return margin > 0.0, margin
+    max_width = float((ub - lb).max())
+    return margin > 0.0, margin, max_width
 
 
 # =====================================================================
@@ -464,7 +467,7 @@ def main() -> None:
 
     header = (
         f"{'Sample':<10} {'Pred':>4} {'BoundLab':>10} {'Margin':>10} "
-        f"{'ABCROWN':>10} {'AB_MaxW':>10} {'BL(s)':>8} {'AB(s)':>8}"
+        f"{'BL_MaxW':>10} {'ABCROWN':>10} {'AB_MaxW':>10} {'BL(s)':>8} {'AB(s)':>8}"
     )
     print()
     print(header)
@@ -481,8 +484,9 @@ def main() -> None:
             predicted = int(model(center).argmax().item())
 
         bl_start = time.perf_counter()
+        bl_max_w = float("nan")
         try:
-            cert, margin = boundlab_certify(op, center, predicted, args.eps)
+            cert, margin, bl_max_w = boundlab_certify(op, center, predicted, args.eps)
             bl_str = "SAFE" if cert else "UNK"
         except Exception as e:
             cert, margin = False, float("nan")
@@ -524,7 +528,7 @@ def main() -> None:
 
         print(
             f"{f'sample_{i}':<10} {predicted:>4} {bl_str:>10} "
-            f"{margin:>+10.4f} {ab_str:>10} {ab_width:>10.4f} "
+            f"{margin:>+10.4f} {bl_max_w:>10.4f} {ab_str:>10} {ab_width:>10.4f} "
             f"{bl_elapsed:>8.2f} {ab_elapsed:>8.2f}"
         )
 
@@ -534,12 +538,12 @@ def main() -> None:
     ab_pct = 100 * ab_safe / n if n else 0.0
     summary = (
         f"{'Total':<10} {'':>4} "
-        f"{f'{bl_certified}/{n} ({bl_pct:.0f}%)':>10} {'':>10} "
+        f"{f'{bl_certified}/{n} ({bl_pct:.0f}%)':>10} {'':>10} {'':>10} "
     )
     if abcrown_script is not None:
-        summary += f"{f'{ab_safe}/{n} ({ab_pct:.0f}%)':>10} "
+        summary += f"{f'{ab_safe}/{n} ({ab_pct:.0f}%)':>10} {'':>10} "
     else:
-        summary += f"{'N/A':>10} "
+        summary += f"{'N/A':>10} {'':>10} "
     summary += f"{bl_total:>8.2f} {ab_total:>8.2f}"
     print(summary)
 

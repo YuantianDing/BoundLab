@@ -19,10 +19,13 @@ from . import ZonoBounds, _register_linearizer
 
 
 def softmax2(x, y):
-    return torch.nan_to_num(
-        x / (1 + x * torch.exp(y)),
-        nan=0.0
-    )
+    if isinstance(x, int) and x == 1:
+        return torch.sigmoid(-y)
+    else:
+        return torch.nan_to_num(
+            torch.reciprocal(torch.reciprocal(x) + torch.exp(y)),
+            nan=0.0
+        )
 
 def softmax2dx(x, y):
     return torch.nan_to_num(
@@ -61,14 +64,20 @@ def softmax2dy_inv(x, lamy, sign=1):
 def softmax2_ub(lamx: torch.Tensor, lamy: torch.Tensor, x_ub: torch.Tensor, x_lb: torch.Tensor, y_ub: torch.Tensor, y_lb: torch.Tensor) -> torch.Tensor:
     assert torch.isfinite(lamx).all(), "softmax2_ub: lamx must be finite"
     assert torch.isfinite(lamy).all(), "softmax2_ub: lamy must be finite"
+    assert (x_ub >= 1e-8).all(), "softmax2_ub: x_ub must be positive"
 
     ypos_ub = softmax2dy_inv(x_ub, lamy, sign=-1)
     ypos_lb = softmax2dy_inv(x_lb, lamy, sign=-1)
     sqrt_lamx = torch.sqrt(lamx)
     lambda0 = 1 / sqrt_lamx - 1
-    # print(f"lambda0: {lambda0.item():.12g}")
-    yi_ub = torch.log(lambda0 / x_ub)
-    yi_lb = torch.log(lambda0 / x_lb)
+    finfo = torch.finfo(lamx.dtype)
+    ratio_ub = (lambda0 / x_ub).clamp(min=finfo.tiny, max=finfo.max)
+    ratio_lb = (lambda0 / x_lb).clamp(min=finfo.tiny, max=finfo.max)
+    yi_ub = torch.log(ratio_ub)
+    yi_lb = torch.log(ratio_lb)
+    assert torch.isfinite(lambda0).all(), "softmax2_ub: lambda0 non-finite"
+    assert torch.isfinite(ypos_ub).all(), "softmax2_ub: ypos_ub non-finite"
+    assert torch.isfinite(ypos_lb).all(), "softmax2_ub: ypos_lb non-finite"
     
     ypos_ub = torch.minimum(ypos_ub, yi_ub)
     ypos_ub = torch.clamp(ypos_ub, y_lb, y_ub)
@@ -152,7 +161,7 @@ def softmax2_linearizer(
     x_lb: torch.Tensor,
     y_ub: torch.Tensor,
     y_lb: torch.Tensor,
-    niters = 20,
+    niters = 1,
 ) -> ZonoBounds:
     """Gradlin-based linearizer for ``x / (1 + x * exp(y))``."""
     # Exact singleton box: return an exact affine form with zero error.
@@ -177,7 +186,7 @@ def softmax2_linearizer(
     lamy = nn.Parameter(
         softmax2dy(x_center, y_center),
     )
-    gradlin_optimizer = torch.optim.LBFGS([lamx, lamy], max_iter=niters)
+    gradlin_optimizer = torch.optim.Adam([lamx, lamy], lr=1e-2)
     
     for _ in range(niters):
         with torch.no_grad():
@@ -185,36 +194,21 @@ def softmax2_linearizer(
             lamy.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
             lamx.clamp_(min=1e-12, max=1.0 - 1e-8)
             lamy.clamp_(min=-1.0 + 1e-8, max=-1e-8)
-        assert torch.isfinite(lamx).all(), "softmax2_linearizer: lamx non-finite before LBFGS step"
-        assert torch.isfinite(lamy).all(), "softmax2_linearizer: lamy non-finite before LBFGS step"
-
-        def closure():
-            gradlin_optimizer.zero_grad()
-            with torch.no_grad():
-                lamx.nan_to_num_(nan=1e-6, posinf=1e-6, neginf=1e-6)
-                lamy.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
-                lamx.clamp_(min=1e-12, max=1.0 - 1e-8)
-                lamy.clamp_(min=-1.0 + 1e-8, max=-1e-8)
-            assert torch.isfinite(lamx).all(), "softmax2_linearizer: lamx non-finite in closure"
-            assert torch.isfinite(lamy).all(), "softmax2_linearizer: lamy non-finite in closure"
-
-            ub = softmax2_ub(lamx, lamy, x_ub, x_lb, y_ub, y_lb)
-            lb = torch.minimum(
-                softmax2_lb(lamy, x_ub, y_ub, y_lb) - lamx * x_ub,
-                softmax2_lb(lamy, x_lb, y_ub, y_lb) - lamx * x_lb,
-            )
-            assert torch.isfinite(ub).all() and torch.isfinite(lb).all(), \
-                "softmax2_linearizer: ub/lb non-finite in closure"
-            bad = ub < lb
-            if bad.any():
-                mid = (ub + lb) / 2
-                ub = torch.where(bad, mid, ub)
-                lb = torch.where(bad, mid, lb)
-            loss = (ub - lb).mean()
-            assert torch.isfinite(loss), "softmax2_linearizer: loss non-finite"
-            loss.backward()
-            return loss
-        gradlin_optimizer.step(closure)
+        assert torch.isfinite(lamx).all(), "softmax2_linearizer: lamx non-finite before optimizer step"
+        assert torch.isfinite(lamy).all(), "softmax2_linearizer: lamy non-finite before optimizer step"
+        gradlin_optimizer.zero_grad()
+        ub = softmax2_ub(lamx, lamy, x_ub, x_lb, y_ub, y_lb)
+        lb = torch.minimum(
+            softmax2_lb(lamy, x_ub, y_ub, y_lb) - lamx * x_ub,
+            softmax2_lb(lamy, x_lb, y_ub, y_lb) - lamx * x_lb,
+        )
+        assert torch.isfinite(ub).all() and torch.isfinite(lb).all(), \
+            "softmax2_linearizer: ub/lb non-finite during optimization"
+        assert (ub >= lb - 1e-6).all(), "softmax2_linearizer: ub < lb during optimization, which should be impossible"
+        loss = (ub - lb).mean()
+        assert torch.isfinite(loss), "softmax2_linearizer: loss non-finite"
+        loss.backward()
+        gradlin_optimizer.step()
 
     lamx = lamx.detach()
     lamy = lamy.detach()

@@ -52,7 +52,7 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     if isinstance(x, ConstVal):
         return ConstVal(torch.softmax(x.value, dim=dim))
     if isinstance(x, Expr):
-        from boundlab.zono.softmax import softmax_handler as std_softmax
+        from boundlab.zono.softmax import softmax_handler_basedon_softmax2 as std_softmax
         return std_softmax(x, dim=dim, dtype=dtype)
 
     if isinstance(x, DiffExpr2):
