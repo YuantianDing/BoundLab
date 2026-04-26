@@ -28,6 +28,8 @@ Apply a shape operator to a concrete tensor:
 torch.Size([3, 2])
 """
 
+import torch
+
 from ._base import LinearOp, ComposedOp, SumOp, ScalarOp, ZeroOp
 from ._einsum import EinsumOp
 
@@ -69,7 +71,6 @@ from ._indices import (
     select_indices,
     pad_indices,
     pad_output_shape,
-    _format_indices,
     make_get_slices,
     make_set_slices,
     get_int_dims,
@@ -158,67 +159,24 @@ class SelectOp(LinearOp):
         return f"<select {self.dim}, {self.index}>"
 
 
-class GetItemOp(LinearOp):
+class GetItemOp:
     """Indexing / slicing via ``x[indices]``.
-    
-    Handles both slice and int indices. Int indices remove dims (via squeeze).
+
+    Factory: returns ``ReshapeOp @ GetSliceOp`` (or just ``GetSliceOp`` when
+    no integer indices remove a dim). Slice extracts the region; reshape
+    drops the size-1 dims for any int indices.
     """
 
-    def __init__(self, input_shape, indices):
-        from ._base import LinearOpFlags
-        self.indices = indices
-        # Convert to structured slices + track int dims for squeezing
-        self._int_dims = get_int_dims(indices)
+    def __new__(cls, input_shape, indices):
+        int_dims = get_int_dims(indices)
         slices = make_get_slices(input_shape, indices)
-        self._slice_op = GetSliceOp(input_shape, slices)
-        
-        # Build squeeze chain for int dims
-        intermediate_shape = self._slice_op.output_shape
-        self._squeeze_ops = []
-        for i, dim in enumerate(sorted(self._int_dims)):
-            adjusted_dim = dim - i  # earlier squeezes shift later dims
-            sq = SqueezeOp(intermediate_shape, dim=adjusted_dim)
-            self._squeeze_ops.append(sq)
-            intermediate_shape = sq.output_shape
-        
-        output_shape = intermediate_shape
-        super().__init__(input_shape, output_shape,
-                         flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
-
-    def forward(self, x):
-        x = self._slice_op.forward(x)
-        for sq in self._squeeze_ops:
-            x = sq.forward(x)
-        return x
-
-    def backward(self, grad):
-        for sq in reversed(self._squeeze_ops):
-            grad = sq.backward(grad)
-        return self._slice_op.backward(grad)
-
-    def vforward(self, x):
-        x = self._slice_op.vforward(x)
-        for sq in self._squeeze_ops:
-            x = sq.vforward(x)
-        return x
-
-    def vbackward(self, grad):
-        for sq in reversed(self._squeeze_ops):
-            grad = sq.vbackward(grad)
-        return self._slice_op.vbackward(grad)
-
-    def __matmul__(self, other):
-        ops = [self._slice_op] + self._squeeze_ops
-        composed = ComposedOp(*reversed(ops))
-        return composed @ other
-
-    def __rmatmul__(self, other):
-        ops = [self._slice_op] + self._squeeze_ops
-        composed = ComposedOp(*reversed(ops))
-        return other @ composed
-
-    def __str__(self):
-        return f"<getitem {_format_indices(self.indices)}>"
+        slice_op = GetSliceOp(input_shape, slices)
+        if not int_dims:
+            return slice_op
+        sliced_shape = slice_op.output_shape
+        int_dims_set = set(int_dims)
+        target_shape = torch.Size(s for i, s in enumerate(sliced_shape) if i not in int_dims_set)
+        return ReshapeOp(sliced_shape, target_shape) @ slice_op
 
 
 class PadOp(SetSliceOp):

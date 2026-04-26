@@ -15,9 +15,7 @@ python = ">=3.11,<3.13"
 pytorch = ">=2.0"
 onnxruntime = "*"
 beartype = ">=0.22.9,<0.23"
-scikit-learn = ">=1.8.0,<2"
 torchvision = ">=0.25.0,<0.26"
-einops = ">=0.8.2,<0.9"
 safetensors = ">=0.7.0,<0.8"
 
 [pypi-dependencies]

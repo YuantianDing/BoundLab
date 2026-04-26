@@ -27,6 +27,19 @@ class ReshapeOp(LinearOp):
         self.reshape_groups = []
         self.dims_map = {}
         self.dims_map_inv = {}
+
+        # Edge case: either side is a scalar (0-dim). Allowed only when
+        # both sides have numel == 1.
+        if len(input_shape) == 0 or len(output_shape) == 0:
+            input_numel = reduce(lambda x, y: x * y, input_shape, 1)
+            output_numel = reduce(lambda x, y: x * y, output_shape, 1)
+            assert input_numel == output_numel, \
+                f"ReshapeOp: cannot align {input_shape} -> {output_shape} (numel {input_numel} != {output_numel})"
+            if len(input_shape) > 0 or len(output_shape) > 0:
+                self.reshape_groups.append((0, len(input_shape) - 1, 0, len(output_shape) - 1))
+            super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
+            return
+
         i, j = 0, 0
         input_win = 0
         output_win = 0
@@ -66,18 +79,18 @@ class ReshapeOp(LinearOp):
         super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
 
     def forward(self, x):
-        return x.reshape(*self.target_shape)
+        return x.reshape(self.target_shape)
 
     def backward(self, grad):
         return grad.reshape(self.input_shape)
 
     def vforward(self, x):
         extra = x.shape[len(self.input_shape):]
-        return x.reshape(*self.output_shape, *extra)
+        return x.reshape(self.target_shape + tuple(extra))
 
     def vbackward(self, grad):
-        extra = grad.shape[:-len(self.output_shape)]
-        return grad.reshape(*extra, *self.input_shape)
+        extra = grad.shape[:-len(self.output_shape)] if len(self.output_shape) > 0 else grad.shape
+        return grad.reshape(tuple(extra) + tuple(self.input_shape))
 
     def __matmul__(self, other):
         from ._einsum import EinsumOp

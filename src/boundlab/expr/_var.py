@@ -6,13 +6,12 @@ perturbations used in neural network verification.
 
 import math
 from typing import Literal
-
+import inspect
 import torch
 
 from boundlab.expr._core import Expr, ExprFlags
 from boundlab.linearop._base import LinearOp, LinearOpFlags, SumOp
 from boundlab.linearop._einsum import EinsumOp
-import warnings
 
 
 class LpEpsilon(Expr):
@@ -29,10 +28,11 @@ class LpEpsilon(Expr):
 
     Only :class:`~boundlab.linearop.EinsumOp` weights are supported.
     """
-    def __init__(self, *shape, name=None, p="inf"):
+    def __init__(self, *shape, name=None, p="inf", reason=None):
         super().__init__(ExprFlags.SYMMETRIC_TO_0)
         self._shape = torch.Size(*shape)
         self.name = name
+        self.reason = reason if reason is not None else str(inspect.stack()[1].function)
         if p == "inf":
             p = math.inf
         self.p = p
@@ -84,8 +84,8 @@ class LpEpsilon(Expr):
 
     def to_string(self) -> str:
         if self.name:
-            return f"<𝜀 {list(self.shape)}>#{self.name}"
-        return f"<𝜀 {list(self.shape)}>#{self.id:X}"
+            return f"<𝜀 {self.reason} {list(self.shape)}>#{self.name}"
+        return f"<𝜀 {self.reason} {list(self.shape)}>#{self.id:X}"
     
     def split_const(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
         """Decompose this LpEpsilon into a constant part and a zero-constant expression."""

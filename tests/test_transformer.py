@@ -244,6 +244,66 @@ def test_softmax_sound():
     _check_bounds(outputs, ub, lb, tol=1e-3)
 
 
+def test_softmax2_range_contract():
+    """softmax2 helper bounds enforce the current lambda-y sign/range contract."""
+    from boundlab.zono.softmax2 import softmax2_lb, softmax2_ub2
+
+    x = torch.tensor([0.4, 0.8, 1.2])
+    y_lb = torch.tensor([-0.3, -0.2, -0.1])
+    y_ub = torch.tensor([0.1, 0.2, 0.3])
+
+    lam_neg = torch.tensor([-0.01, -0.1, -0.25])
+    lam_pos = torch.tensor([0.01, 0.1, 0.25])
+
+    # Valid range for current implementation.
+    ub = softmax2_ub2(lam_neg, x, y_ub, y_lb)
+    lb = softmax2_lb(lam_neg, x, y_ub, y_lb)
+    assert torch.isfinite(ub).all()
+    assert torch.isfinite(lb).all()
+
+    # Invalid (positive) lambda_y should be rejected.
+    with pytest.raises(AssertionError):
+        _ = softmax2_ub2(lam_pos, x, y_ub, y_lb)
+    with pytest.raises(AssertionError):
+        _ = softmax2_lb(lam_pos, x, y_ub, y_lb)
+
+
+def test_softmax2_derivatives_match_autograd():
+    """softmax2dx/softmax2dy should match autograd on regular points."""
+    from boundlab.zono.softmax2 import softmax2, softmax2dx, softmax2dy
+
+    torch.manual_seed(1052)
+    x = (torch.rand(64) * 1.2 + 0.2).requires_grad_(True)   # strictly positive
+    y = (torch.rand(64) * 1.0 - 0.5).requires_grad_(True)
+
+    z = softmax2(x, y)
+    gx, gy = torch.autograd.grad(z.sum(), (x, y), create_graph=False)
+
+    gx_ref = softmax2dx(x.detach(), y.detach())
+    gy_ref = softmax2dy(x.detach(), y.detach())
+
+    assert torch.allclose(gx, gx_ref, atol=5e-4, rtol=5e-4), \
+        f"softmax2dx mismatch: max={(gx - gx_ref).abs().max():.6f}"
+    assert torch.allclose(gy, gy_ref, atol=5e-4, rtol=5e-4), \
+        f"softmax2dy mismatch: max={(gy - gy_ref).abs().max():.6f}"
+
+
+def test_softmax2_ub2_lb_basic_ordering_on_valid_range():
+    """On valid negative lambda_y, helper outputs are finite and well-shaped."""
+    from boundlab.zono.softmax2 import softmax2_lb, softmax2_ub2
+
+    x = torch.tensor([0.35, 0.6, 0.9, 1.2])
+    y_lb = torch.tensor([-0.5, -0.2, -0.1, 0.0])
+    y_ub = torch.tensor([0.0, 0.2, 0.4, 0.5])
+    lam = torch.tensor([-0.02, -0.05, -0.1, -0.2])
+
+    ub2 = softmax2_ub2(lam, x, y_ub, y_lb)
+    lb = softmax2_lb(lam, x, y_ub, y_lb)
+    assert torch.isfinite(ub2).all() and torch.isfinite(lb).all()
+    assert ub2.shape == x.shape
+    assert lb.shape == x.shape
+
+
 # ---- Softmax Attention -------------------------------------------------------
 
 class SoftmaxAttention(nn.Module):

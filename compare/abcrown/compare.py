@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import time
+import pickle
 from pathlib import Path
 
 import onnx_ir
@@ -191,6 +192,117 @@ def write_vnnlib(
 
     path.write_text("\n".join(lines) + "\n")
 
+def _write_output_bound_vnnlib(
+    path: Path,
+    center: torch.Tensor,
+    target_class: int,
+    *,
+    lower: bool,
+    eps: float,
+    input_lo: float = 0.0,
+    input_hi: float = 1.0,
+) -> None:
+    """Write a VNNLIB querying lower/upper bound of one output logit.
+
+    lower=True  -> query Y_target >= 0 (returns lower bound of Y_target)
+    lower=False -> query Y_target <= 0 (returns lower bound of -Y_target)
+                   so upper bound of Y_target is the negation.
+    """
+    flat = center.flatten().tolist()
+    lines: list[str] = [f"; output-bound query, class={target_class}, lower={lower}, eps={eps}"]
+    for i in range(len(flat)):
+        lines.append(f"(declare-const X_{i} Real)")
+    for j in range(NUM_CLASSES):
+        lines.append(f"(declare-const Y_{j} Real)")
+
+    for i, v in enumerate(flat):
+        lo = max(input_lo, v - eps)
+        hi = min(input_hi, v + eps)
+        lines.append(f"(assert (<= X_{i} {hi:.8f}))")
+        lines.append(f"(assert (>= X_{i} {lo:.8f}))")
+
+    if lower:
+        lines.append(f"(assert (>= Y_{target_class} 0))")
+    else:
+        lines.append(f"(assert (<= Y_{target_class} 0))")
+
+    path.write_text("\n".join(lines) + "\n")
+
+def _extract_scalar_lb_from_output_pickle(output_path: Path) -> float:
+    """Extract scalar lower bound from abcrown --save_output pickle."""
+    with output_path.open("rb") as f:
+        out = pickle.load(f)
+    if "init_alpha_crown" in out:
+        t = out["init_alpha_crown"]
+    elif "init_crown_bounds" in out:
+        t = out["init_crown_bounds"]
+    elif "refined_lb" in out:
+        t = out["refined_lb"]
+    else:
+        raise KeyError(f"No recognized lower-bound tensor in {output_path}; keys={list(out.keys())}")
+    return float(torch.as_tensor(t).reshape(-1)[0].item())
+
+def abcrown_max_output_width(
+    abcrown_script: Path,
+    onnx_path: Path,
+    config_path: Path,
+    center: torch.Tensor,
+    eps: float,
+    timeout: int,
+    tmp_dir: Path,
+) -> float | None:
+    """Compute max_j (ub_j - lb_j) for logits via abcrown CLI queries."""
+    lbs = torch.empty(NUM_CLASSES)
+    ubs = torch.empty(NUM_CLASSES)
+
+    for cls in range(NUM_CLASSES):
+        spec_lb = tmp_dir / f"bound_cls{cls}_lb.vnnlib"
+        spec_ub = tmp_dir / f"bound_cls{cls}_ub.vnnlib"
+        out_lb = tmp_dir / f"bound_cls{cls}_lb.pkl"
+        out_ub = tmp_dir / f"bound_cls{cls}_ub.pkl"
+
+        _write_output_bound_vnnlib(spec_lb, center, cls, lower=True, eps=eps)
+        _write_output_bound_vnnlib(spec_ub, center, cls, lower=False, eps=eps)
+
+        cmd_common = [
+            _abcrown_python(),
+            str(abcrown_script),
+            "--config", str(config_path),
+            "--onnx_path", str(onnx_path),
+            "--device", "cpu",
+            "--input_shape", "-1", *[str(d) for d in INPUT_SHAPE],
+            "--timeout", str(timeout),
+            "--complete_verifier", "skip",
+            "--pgd_order", "skip",
+            "--save_output",
+        ]
+        t0 = time.perf_counter()
+        try:
+            p1 = subprocess.run(
+                cmd_common + ["--vnnlib_path", str(spec_lb), "--output_file", str(out_lb)],
+                capture_output=True, text=True, timeout=timeout + 30,
+                cwd=abcrown_script.parent.parent,
+            )
+            p2 = subprocess.run(
+                cmd_common + ["--vnnlib_path", str(spec_ub), "--output_file", str(out_ub)],
+                capture_output=True, text=True, timeout=timeout + 30,
+                cwd=abcrown_script.parent.parent,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        if p1.returncode != 0 or p2.returncode != 0:
+            return None
+
+        lb = _extract_scalar_lb_from_output_pickle(out_lb)
+        neg_ub_lb = _extract_scalar_lb_from_output_pickle(out_ub)  # lb(-Y_cls)
+        ub = -neg_ub_lb
+        lbs[cls] = lb
+        ubs[cls] = ub
+
+        _ = time.perf_counter() - t0
+
+    return float((ubs - lbs).max().item())
+
 
 # =====================================================================
 # alpha-beta-CROWN runner
@@ -200,13 +312,18 @@ def find_abcrown_script() -> Path | None:
     candidates: list[Path] = []
     env = os.environ.get("ABCROWN_DIR")
     if env:
-        candidates.append(Path(env))
-    candidates.append(HERE / "alpha-beta-CROWN")
+        candidates.append(Path(env).resolve())
+    candidates.append((HERE / "alpha-beta-CROWN").resolve())
     for root in candidates:
-        script = root / "complete_verifier" / "abcrown.py"
+        script = (root / "complete_verifier" / "abcrown.py").resolve()
         if script.is_file():
             return script
     return None
+
+
+def _abcrown_python() -> str:
+    """Python executable used to launch alpha-beta-CROWN subprocesses."""
+    return os.environ.get("ABCROWN_PYTHON", sys.executable)
 
 
 _RESULT_PATTERNS = [
@@ -246,7 +363,7 @@ def abcrown_verify(
 ) -> tuple[str, float]:
     """Invoke abcrown as a subprocess; return (result, elapsed_seconds)."""
     cmd = [
-        sys.executable,
+        _abcrown_python(),
         str(abcrown_script),
         "--config", str(config_path),
         "--onnx_path", str(onnx_path),
@@ -294,6 +411,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--abcrown-timeout", type=int, default=120,
                         dest="abcrown_timeout")
+    parser.add_argument(
+        "--abcrown-max-width",
+        action="store_true",
+        help="Compute and print alpha-beta-CROWN max output bound width per sample.",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -342,7 +464,7 @@ def main() -> None:
 
     header = (
         f"{'Sample':<10} {'Pred':>4} {'BoundLab':>10} {'Margin':>10} "
-        f"{'ABCROWN':>10} {'BL(s)':>8} {'AB(s)':>8}"
+        f"{'ABCROWN':>10} {'AB_MaxW':>10} {'BL(s)':>8} {'AB(s)':>8}"
     )
     print()
     print(header)
@@ -372,6 +494,7 @@ def main() -> None:
             bl_certified += 1
 
         ab_str = "N/A"
+        ab_width = float("nan")
         ab_elapsed = 0.0
         if abcrown_script is not None and abcrown_config is not None:
             spec_path = tmp_dir / f"sample_{i}.vnnlib"
@@ -386,10 +509,22 @@ def main() -> None:
             ab_str = result.upper()
             if result.startswith("safe") or result in {"unsat", "holds"}:
                 ab_safe += 1
+            if args.abcrown_max_width:
+                w = abcrown_max_output_width(
+                    abcrown_script,
+                    onnx_path,
+                    abcrown_config,
+                    center,
+                    args.eps,
+                    args.abcrown_timeout,
+                    tmp_dir,
+                )
+                if w is not None:
+                    ab_width = w
 
         print(
             f"{f'sample_{i}':<10} {predicted:>4} {bl_str:>10} "
-            f"{margin:>+10.4f} {ab_str:>10} "
+            f"{margin:>+10.4f} {ab_str:>10} {ab_width:>10.4f} "
             f"{bl_elapsed:>8.2f} {ab_elapsed:>8.2f}"
         )
 

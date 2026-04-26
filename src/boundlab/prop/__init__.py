@@ -28,6 +28,10 @@ __all__ = [
     "ub",
     "lb",
     "ublb",
+    "center",
+    "bound_width",
+    "max_bound_width",
+    "bound_width_reasons_breakdown",
 ]
 
 if typing.TYPE_CHECKING:
@@ -431,3 +435,72 @@ def bound_width(e: "Expr") -> torch.Tensor:
     """
     ub_result, lb_result = ublb(e)
     return ub_result - lb_result
+
+def max_bound_width(e: "Expr") -> torch.Tensor:
+    r"""Compute the maximum interval width over all output dimensions.
+
+    .. math::
+
+       \max_i \left(\mathrm{ub}(e)_i - \mathrm{lb}(e)_i\right)
+    """
+    return bound_width(e).max()
+
+def bound_width_reasons_breakdown(e: "Expr") -> dict[str, torch.Tensor]:
+    r"""Compute interval width breakdown by ``LpEpsilon.reason``.
+
+    Returns a dictionary mapping each reason string to a tensor giving its
+    contribution to the bound width at the output. The sum of all values
+    equals :func:`bound_width` (up to floating-point error).
+
+    Assumes the expression is in pure-zonotope form: every non-affine op is
+    captured as ``AffineSum + LpEpsilon`` so all width comes from
+    :class:`~boundlab.expr.LpEpsilon` leaves. Each leaf contributes
+    :math:`2\,\|w\|_q`, where :math:`w` is the accumulated backward weight
+    from ``e`` to that leaf.
+    """
+    from boundlab.expr._var import LpEpsilon
+    from boundlab.expr._tuple import GetTupleItem, TupleExpr
+
+    breakdown: dict[str, torch.Tensor] = {}
+
+    weight_map = {e.id: ScalarOp(1.0, e.shape)}
+    tuple_weight_map = {}
+    pqueue = queue.PriorityQueue()
+    pqueue.put(_TopologicalExpr(e))
+
+    while not pqueue.empty():
+        current = pqueue.get().expr
+
+        if isinstance(current, GetTupleItem):
+            weight = weight_map.pop(current.id)
+            _accumulate_tuple_weight(tuple_weight_map, pqueue,
+                                     current.tuple_expr, current._index, weight)
+            continue
+
+        if isinstance(current, TupleExpr):
+            ws = tuple_weight_map.pop(current.id)
+            ws = [ws.get(i, 0) for i in range(len(current.children))]
+            _, child_weights = current.backward(*ws, direction="==")
+            _propagate_to_children(weight_map, pqueue,
+                                   current.children, child_weights)
+            continue
+
+        weight = weight_map.pop(current.id)
+
+        if isinstance(current, LpEpsilon):
+            ubias, _ = current.backward(weight, direction="<=")
+            reason = current.reason
+            contrib = 2 * ubias
+            breakdown[reason] = breakdown.get(reason, torch.zeros(e.shape)) + contrib
+            continue
+
+        result = current.backward(weight, direction="==")
+        assert result is not None, (
+            f"bound_width_reasons_breakdown requires zonotope-form expressions; "
+            f"{type(current).__name__} did not support direction '=='."
+        )
+        _, child_weights = result
+        _propagate_to_children(weight_map, pqueue,
+                               current.children, child_weights)
+
+    return breakdown

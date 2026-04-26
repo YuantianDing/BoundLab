@@ -228,6 +228,7 @@ from .relu import relu_linearizer
 from .exp import exp_linearizer
 from .reciprocal import reciprocal_linearizer
 from .tanh import tanh_linearizer
+from .square import square_linearizer
 
 # ONNX activation handlers
 interpret["Relu"] = interpret["relu"]
@@ -235,7 +236,12 @@ interpret["Tanh"] = interpret["tanh"]
 
 # Softmax
 from .softmax import softmax_handler
+from .softmax2 import softmax2_handler
+from .bilinear import matmul_handler, mul_handler
 interpret["Softmax"] = lambda X, axis=-1: softmax_handler(X, dim=axis)
+interpret["Softmax2"] = softmax2_handler
+interpret["MatMul"] = matmul_handler
+interpret["Mul"] = mul_handler
 
 __all__ = [
     "PolyBoundGate",
@@ -245,5 +251,9 @@ __all__ = [
     "exp_linearizer",
     "reciprocal_linearizer",
     "tanh_linearizer",
+    "square_linearizer",
     "softmax_handler",
+    "softmax2_handler",
+    "matmul_handler",
+    "mul_handler",
 ]

@@ -39,5 +39,8 @@ def __getattr__(name: str):
         return module
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-torch.backends.opt_einsum.enabled = True
-torch.backends.opt_einsum.strategy = "optimal"
+
+from torch.backends import opt_einsum
+
+opt_einsum.enabled = True
+opt_einsum.strategy = "optimal"

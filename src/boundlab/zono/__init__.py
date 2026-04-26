@@ -77,7 +77,7 @@ def _register_linearizer(name: str):
             # Apply slopes to input expressions
             result_expr = sum(w * e for w, e in zip(bounds.input_weights, exprs) if not0(w)) + bounds.bias
             # Introduce a fresh noise symbol for the approximation error
-            new_eps = LpEpsilon(bounds.error_coeffs.input_shape)
+            new_eps = LpEpsilon(bounds.error_coeffs.input_shape, reason=linearizer.__name__)
             result_expr = result_expr + bounds.error_coeffs(new_eps)
             return result_expr
         interpret[name] = handler
@@ -101,16 +101,19 @@ interpret["Tanh"] = interpret["tanh"]
 interpret["exp"] = interpret["Exp"]
 interpret["reciprocal"] = interpret["Reciprocal"]
 
-# Bilinear matmul handler (supports Expr @ Expr)
-from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
+# Bilinear handlers (supports Expr @ Expr and Expr * Expr)
+from .bilinear import matmul_handler, mul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
 interpret["MatMul"] = matmul_handler
+interpret["Mul"] = mul_handler
 
 
-from .softmax import softmax_handler
-interpret["Softmax"] = lambda X, axis=-1: softmax_handler(X, dim=axis)
+from .softmax import softmax_handler, softmax_handler_basedon_softmax2
+interpret["Softmax"] = lambda X, axis=-1: softmax_handler_basedon_softmax2(X, dim=axis)
+from .softmax2 import softmax2_handler, softmax2_linearizer
 
 __all__ = [
     "interpret", "ZonoBounds",
     "relu_linearizer", "exp_linearizer", "reciprocal_linearizer", "tanh_linearizer",
-    "bilinear_matmul", "bilinear_elementwise", "matmul_handler", "softmax_handler",
+    "bilinear_matmul", "bilinear_elementwise", "matmul_handler", "mul_handler",
+    "softmax_handler", "softmax2_handler", "softmax2_linearizer",
 ]

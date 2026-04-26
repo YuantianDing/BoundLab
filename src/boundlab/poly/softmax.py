@@ -32,7 +32,6 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
 
     from . import interpret
 
-    x.simplify_ops_()
     diff = utils.pairwise_diff(x, dim)
     exp_diff = interpret["Exp"](diff)
     sum_exp = exp_diff.sum(dim=-1)

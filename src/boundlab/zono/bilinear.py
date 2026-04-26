@@ -215,6 +215,28 @@ def deept_precise_matmul(A: Expr, B: Expr) -> Expr:
     result = result + err * new_eps
     return result
 
+def square_matmul(A: Expr, B: Expr) -> Expr:
+    assert len(A.shape) >= 2 and len(B.shape) >= 2, \
+        f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
+    assert A.shape[:-2] == B.shape[:-2], \
+        f"Batch dims must match: {A.shape} @ {B.shape}"
+    assert A.shape[-1] == B.shape[-2], \
+        f"Inner dims must match: {A.shape} @ {B.shape}"
+
+    Ac, As = A.split_const()
+    Bc, Bs = B.split_const()
+
+    result = Ac @ Bs + As @ Bc + Ac @ Bc
+    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
+    
+    U = (As + Bs).ub() ** 2
+    L = -(As - Bs).ub() ** 2
+
+    result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(U.shape)
+    return result
+
+
+
 
 def matmul_handler(A, B):
     """Dispatcher implementation for ``torch.matmul``.
@@ -248,5 +270,36 @@ def matmul_handler(A, B):
     else:
         return A @ B
 
-def _is_const(tensor: Union[torch.Tensor, Expr, int]) -> bool:
-    return isinstance(tensor, torch.Tensor) or isinstance(tensor, ConstVal) or isinstance(tensor, int)
+def mul_handler(A, B):
+    """Dispatcher implementation for element-wise multiplication."""
+    if isinstance(A, Expr) and _is_const(B):
+        return _mul_expr_const(A, B)
+    if _is_const(A) and isinstance(B, Expr):
+        return _mul_expr_const(B, A)
+    if _is_const(A) and _is_const(B):
+        return torch.mul(A, B)
+    if isinstance(A, Expr) and isinstance(B, Expr):
+        return bilinear_elementwise(A, B)
+    return A * B
+
+
+def _mul_expr_const(x: Expr, c):
+    if isinstance(c, ConstVal):
+        c = c.value
+
+    if isinstance(c, (int, float)):
+        return x * c
+    if isinstance(c, torch.Tensor):
+        if c.dim() == 0:
+            return x * c
+        out_shape = torch.broadcast_shapes(tuple(x.shape), tuple(c.shape))
+        if tuple(x.shape) != out_shape:
+            x = x.expand(*out_shape)
+        if tuple(c.shape) != out_shape:
+            c = c.expand(*out_shape)
+        return x * c
+    return x * c
+
+
+def _is_const(tensor: Union[torch.Tensor, Expr, int, float]) -> bool:
+    return isinstance(tensor, torch.Tensor) or isinstance(tensor, ConstVal) or isinstance(tensor, (int, float))
