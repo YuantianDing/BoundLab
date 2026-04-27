@@ -15,10 +15,12 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
 
+import onnx_ir
 import torch
 from torch import nn, Tensor
 
@@ -165,7 +167,7 @@ def main():
     ap.add_argument("--n-samples", type=int, default=5, dest="n_samples")
     ap.add_argument("--mc-samples", type=int, default=1000, dest="mc_samples")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--data-dir", default="./mnist_data", dest="data_dir")
+    ap.add_argument("--data-dir", default=os.path.join(os.getcwd(), "./mnist_data"), dest="data_dir")
     ap.add_argument("--no-normalize", dest="normalize",
                     action="store_false", default=True)
     ap.add_argument("--mean", type=float, default=0.1307)
@@ -244,6 +246,7 @@ def main():
         # Full model graph (mask=ones, same for all cases)
         mask_full = torch.ones(17, 64)
         gm_full = onnx_export(MaskedModel(vit, mask_full).eval(), ([17, 64],))
+        onnx_ir.save(gm_full, f"full_{i}.onnx")
 
         # MC ground truth: use TRUE top-K on each perturbed input
         mc_max = 0.0

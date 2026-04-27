@@ -19,6 +19,7 @@ uploaded, so ``load_state_dict`` with the DeepT checkpoint succeeds
 *strictly* (no missing / unexpected keys).
 """
 from __future__ import annotations
+import os
 
 import torch
 from torch import nn, Tensor
@@ -288,6 +289,9 @@ def build_mnist_vit(checkpoint_path: str | None = None) -> ViT:
         dim_head=64,
     )
     if checkpoint_path is not None:
+        DIRNAME = os.path.dirname(__file__)
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(DIRNAME, checkpoint_path)
         sd = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         model.load_state_dict(sd, strict=True)
     return model.eval()
