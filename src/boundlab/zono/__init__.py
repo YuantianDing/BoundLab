@@ -63,7 +63,16 @@ class ZonoBounds:
     def __post_init__(self):
         if isinstance(self.error_coeffs, torch.Tensor):
             self.error_coeffs = EinsumOp.from_hardmard(self.error_coeffs)
-
+    
+    def apply_without_error(self, *inputs: Expr) -> Expr:
+        """Apply the zonotope bounds to given input tensors, ignoring the error term."""
+        assert len(inputs) == len(self.input_weights), \
+            f"Expected {len(self.input_weights)} input expressions, got {len(inputs)}"
+        result = self.bias
+        for w, e in zip(self.input_weights, inputs):
+            if not0(w):
+                result = result + w * e
+        return result
 
 def _register_linearizer(name: str):
     def decorator(linearizer: callable):

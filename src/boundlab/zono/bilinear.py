@@ -228,11 +228,21 @@ def square_matmul(A: Expr, B: Expr) -> Expr:
 
     result = Ac @ Bs + As @ Bc + Ac @ Bc
     assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
-    
-    U = (As + Bs).ub() ** 2
-    L = -(As - Bs).ub() ** 2
 
-    result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(U.shape)
+    m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
+    As = As.unsqueeze(-1).expand(*As.shape, n) # (..., m, k, n)
+    Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n) # (..., m, k, n)
+    
+    a = As.ub()
+    b = Bs.ub()
+    a = a / (a + b)
+    b = b / (a + b)
+    Pos = torch.nan_to_num((a * As + b * Bs).ub() ** 2 / (4 * (a * b)), nan=0.0, posinf=0.0, neginf=0.0)
+    Neg = torch.nan_to_num(-(a * As - b * Bs).ub() ** 2 / (4 * (a * b)), nan=0.0, posinf=0.0, neginf=0.0)
+    U = Pos.sum(dim=-2) # (..., m, n)
+    L = Neg.sum(dim=-2) # (..., m, n)
+
+    result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(result.shape)
     return result
 
 
