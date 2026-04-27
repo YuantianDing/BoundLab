@@ -166,7 +166,7 @@ def deept_bounds(model: SstSmall3NoLayerNorm, center: torch.Tensor, perturbed_id
         q = z.dense(model.query[i]).add_attention_heads_dim(model.num_heads)
         k = z.dense(model.key[i]).add_attention_heads_dim(model.num_heads)
         scores = q.dot_product(k).multiply(1.0 / math.sqrt(model.hidden))
-        probs = scores.softmax(no_constraints=True)
+        probs = scores.softmax(no_constraints=True).add_equality_constraint_on_softmax()
 
         v = z.dense(model.value[i]).add_attention_heads_dim(model.num_heads)
         context = probs.dot_product(v.t()).remove_attention_heads_dim()

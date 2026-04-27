@@ -175,12 +175,10 @@ def certify_sample(
         # numerically safer under the reciprocal clamp when IBP attention logits have
         # very wide bounds (the new-reciprocal branch can produce 0/0 in mean_slope).
         # use_new_softmax=False uses the non-diff path sum(exp(x))·reciprocal, which
-        # benefits from the max-subtraction above. We skip the softmax-sum equality
-        # constraint (no_constraints=True) because its Gauss-elimination step is not
-        # numerically robust on our loose bounds.
+        # benefits from the max-subtraction above.
         attn = scores.softmax(no_constraints=True,
                               use_new_softmax=False,
-                              use_new_reciprocal=False)
+                              use_new_reciprocal=False).add_equality_constraint_on_softmax()
         # Sanitize: softmax outputs live in [0, 1], but our clamped exp/reciprocal
         # can leave +inf entries in attn.zonotope_w that cascade to NaN in the next
         # bilinear matmul. Box-relax to [0, 1] — loose but sound w.r.t. softmax.
