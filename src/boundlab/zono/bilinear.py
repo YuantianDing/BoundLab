@@ -270,7 +270,7 @@ def square_matmul(A: Expr, B: Expr) -> Expr:
     Au = As.ub()
     Bu = Bs.ub()
     U = Au @ Bu
-    L = U
+    L = -U
 
     Au = Au.unsqueeze(-1).expand(*Au.shape, n) # (..., m, k, n)
     Bu = Bu.unsqueeze(-3).expand(*Bu.shape[:-2], m, k, n) # (..., m, k, n)
@@ -281,8 +281,8 @@ def square_matmul(A: Expr, B: Expr) -> Expr:
     b = torch.sqrt(Bu)
     lama = a / b
     lamb = b / a
-    Pos = torch.nan_to_num((lama * As + lamb * Bs).ub() ** 2 / 4, nan=0.0, posinf=0.0, neginf=0.0)
-    Neg = torch.nan_to_num(-(lama * As - lamb * Bs).ub() ** 2 / 4, nan=0.0, posinf=0.0, neginf=0.0)
+    Pos = torch.nan_to_num((lama * As + lamb * Bs).ub() ** 2 / 4, nan=1e10, posinf=1e10, neginf=1e10)
+    Neg = torch.nan_to_num(-(lama * As - lamb * Bs).ub() ** 2 / 4, nan=-1e10, posinf=-1e10, neginf=-1e10)
     U = torch.minimum(Pos.sum(dim=-2), U) # (..., m, n)
     L = torch.maximum(Neg.sum(dim=-2), L) # (..., m, n)
 
