@@ -47,7 +47,10 @@ class EinsumOp(LinearOp):
         self.batch_dims = [i for i in output_dims if i not in input_dims]
         input_shape = torch.Size(tensor.shape[i] for i in input_dims)
         output_shape = torch.Size(tensor.shape[i] for i in output_dims)
-        assert max(i for i in input_dims + output_dims) == tensor.dim() - 1, "input_dims and output_dims must be valid dimensions of the tensor"
+        if input_dims or output_dims:
+            assert max(i for i in input_dims + output_dims) == tensor.dim() - 1, "input_dims and output_dims must be valid dimensions of the tensor"
+        else:
+            assert tensor.dim() == 0, f"input_dims and output_dims are empty but tensor has {tensor.dim()} dims"
         if name is not None:
             self.name = name
 

@@ -206,9 +206,13 @@ class LinearOp:
             assert jacobian.shape == (self.output_shape + self.input_shape), f"Expected Jacobian shape {self.output_shape + self.input_shape}, got {jacobian.shape}."
             return jacobian
         else:
-            jacobian = torch.eye(output_numel).reshape(*self.output_shape, *self.output_shape)
+            shape = torch.Size(self.output_shape + self.output_shape)
+            if len(shape) > 0:
+                jacobian = torch.eye(output_numel).reshape(*shape)
+            else:
+                jacobian = torch.tensor(1.0)
             jacobian = self.vbackward(jacobian)
-            assert jacobian.shape == (self.output_shape + self.input_shape), f"Expected Jacobian shape {self.output_shape + self.input_shape}, got {jacobian.shape}."
+            assert jacobian.shape == self.output_shape + self.input_shape, f"Expected Jacobian shape {self.output_shape + self.input_shape}, got {jacobian.shape}. {self}"
             return jacobian
     
     def jacobian_scatter(self, src: torch.Tensor) -> torch.Tensor:

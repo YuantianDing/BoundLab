@@ -102,11 +102,18 @@ class Expr:
 
     def _metric(self) -> float:
         width = self.bound_width()
-        max_width = width.max().item()
-        return max_width
+        index = width.argmax()
+        indices = torch.unravel_index(index, width.shape)
+        return self.center()[indices].item()
 
     def __repr__(self):
-        return f"Expr({self._metric():.2e})"
+        output = []
+        output.append(f"{self._metric():.3g}")
+        li = list(self.uncertainty_reasons().items())
+        li.sort(key=lambda x: x[1], reverse=True)
+        for k, v in li[:3]:
+            output.append(f"{k}={v:.2e}")
+        return f"Expr({','.join(output)})"
     
     def __str__(self):
         return "bl.Expr {\n" + expr_pretty_print(self, indent=4) + "\n}"
@@ -364,6 +371,12 @@ class Expr:
         from boundlab.linearop import GetItemOp
         if not isinstance(indices, tuple):
             indices = (indices,)
+        for i in range(len(indices)):
+            if isinstance(indices[i], torch.Tensor) and indices[i].dtype in [torch.int, torch.long, torch.int32, torch.int64]:
+                if indices[i].dim() == 0:
+                    indices = (*indices[:i], int(indices[i].item()), *indices[i+1:])
+                else:
+                    raise ValueError(f"Index tensors must be 0-dimensional (scalars), but index {i} has shape {indices[i].shape}")
         if all(isinstance(idx, slice) or isinstance(idx, int) for idx in indices):
             return self._apply_op(GetItemOp(self.shape, indices))
         raise ValueError("Invalid indices for item selection")
@@ -489,6 +502,24 @@ class Expr:
         """Compute the width of the bounds for this expression."""
         from boundlab import prop
         return prop.bound_width(self)
+
+    def max_bound_width(self) -> torch.Tensor:
+        """Compute the maximum width across all output dimensions."""
+        from boundlab import prop
+        return prop.max_bound_width(self)
+    
+    def bound_width_reasons_breakdown(self) -> dict[str, torch.Tensor]:
+        """Compute the breakdown of the bound width by reason."""
+        from boundlab import prop
+        return prop.bound_width_reasons_breakdown(self)
+    
+    def uncertainty_reasons(self) -> dict[str, float]:
+        """Compute the breakdown of the bound width by reason, aggregated to total contributions."""
+        width = self.bound_width()
+        index = width.argmax()
+        indices = torch.unravel_index(index, width.shape)
+        breakdown = self[*indices].bound_width_reasons_breakdown()
+        return {reason: float(tensor.item()) for reason, tensor in breakdown.items()}
     
     def get_const(self):
         """Return the concrete tensor if *self* is a pure constant expression, else None.

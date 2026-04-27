@@ -29,6 +29,7 @@ torch.Size([3])
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from typing import Literal
 
 import torch
@@ -82,7 +83,8 @@ class PolyBoundGate(Expr):
     and symmetrically for ``">="`` with the slopes swapped and the bias negated.
     """
 
-    def __init__(self, child: Expr, upper_lam: torch.Tensor, lower_lam: torch.Tensor):
+    def __init__(self, child: Expr, upper_lam: torch.Tensor, lower_lam: torch.Tensor,
+                 *, reason: str | None = None):
         super().__init__(ExprFlags.NONE)
         assert child.shape == upper_lam.shape == lower_lam.shape, (
             f"Shape mismatch: child={child.shape}, "
@@ -91,6 +93,7 @@ class PolyBoundGate(Expr):
         self._child = child
         self.upper_lam = upper_lam
         self.lower_lam = lower_lam
+        self.reason = reason if reason is not None else str(inspect.stack()[1].function)
 
     @property
     def shape(self) -> torch.Size:
@@ -102,7 +105,7 @@ class PolyBoundGate(Expr):
 
     def with_children(self, *new_children: Expr) -> "PolyBoundGate":
         (new_child,) = new_children
-        return PolyBoundGate(new_child, self.upper_lam, self.lower_lam)
+        return PolyBoundGate(new_child, self.upper_lam, self.lower_lam, reason=self.reason)
 
     def backward(self, weights: LinearOp, direction: Literal[">=", "<=", "=="]):
         if direction == "==":
@@ -155,7 +158,8 @@ class PolyBounds:
     lower_bias: torch.Tensor
 
 
-def _bounds_to_expr(x: Expr, bounds: "PolyBounds", *, eps: float = 1e-30) -> Expr:
+def _bounds_to_expr(x: Expr, bounds: "PolyBounds", *, eps: float = 1e-30,
+                    reason: str | None = None) -> Expr:
     r"""Wrap ``x`` as an expression satisfying ``bounds``.
 
     Expresses the CROWN relaxation as
@@ -183,7 +187,7 @@ def _bounds_to_expr(x: Expr, bounds: "PolyBounds", *, eps: float = 1e-30) -> Exp
     L = -U
     err = torch.where(exact, torch.zeros_like(err), err)
 
-    gate = PolyBoundGate(x, U, L)
+    gate = PolyBoundGate(x, U, L, reason=reason)
     return base_lam * x + base_bias + err * gate
 
 
@@ -212,7 +216,7 @@ def _register_linearizer(name: str):
                 and bounds.upper_bias.shape == x.shape
                 and bounds.lower_bias.shape == x.shape
             ), "PolyBounds tensors must match the input expression shape."
-            return _bounds_to_expr(x, bounds)
+            return _bounds_to_expr(x, bounds, reason=linearizer.__name__)
 
         interpret[name] = handler
         return linearizer
@@ -228,6 +232,7 @@ from .relu import relu_linearizer
 from .exp import exp_linearizer
 from .reciprocal import reciprocal_linearizer
 from .tanh import tanh_linearizer
+from .square import square_linearizer
 
 # ONNX activation handlers
 interpret["Relu"] = interpret["relu"]
@@ -235,7 +240,12 @@ interpret["Tanh"] = interpret["tanh"]
 
 # Softmax
 from .softmax import softmax_handler
+from .softmax2 import softmax2_handler
+from .bilinear import matmul_handler, mul_handler
 interpret["Softmax"] = lambda X, axis=-1: softmax_handler(X, dim=axis)
+interpret["Softmax2"] = softmax2_handler
+interpret["MatMul"] = matmul_handler
+interpret["Mul"] = mul_handler
 
 __all__ = [
     "PolyBoundGate",
@@ -245,5 +255,9 @@ __all__ = [
     "exp_linearizer",
     "reciprocal_linearizer",
     "tanh_linearizer",
+    "square_linearizer",
     "softmax_handler",
+    "softmax2_handler",
+    "matmul_handler",
+    "mul_handler",
 ]

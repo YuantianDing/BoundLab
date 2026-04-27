@@ -726,7 +726,7 @@ class Interpreter(Generic[E]):
                     outputs = ", ".join("%" + node.name for node in node.outputs if node is not None)
                     inputs = ", ".join("%" + node.name for node in node.inputs if node is not None)
                     kwargs_str = ", ".join(f"{k}={to_repr(v)}" for k, v in kwargs.items())
-                    if kwargs_str:
+                    if kwargs_str and inputs:
                         kwargs_str = ", " + kwargs_str
                     print(f"{outputs} = {node.op_type}({inputs}{kwargs_str})")
 
@@ -734,9 +734,9 @@ class Interpreter(Generic[E]):
                 result = handler(*args, **kwargs)
                 
 
-                if verbose:
-                    arg_str = ", ".join(to_repr(arg) for arg in args)
-                    print(f"{to_repr(result)} <- {arg_str}")
+                if verbose and isinstance(result, Expr):
+                    result.simplify_ops_()
+                    print(f"-> {to_repr(result)}")
 
                 assert not isinstance(result, tuple), f"Handler for {node.op_type} returned a tuple, but only single outputs are supported. Got: {result}"
 

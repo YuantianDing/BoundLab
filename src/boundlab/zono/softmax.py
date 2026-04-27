@@ -17,8 +17,12 @@ import torch
 
 from boundlab import expr, utils
 from boundlab.expr._var import LpEpsilon
+from boundlab.linearop._indices import GatherOp
+from boundlab.zono.reciprocal import reciprocal_linearizer
 from boundlab.zono.exp import exp_linearizer
 from boundlab.expr._core import Expr
+from boundlab.zono.softmax2 import softmax2_ibp, softmax2_linearizer
+from boundlab.zono.tanh import tanh_linearizer
 
 """Softmax handler for zonotope abstract interpretation.
 
@@ -111,3 +115,44 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     beta = bounds.error_coeffs.tensor
     result = finite_mask * (w * sum_exp + mu + beta * LpEpsilon(sum_exp.shape))
     return result
+
+
+def softmax_handler_basedon_softmax2(x: Expr, dim: int = -1, dtype=None) -> Expr:
+    if dim < 0:
+        dim += len(x.shape)
+    assert dim == len(x.shape) - 1, "softmax_handler_basedon_softmax2 only supports the last dimension"
+
+    # Pairwise differences for recurrence y = x_j - x_i.
+    orig_shape = x.shape
+    x = x.reshape(-1, x.shape[-1])
+    diff = -utils.pairwise_diff(x, dim=-1) # [T, i, j]
+    diff = diff.permute(1, 2, 0) # [i, j, T]
+    diff = utils.remove_diagonal(diff, dim1=0, dim2=1) # [i, j, T]
+    diff = diff.permute(1, 2, 0) # [j, T, i]
+    diff_ub, diff_lb = diff.ublb()
+
+    tanh_err = (diff_ub + diff_lb).abs() / 2
+
+    indices = torch.argsort(tanh_err, dim=0)
+    diff_ub = torch.gather(diff_ub, dim=0, index=indices)
+    diff_lb = torch.gather(diff_lb, dim=0, index=indices)
+    diff = GatherOp(diff.shape, dim=0, index=indices)(diff)
+
+    result = expr.ConstVal(torch.ones(x.shape))
+    result_ub, result_lb = result.ublb()
+    for i in range(diff.shape[0]):
+        # Domain invariant of this recurrence: result stays in (0, 1].
+        result_ub = torch.clamp(result_ub, min=1e-8, max=1.0)
+        result_lb = torch.clamp(result_lb, min=1e-8, max=1.0)
+        result_lb = torch.minimum(result_lb, result_ub)
+
+        zonobounds = softmax2_linearizer(result_ub, result_lb, diff_ub[i], diff_lb[i])
+        ub_ibp, lb_ibp = softmax2_ibp(result_ub, result_lb, diff_ub[i], diff_lb[i])
+
+        lam_x, lam_y, mu, beta = zonobounds.input_weights[0], zonobounds.input_weights[1], zonobounds.bias, zonobounds.error_coeffs.tensor
+        result = lam_x * result + lam_y * diff[i] + mu + beta * LpEpsilon(result.shape)
+        result_ub, result_lb = result.ublb()
+        result_ub = torch.minimum(result_ub, ub_ibp)
+        result_lb = torch.maximum(result_lb, lb_ibp)
+
+    return result.reshape(orig_shape)
