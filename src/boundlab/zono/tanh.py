@@ -44,11 +44,14 @@ def tanh_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     Uses ``tanh(x) = 2 * softmax2(1, -2x) - 1`` with shared-slope affine bounds
     from ``softmax2_ub2`` / ``softmax2_lb``.
     """
+    # print((ub - lb).mean().item(), (ub - lb).std().item())
+    # print((ub + lb).mean().item() / 2, ((ub + lb) / 2).std().item())
     degen = torch.abs(ub - lb) < 1e-12
     # softmax2 helper parameter (lam_y) range is [-1, 0].
     # For tanh: slope_tanh = -4 * lam_y, so lam_y in [-0.25, 0].
     # Use the DeepT minimal-area slope choice: min(sech^2(lb), sech^2(ub)).
     slope_tanh = torch.minimum(1 - torch.tanh(lb) ** 2, 1 - torch.tanh(ub) ** 2)
+    # slope_tanh = (torch.tanh(ub) - torch.tanh(lb)) / (ub - lb + 1e-30)
     lam_y = -slope_tanh / 4
     lam_y = torch.clamp(lam_y, min=-1.0, max=-1e-8)
 

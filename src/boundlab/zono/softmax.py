@@ -66,7 +66,7 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
 
     # pairwise_diff gives diff[..., i, j] = x[..., i] - x[..., j]
     # softmax(x)[i] = 1 / sum_j exp(x[j] - x[i]) = 1 / sum_j exp(diff[..., i, j])
-    diff = utils.pairwise_diff(x, dim)
+    diff = -utils.pairwise_diff(x, dim)
     ub, lb = diff.ublb()
 
     expbounds = exp_linearizer(ub, lb)
