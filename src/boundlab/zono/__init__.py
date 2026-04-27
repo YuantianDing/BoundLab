@@ -108,7 +108,7 @@ interpret["Mul"] = mul_handler
 
 
 from .softmax import softmax_handler, softmax_handler_basedon_softmax2
-interpret["Softmax"] = lambda X, axis=-1: softmax_handler(X, dim=axis)
+interpret["Softmax"] = lambda X, axis=-1: softmax_handler_basedon_softmax2(X, dim=axis)
 from .softmax2 import softmax2_handler, softmax2_linearizer
 
 __all__ = [

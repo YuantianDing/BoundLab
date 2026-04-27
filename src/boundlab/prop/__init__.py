@@ -308,6 +308,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     >>> (u >= l).all().item()
     True
     """
+    e.simplify_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 
@@ -446,22 +447,38 @@ def max_bound_width(e: "Expr") -> torch.Tensor:
     return bound_width(e).max()
 
 def bound_width_reasons_breakdown(e: "Expr") -> dict[str, torch.Tensor]:
-    r"""Compute interval width breakdown by ``LpEpsilon.reason``.
+    r"""Compute interval width breakdown by reason.
 
     Returns a dictionary mapping each reason string to a tensor giving its
     contribution to the bound width at the output. The sum of all values
     equals :func:`bound_width` (up to floating-point error).
 
-    Assumes the expression is in pure-zonotope form: every non-affine op is
-    captured as ``AffineSum + LpEpsilon`` so all width comes from
-    :class:`~boundlab.expr.LpEpsilon` leaves. Each leaf contributes
-    :math:`2\,\|w\|_q`, where :math:`w` is the accumulated backward weight
-    from ``e`` to that leaf.
+    Two relaxation primitives are handled:
+
+    - :class:`~boundlab.expr.LpEpsilon` (zonotope form): each leaf
+      contributes :math:`\|u\|_q + \|l\|_q`, where ``(u, l)`` are the
+      accumulated backward weights for the upper/lower direction. When the
+      backward weight has not yet split, this collapses to :math:`2\|w\|_q`.
+    - :class:`~boundlab.poly.PolyBoundGate` (polytope/CROWN form): each
+      gate contributes the difference between its ``<=`` and ``>=`` biases.
+      Because a gate's child weight depends on the propagation direction,
+      its child receives a split ``(u_w, l_w)`` weight that propagates
+      downstream.
+
+    Constant biases reached in split mode (caused by a gate's slope spread
+    amplifying through downstream constants) are aggregated under the
+    reserved key ``"polytope_slope_slack"``.
     """
     from boundlab.expr._var import LpEpsilon
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
+    from boundlab.poly import PolyBoundGate
 
     breakdown: dict[str, torch.Tensor] = {}
+
+    def _add(reason: str, contrib) -> None:
+        if _is0(contrib):
+            return
+        breakdown[reason] = breakdown.get(reason, torch.zeros(e.shape)) + contrib
 
     weight_map = {e.id: ScalarOp(1.0, e.shape)}
     tuple_weight_map = {}
@@ -478,29 +495,71 @@ def bound_width_reasons_breakdown(e: "Expr") -> dict[str, torch.Tensor]:
             continue
 
         if isinstance(current, TupleExpr):
-            ws = tuple_weight_map.pop(current.id)
-            ws = [ws.get(i, 0) for i in range(len(current.children))]
-            _, child_weights = current.backward(*ws, direction="==")
+            wd = tuple_weight_map.pop(current.id)
+            n = len(current.children)
+            ws = [wd.get(i, 0) for i in range(n)]
+            all_single = all(not isinstance(w, tuple) for w in ws)
+            child_weights = None
+            if all_single:
+                if a := current.backward(*ws, direction="=="):
+                    _, child_weights_exact = a
+                    child_weights = list(child_weights_exact)
+            if child_weights is None:
+                ub_ws = [w[0] if isinstance(w, tuple) else w for w in ws]
+                lb_ws = [w[1] if isinstance(w, tuple) else w for w in ws]
+                ubias, lbias, child_weights = _ublb_split_results(
+                    current.backward(*ub_ws, direction="<="),
+                    current.backward(*lb_ws, direction=">="),
+                )
+                _add("polytope_slope_slack", ubias - lbias)
+            _ublb_propagate_children(weight_map, pqueue,
+                                     current.children, child_weights)
+            continue
+
+        weight = weight_map.pop(current.id)
+        is_split = isinstance(weight, tuple)
+
+        if isinstance(current, LpEpsilon):
+            if is_split:
+                u_w, l_w = weight
+                ubias, _ = current.backward(u_w, direction="<=")
+                lbias, _ = current.backward(l_w, direction=">=")
+                contrib = ubias - lbias
+            else:
+                ubias, _ = current.backward(weight, direction="<=")
+                contrib = 2 * ubias
+            _add(current.reason, contrib)
+            continue
+
+        if isinstance(current, PolyBoundGate):
+            u_w, l_w = weight if is_split else (weight, weight)
+            ubias, u_child_weights = current.backward(u_w, direction="<=")
+            lbias, l_child_weights = current.backward(l_w, direction=">=")
+            _add(current.reason, ubias - lbias)
+            child_weights = list(zip(u_child_weights, l_child_weights))
+            _ublb_propagate_children(weight_map, pqueue,
+                                     current.children, child_weights)
+            continue
+
+        if not is_split:
+            result = current.backward(weight, direction="==")
+            assert result is not None, (
+                f"bound_width_reasons_breakdown: {type(current).__name__} did not "
+                f"support direction '==' in single-weight mode."
+            )
+            _, child_weights = result
             _propagate_to_children(weight_map, pqueue,
                                    current.children, child_weights)
             continue
 
-        weight = weight_map.pop(current.id)
-
-        if isinstance(current, LpEpsilon):
-            ubias, _ = current.backward(weight, direction="<=")
-            reason = current.reason
-            contrib = 2 * ubias
-            breakdown[reason] = breakdown.get(reason, torch.zeros(e.shape)) + contrib
-            continue
-
-        result = current.backward(weight, direction="==")
-        assert result is not None, (
-            f"bound_width_reasons_breakdown requires zonotope-form expressions; "
-            f"{type(current).__name__} did not support direction '=='."
+        # Split-mode affine op: <= and >= biases may differ via downstream constants.
+        u_w, l_w = weight
+        ubias, lbias, child_weights = _ublb_split_results(
+            current.backward(u_w, direction="<="),
+            current.backward(l_w, direction=">="),
         )
-        _, child_weights = result
-        _propagate_to_children(weight_map, pqueue,
-                               current.children, child_weights)
+        _add("polytope_slope_slack", ubias - lbias)
+        _ublb_propagate_children(weight_map, pqueue,
+                                 current.children, child_weights)
 
     return breakdown

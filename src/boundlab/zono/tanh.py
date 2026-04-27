@@ -37,8 +37,8 @@ def tanh_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
 
     return ZonoBounds(bias=mu, error_coeffs=error_op, input_weights=[slope])
 
-
-def tanh_linearizer_softmax2(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
+@_register_linearizer("tanh")
+def tanh_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     """Tanh linearizer implemented via softmax2 bounds.
 
     Uses ``tanh(x) = 2 * softmax2(1, -2x) - 1`` with shared-slope affine bounds

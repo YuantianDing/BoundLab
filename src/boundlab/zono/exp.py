@@ -59,3 +59,16 @@ def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
 
     error_op = EinsumOp.from_hardmard(beta, len(ub.shape))
     return ZonoBounds(bias=mu, error_coeffs=error_op, input_weights=[slope])
+
+def exp_ibp(
+    x_ub: torch.Tensor,
+    x_lb: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Interval bound for ``exp`` on a box.
+
+    For ``x > 0``, exp is monotone increasing, so:
+      ub = exp(x_ub), lb = exp(x_lb).
+    """
+    ub = torch.exp(x_ub)
+    lb = torch.exp(x_lb)
+    return ub, lb

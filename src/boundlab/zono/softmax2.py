@@ -179,12 +179,11 @@ def softmax2_linearizer(
         )
 
     x_center = (x_ub + x_lb) / 2
-    y_center = (y_ub + y_lb) / 2
     lamx = nn.Parameter(
-        softmax2dx(x_center, y_center),
+        torch.minimum(softmax2dx(x_ub, y_ub), softmax2dx(x_lb, y_lb)),
     )
     lamy = nn.Parameter(
-        softmax2dy(x_center, y_center),
+        torch.maximum(softmax2dy(x_ub, y_lb), softmax2dy(x_lb, y_ub)),
     )
     gradlin_optimizer = torch.optim.Adam([lamx, lamy], lr=1e-2)
     

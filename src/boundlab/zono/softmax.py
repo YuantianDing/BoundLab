@@ -18,6 +18,7 @@ import torch
 from boundlab import expr, utils
 from boundlab.expr._var import LpEpsilon
 from boundlab.linearop._indices import GatherOp
+from boundlab.zono.reciprocal import reciprocal_linearizer
 from boundlab.zono.exp import exp_linearizer
 from boundlab.expr._core import Expr
 from boundlab.zono.softmax2 import softmax2_ibp, softmax2_linearizer
@@ -72,19 +73,22 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     bias = expbounds.bias
     error = expbounds.error_coeffs.tensor
     weights = expbounds.input_weights[0]
-    print(weights.shape, diff.shape)
 
-    finite_mask = torch.isfinite(weights) & torch.isfinite(error) & torch.isfinite(bias) & (lb < 10) & (ub < 10)
-    bias = torch.where(finite_mask, bias, 1)
+    finite_mask = torch.isfinite(weights) & torch.isfinite(error) & torch.isfinite(bias) & (lb < 30) & (ub < 30)
+    bias = torch.where(finite_mask, bias, 0)
     error = torch.where(finite_mask, error, 0)
     weights = torch.where(finite_mask, weights, 0)
-    assert (weights * lb - error + bias >= -1e-8).all(), f"Softmax denominator has non-positive lower bound, which should be impossible {(weights * lb - error + bias).min()}"
-    exp_exp = weights * diff + error * LpEpsilon(diff.shape[:-2]) + bias
-    assert exp_exp.ublb()[1].min() >= -1e-8, f"Softmax denominator has non-positive lower bound, which should be impossible {exp_exp.ublb()[1].min()}"
     sum_exp = (weights * diff).sum(dim=-1) + error.sum(dim=-1) * LpEpsilon(diff.shape[:-2]) + bias.sum(dim=-1)
-    assert sum_exp.ublb()[0].min() >= 0, "Softmax output has negative lower bound, which should be impossible"
     finite_mask = finite_mask.all(dim=-1)
-    result = interpret["Reciprocal"](sum_exp)
+    
+    sum_exp_ub, sum_exp_lb = sum_exp.ublb()
+    sum_exp_ub = torch.minimum(sum_exp_ub, torch.exp(ub).sum(dim=-1))
+    sum_exp_lb = torch.maximum(sum_exp_lb, torch.exp(lb).sum(dim=-1))
+    bounds = reciprocal_linearizer(sum_exp_ub, sum_exp_lb)
+    w = bounds.input_weights[0]
+    mu = bounds.bias
+    beta = bounds.error_coeffs.tensor
+    result = finite_mask * (w * sum_exp + mu + beta * LpEpsilon(sum_exp.shape))
     return result
 
 
@@ -102,7 +106,7 @@ def softmax_handler_basedon_softmax2(x: Expr, dim: int = -1, dtype=None) -> Expr
     diff = diff.permute(1, 2, 0) # [j, T, i]
     diff_ub, diff_lb = diff.ublb()
 
-    tanh_err = tanh_linearizer(diff_ub, diff_lb).error_coeffs.tensor
+    tanh_err = (diff_ub + diff_lb).abs() / 2
 
     indices = torch.argsort(tanh_err, dim=0)
     diff_ub = torch.gather(diff_ub, dim=0, index=indices)

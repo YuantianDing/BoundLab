@@ -279,6 +279,7 @@ def abcrown_max_output_width(
             "--pgd_order", "skip",
             "--save_output",
         ]
+        print(" ".join(cmd_common))
         t0 = time.perf_counter()
         try:
             p1 = subprocess.run(
@@ -485,13 +486,13 @@ def main() -> None:
 
         bl_start = time.perf_counter()
         bl_max_w = float("nan")
-        try:
-            cert, margin, bl_max_w = boundlab_certify(op, center, predicted, args.eps)
-            bl_str = "SAFE" if cert else "UNK"
-        except Exception as e:
-            cert, margin = False, float("nan")
-            bl_str = "ERR"
-            print(f"  [boundlab error: {type(e).__name__}: {e}]", file=sys.stderr)
+        # try:
+        #     cert, margin, bl_max_w = boundlab_certify(op, center, predicted, args.eps)
+        #     bl_str = "SAFE" if cert else "UNK"
+        # except Exception as e:
+        cert, margin = False, float("nan")
+        bl_str = "ERR"
+        # print(f"  [boundlab error: {type(e).__name__}: {e}]", file=sys.stderr)
         bl_elapsed = time.perf_counter() - bl_start
         bl_total += bl_elapsed
         if cert:

@@ -13,7 +13,7 @@ def _square_expr(x: Expr) -> Expr:
     from . import _bounds_to_expr
 
     ub, lb = x.ublb()
-    return _bounds_to_expr(x, square_linearizer(ub, lb))
+    return _bounds_to_expr(x, square_linearizer(ub, lb), reason=square_linearizer.__name__)
 
 
 def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
