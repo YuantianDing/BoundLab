@@ -3,7 +3,7 @@
 import torch
 
 from boundlab import expr
-from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zono3.default.heaviside import _linearize_hsx, diff_heaviside_pruning_handler
 
 

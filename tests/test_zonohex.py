@@ -21,7 +21,7 @@ import pytest
 from torch import nn
 
 import boundlab.expr as expr
-from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zonohex import interpret as hex_interpret, ZonoHexGate, expr3_to_expr2
 from boundlab.interp.onnx import onnx_export
 

@@ -279,7 +279,7 @@ def matmul_handler(A, B):
         normal = bilinear_matmul(A, B)
         return normal
     else:
-        return A @ B
+        return NotImplemented
 
 def _is_const(tensor: Union[torch.Tensor, Expr, int]) -> bool:
     return isinstance(tensor, torch.Tensor) or isinstance(tensor, ConstVal) or isinstance(tensor, int)
@@ -295,28 +295,64 @@ def square_matmul(A: Expr, B: Expr) -> Expr:
     Ac, As = A.split_const()
     Bc, Bs = B.split_const()
 
-    result = Ac @ Bs + As @ Bc + Ac @ Bc
-    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
+    if As.is_symmetric_to_0() and Bs.is_symmetric_to_0():
+        result = Ac @ Bs + As @ Bc + Ac @ Bc
 
-    m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
-    Au = As.ub()
-    Bu = Bs.ub()
-    U = Au @ Bu
-    L = -U
+        m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
+        Au = As.ub()
+        Bu = Bs.ub()
+        U = Au @ Bu
+        L = -U
 
-    Au = Au.unsqueeze(-1).expand(*Au.shape, n) # (..., m, k, n)
-    Bu = Bu.unsqueeze(-3).expand(*Bu.shape[:-2], m, k, n) # (..., m, k, n)
-    As = As.unsqueeze(-1).expand(*As.shape, n) # (..., m, k, n)
-    Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n) # (..., m, k, n)
-    
-    a = torch.sqrt(Au)
-    b = torch.sqrt(Bu)
-    lama = a / b
-    lamb = b / a
-    Pos = torch.nan_to_num((lama * As + lamb * Bs).ub() ** 2 / 4, nan=1e10, posinf=1e10, neginf=1e10)
-    Neg = torch.nan_to_num(-(lama * As - lamb * Bs).ub() ** 2 / 4, nan=-1e10, posinf=-1e10, neginf=-1e10)
-    U = torch.minimum(Pos.sum(dim=-2), U) # (..., m, n)
-    L = torch.maximum(Neg.sum(dim=-2), L) # (..., m, n)
+        Au = Au.unsqueeze(-1).expand(*Au.shape, n) # (..., m, k, n)
+        Bu = Bu.unsqueeze(-3).expand(*Bu.shape[:-2], m, k, n) # (..., m, k, n)
+        As = As.unsqueeze(-1).expand(*As.shape, n) # (..., m, k, n)
+        Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n) # (..., m, k, n)
+        
+        a = torch.sqrt(Au)
+        b = torch.sqrt(Bu)
+        lama = a / b
+        lamb = b / a
+        Pos = torch.nan_to_num((lama * As + lamb * Bs).ub() ** 2 / 4, nan=1e10, posinf=1e10, neginf=1e10)
+        Neg = torch.nan_to_num(-(lama * As - lamb * Bs).ub() ** 2 / 4, nan=-1e10, posinf=-1e10, neginf=-1e10)
+        U = torch.minimum(Pos.sum(dim=-2), U) # (..., m, n)
+        L = torch.maximum(Neg.sum(dim=-2), L) # (..., m, n)
 
-    result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(result.shape)
-    return result
+        result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(result.shape)
+        return result
+
+    else:
+        m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
+        Au, Al = A.ublb()
+        Bu, Bl = B.ublb()
+        Ac = (Au + Al) / 2
+        As = A - Ac
+        Bc = (Bu + Bl) / 2
+        Bs = B - Bc
+
+        result = Ac @ Bc + As @ Bc + Ac @ Bs
+        Asu = (Au - Al) / 2
+        Bsu = (Bu - Bl) / 2
+        U = Asu @ Bsu
+        L = -U
+
+        Asu = Asu.unsqueeze(-1).expand(*Asu.shape, n) # (..., m, k, n)
+        Bsu = Bsu.unsqueeze(-3).expand(*Bsu.shape[:-2], m, k, n) # (..., m, k, n)
+        As = As.unsqueeze(-1).expand(*As.shape, n) # (..., m, k, n)
+        Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n) # (..., m, k, n)
+
+        a = torch.sqrt(Asu)
+        b = torch.sqrt(Bsu)
+        lama = a / b
+        lamb = b / a
+        PosU, PosL = (lama * As + lamb * Bs).ublb()
+        NegU, NegL = (lama * As - lamb * Bs).ublb()
+        Pos = torch.nan_to_num(torch.maximum(PosU ** 2, PosL ** 2) / 4, nan=1e10, posinf=1e10, neginf=1e10)
+        Neg = torch.nan_to_num(-torch.maximum(NegU ** 2, NegL ** 2) / 4, nan=-1e10, posinf=-1e10, neginf=-1e10)
+        U = torch.minimum(Pos.sum(dim=-2), U) # (..., m, n)
+        L = torch.maximum(Neg.sum(dim=-2), L) # (..., m, n)
+
+        result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(result.shape)
+        return result
+
+

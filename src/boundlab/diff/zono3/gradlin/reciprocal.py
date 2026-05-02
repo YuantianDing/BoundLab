@@ -19,5 +19,5 @@ def _reciprocal_grad_inv(lam: torch.Tensor) -> torch.Tensor:
 
 
 reciprocal_linearizer = make_unary_diff_linearizer(
-    torch.reciprocal, _reciprocal_grad_inv, _std_reciprocal_linearizer
+    torch.reciprocal, _std_reciprocal_linearizer, name="reciprocal_gradlin"
 )

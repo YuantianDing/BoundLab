@@ -20,6 +20,7 @@ class DiffExpr2:
     
     def __post_init__(self):
         assert isinstance(self.x, Expr) and isinstance(self.y, Expr), "DiffExpr2 components must be Expr instances"
+        assert self.x.shape == self.y.shape, "DiffExpr2 components must have the same shape"
 
     @property
     def shape(self) -> torch.Size:
@@ -27,6 +28,9 @@ class DiffExpr2:
 
     def _map_all(self, fn):
         return DiffExpr2(fn(self.x), fn(self.y))
+    
+    def is_constant(self) -> bool:
+        return isinstance(self.x, expr.ConstVal) and isinstance(self.y, expr.ConstVal)
     
     def get_const(self) -> tuple[torch.Tensor, torch.Tensor] | None:
         x = self.x.get_const()
@@ -123,7 +127,7 @@ class DiffExpr2:
                 return DiffExpr2(tensors[0] @ other, tensors[1] @ other)
         if isinstance(other, DiffExpr2):
             if (tensors := self.get_const()) is not None:
-                return DiffExpr2(tensors[0] @ other.x, self.y @ tensors[1] @ other.y)
+                return DiffExpr2(tensors[0] @ other.x, tensors[1] @ other.y)
             elif (tensors := other.get_const()) is not None:
                 return DiffExpr2(self.x @ tensors[0], self.y @ tensors[1])
         return NotImplemented
@@ -214,7 +218,7 @@ class DiffExpr2:
         return self._map_all(lambda e: e.sum(dim=dim, keepdim=keepdim))
     
     def __repr__(self):
-        return f"DiffExpr2(x={self.x.bound_width().max().item()}, y={self.y.bound_width().max().item()})"
+        return f"DiffExpr2({repr(self.x)}, y={repr(self.y)})"
 
 
 @dataclasses.dataclass
@@ -465,6 +469,6 @@ class DiffExpr3:
         return f"DiffExpr3 {{\n    x: {X},\n    y: {Y},\n    diff: {D}\n}}"
     
     def __repr__(self):
-        return f"DiffExpr3(x={self.x.bound_width().max().item()}, y={self.y.bound_width().max().item()}, diff={self.diff.bound_width().max().item()})"
+        return f"DiffExpr3({repr(self.x)}, {repr(self.y)}, {repr(self.diff)})"
 
 __all__ = ["DiffExpr2", "DiffExpr3"]

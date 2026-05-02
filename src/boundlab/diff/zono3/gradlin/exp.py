@@ -21,5 +21,5 @@ def _exp_grad_inv(lam: torch.Tensor) -> torch.Tensor:
 
 
 exp_linearizer = make_unary_diff_linearizer(
-    torch.exp, _exp_grad_inv, _std_exp_linearizer
+    torch.exp, _std_exp_linearizer, name="exp_gradlin"
 )

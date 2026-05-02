@@ -13,8 +13,9 @@ import pytest
 from torch import nn
 
 import boundlab.expr as expr
-from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
+from boundlab.diff.zono3 import interpret_gradlin as diff_interpret_gradlin
 from boundlab.interp.onnx import onnx_export
 
 def _export(model: nn.Module, *in_shapes: list[int]):
@@ -50,6 +51,28 @@ def _check_sound(d_expr: expr.Expr, diffs: torch.Tensor, tol: float = 1e-5):
 def _const_zonotope(center_val: float, half_width: float, n: int = 1) -> expr.Expr:
     c = torch.full((n,), center_val)
     return expr.Add(expr.ConstVal(c), torch.full((n,), half_width) * expr.LpEpsilon([n]))
+
+
+def test_interpret_gradlin_tanh_bounds_are_tighter_than_default():
+    """Gradlin-backed tanh should be no wider, and sometimes strictly tighter."""
+    c1 = torch.tensor([
+        -0.1455431879, -1.1506751776, -0.6675606966, -1.0271335840,
+        -0.0551871173, 0.2358984053, -0.7003268003, 0.7728598714,
+    ])
+    c2 = torch.tensor([
+        0.1315813363, -1.3044850826, -0.8176356554, -1.2677642107,
+        -0.3439819217, -0.0656736493, -1.3338494301, 0.7199301124,
+    ])
+    shared_eps = 0.5 * expr.LpEpsilon([8])
+    x = c1 + shared_eps
+    y = c2 + shared_eps
+    triple = DiffExpr3(x, y, x - y)
+
+    default_width = diff_interpret["tanh"](triple).diff.bound_width()
+    gradlin_width = diff_interpret_gradlin["tanh"](triple).diff.bound_width()
+
+    assert (gradlin_width <= default_width + 1e-4).all()
+    assert (gradlin_width < default_width - 1e-3).any()
 
 _tanh_handler = diff_interpret["tanh"]
 

@@ -27,7 +27,7 @@ import torch.nn as nn
 
 import boundlab.expr as expr
 import boundlab.zono as zono
-from boundlab.diff.zono3.expr import DiffExpr3
+from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.net import diff_net
 from boundlab.diff.zono3 import interpret as diff_interpret
 from boundlab.interp.onnx import onnx_export

@@ -175,7 +175,7 @@ def monte_carlo(model1, model2, center, eps, n_samples=5000):
 def differential_verify(model1, model2, center, eps):
     """Differential zonotope verification."""
     from boundlab.diff.net import diff_net
-    from boundlab.diff.zono3.expr import DiffExpr3
+    from boundlab.diff.expr import DiffExpr3
     from boundlab.diff.zono3 import interpret as diff_interpret
 
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()

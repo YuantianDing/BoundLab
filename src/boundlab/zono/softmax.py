@@ -82,6 +82,8 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     >>> y.shape
     torch.Size([2, 3])
     """
+    if not isinstance(x, Expr):
+        return NotImplemented
     if dim < 0:
         dim += len(x.shape)
     assert dim == len(x.shape) - 1, "softmax_handler only supports the last dimension"

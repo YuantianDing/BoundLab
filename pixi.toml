@@ -13,10 +13,17 @@ docs = { cmd = "make html", cwd = "docs" }
 [dependencies]
 python = ">=3.11,<3.13"
 pytorch = ">=2.0"
+scipy = ">=1.11"
 onnxruntime = "*"
 beartype = ">=0.22.9,<0.23"
 torchvision = ">=0.25.0,<0.26"
 safetensors = ">=0.7.0,<0.8"
+pyyaml = ">=6.0.3,<7"
+termcolor = ">=3.3.0,<4"
+appdirs = ">=1.4.4,<2"
+graphviz = ">=14.1.2,<15"
+python-graphviz = ">=0.21,<0.22"
+psutil = ">=7.2.2,<8"
 
 [pypi-dependencies]
 sortedcontainers = "*"
@@ -26,6 +33,11 @@ opt-einsum = ">=3.3"
 pytorch-pretrained-bert = "*"
 nltk = "*"
 pandas = "*"
+onnx2pytorch = { git = "https://github.com/Verified-Intelligence/onnx2pytorch.git" }
+onnxsim = ">=0.6.3, <0.7"
+onnxoptimizer = ">=0.4.2, <0.5"
+skl2onnx = ">=1.20.0, <2"
+gurobipy = ">=10"
 
 [feature.dev.dependencies]
 pytest = ">=7.0"

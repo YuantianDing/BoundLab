@@ -1,13 +1,7 @@
 """Differential ReLU linearizer tightened by :func:`boundlab.gradlin.gradlin`.
 
-ReLU has no smooth inverse gradient — instead it has piecewise-linear kinks
-along ``x = 0`` and ``y = 0``. Extrema of ``relu(x) − relu(y) − lam·(x, y)``
-on the trapezoidal region therefore include, in addition to the polytope
-vertices, the endpoints of the line segments ``R ∩ {x = 0}`` and
-``R ∩ {y = 0}``. We surface those endpoints as fixed candidates to
-``gradlin`` (via its ``grad_inv`` hook — ``gradlin`` checks each candidate
-for feasibility inside ``R``) so the optimiser sees every place where the
-residual could peak.
+This uses the same trapezoid search pipeline as the smooth activations, but
+with the unary function ``relu`` instead of a smooth derivative inverse.
 """
 
 from __future__ import annotations
@@ -15,7 +9,7 @@ from __future__ import annotations
 import torch
 
 from boundlab.expr._core import Expr
-from boundlab.gradlin import gradlin, trapezoid_region
+from boundlab.gradlin import gradlin
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.prop import ublb
 from boundlab.zono import ZonoBounds
@@ -24,39 +18,6 @@ from boundlab.zono.relu import relu_linearizer as _std_relu_linearizer
 
 _ITERS = 100
 _LR = 0.1
-
-
-def _F(xy: torch.Tensor) -> torch.Tensor:
-    return torch.relu(xy[..., 0]) - torch.relu(xy[..., 1])
-
-
-def _make_grad_inv(d_lb: torch.Tensor, d_ub: torch.Tensor):
-    """Return the relu-kink candidate set ignoring ``lam``.
-
-    Candidates are ``(0,0)`` plus the four points where the kink lines
-    ``x = 0`` and ``y = 0`` meet the diff-constraint edges ``x − y = ld``
-    and ``x − y = ud``. Combined with gradlin's built-in axis-face
-    coordinate-replacement this covers all the kink-line endpoints on the
-    trapezoid's boundary.
-    """
-
-    def grad_inv(lam: torch.Tensor) -> torch.Tensor:
-        batch = lam.shape[:-1]
-        dl = d_lb.expand(batch)
-        du = d_ub.expand(batch)
-        zeros = torch.zeros_like(dl)
-        return torch.stack(
-            [
-                torch.stack([zeros, zeros], dim=-1),
-                torch.stack([zeros, -du], dim=-1),
-                torch.stack([zeros, -dl], dim=-1),
-                torch.stack([du, zeros], dim=-1),
-                torch.stack([dl, zeros], dim=-1),
-            ],
-            dim=-2,
-        )  # (*batch, 5, 2)
-
-    return grad_inv
 
 
 def relu_linearizer(xs: list[Expr], ys: list[Expr], ds: list[Expr]):
@@ -69,14 +30,6 @@ def relu_linearizer(xs: list[Expr], ys: list[Expr], ds: list[Expr]):
     shape = x_ub.shape
     ndim = len(shape)
 
-    lb, ub, A_extra, b_extra = trapezoid_region(
-        x_lb.reshape(-1), x_ub.reshape(-1),
-        y_lb.reshape(-1), y_ub.reshape(-1),
-        d_lb.reshape(-1), d_ub.reshape(-1),
-    )
-
-    grad_inv = _make_grad_inv(d_lb.reshape(-1), d_ub.reshape(-1))
-
     std_x = _std_relu_linearizer(x_ub, x_lb)
     std_y = _std_relu_linearizer(y_ub, y_lb)
     lam_init = torch.stack(
@@ -85,8 +38,16 @@ def relu_linearizer(xs: list[Expr], ys: list[Expr], ds: list[Expr]):
     )
 
     lam_flat, L_flat, U_flat = gradlin(
-        _F, grad_inv, lb, ub, A_extra, b_extra,
-        iters=_ITERS, lr=_LR, lam_init=lam_init,
+        torch.relu,
+        x_lb.reshape(-1),
+        x_ub.reshape(-1),
+        y_lb.reshape(-1),
+        y_ub.reshape(-1),
+        d_lb.reshape(-1),
+        d_ub.reshape(-1),
+        iters=_ITERS,
+        lr=_LR,
+        lam_init=lam_init,
     )
 
     lam_x = lam_flat[..., 0].reshape(shape)

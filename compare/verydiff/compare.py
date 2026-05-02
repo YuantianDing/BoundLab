@@ -32,7 +32,7 @@ from boundlab.diff.net import diff_net
 from boundlab.diff.zono3 import interpret as _diff_interpret
 from boundlab.diff.zonohex import interpret as _hex_interpret
 from boundlab.interp import Interpreter
-from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.interp.onnx import onnx_export
 from boundlab.prop import ub
 

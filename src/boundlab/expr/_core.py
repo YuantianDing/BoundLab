@@ -104,15 +104,18 @@ class Expr:
         width = self.bound_width()
         index = width.argmax()
         indices = torch.unravel_index(index, width.shape)
-        return self.center()[indices].item()
+        return width.max(), self.center()[indices].item()
 
     def __repr__(self):
         output = []
-        output.append(f"{self._metric():.3g}")
+        w, w_c = self._metric()
+
+        output.append(f"max={w:.4g}/{w_c:.4g}")
+        output.append(f"mean={self.bound_width().mean().item():.4g}/{self.center().mean().item():.4g}")
         li = list(self.uncertainty_reasons().items())
         li.sort(key=lambda x: x[1], reverse=True)
         for k, v in li[:3]:
-            output.append(f"{k}={v:.2e}")
+            output.append(f"{k}={v:.4e}")
         return f"Expr({','.join(output)})"
     
     def __str__(self):

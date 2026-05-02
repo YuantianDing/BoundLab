@@ -41,7 +41,7 @@ import boundlab.prop as prop
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 from boundlab.diff.net import diff_net
-from boundlab.diff.zono3.expr import DiffExpr3
+from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
 
 class LayerNormNoVar(nn.Module):

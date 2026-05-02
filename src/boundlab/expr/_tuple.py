@@ -96,6 +96,10 @@ class GetTupleItem(Expr):
     def tuple_expr(self) -> TupleExpr:
         """The TupleExpr being indexed. This is used for topological sorting and weight propagation."""
         return self._child
+    
+    def simplify_ops_(self):
+        for child in self.tuple_expr.children:
+            child.simplify_ops_()
 
     def backward(self, weights, direction = "==") -> tuple[torch.Tensor] | None:
         raise NotImplementedError("GetTupleItem does not support `backward` method. It needs be handled as a special case in bound propagation.")

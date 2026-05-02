@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from boundlab import interp
-from boundlab.diff.zono3 import expr, gradlin
+from boundlab.diff import expr
+from boundlab.diff.zono3 import gradlin
 from boundlab.utils import not0
 
 r"""Triple-Zonotope-Based Abstract Interpretation for Differential Verification
@@ -51,7 +52,7 @@ from boundlab.expr._core import Expr
 from boundlab.expr._affine import ConstVal
 from boundlab.expr._var import LpEpsilon
 from boundlab.interp import Interpreter  # noqa: F401
-from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.linearop._base import LinearOp
 from boundlab.zono import ZonoBounds, interpret as std_interpret
 
@@ -76,6 +77,7 @@ def _build_triple_from_dzb(
         xs: list[Expr],
         ys: list[Expr],
         ds: list[Expr],
+        reason: str = "",
 ) -> DiffExpr3:
     """Build a :class:`~boundlab.diff.expr.DiffExpr3` from *dzb*, sharing epsilon variables.
 
@@ -95,7 +97,7 @@ def _build_triple_from_dzb(
     x_result = ConstVal(dzb.x_bounds.bias) if x_sum is None else x_sum + dzb.x_bounds.bias
     eps_x = None
     if dzb.x_bounds.error_coeffs is not None:
-        eps_x = LpEpsilon(dzb.x_bounds.error_coeffs.input_shape)
+        eps_x = LpEpsilon(dzb.x_bounds.error_coeffs.input_shape, reason=reason)
         x_result = x_result + dzb.x_bounds.error_coeffs(eps_x)
 
     # Build y expression; capture the fresh eps_y for reuse in diff.
@@ -103,7 +105,7 @@ def _build_triple_from_dzb(
     y_result = ConstVal(dzb.y_bounds.bias) if y_sum is None else y_sum + dzb.y_bounds.bias
     eps_y = None
     if dzb.y_bounds.error_coeffs is not None:
-        eps_y = LpEpsilon(dzb.y_bounds.error_coeffs.input_shape)
+        eps_y = LpEpsilon(dzb.y_bounds.error_coeffs.input_shape, reason=reason)
         y_result = y_result + dzb.y_bounds.error_coeffs(eps_y)
 
     # Build diff expression, reusing eps_x and eps_y.
@@ -131,7 +133,7 @@ def _build_triple_from_dzb(
 
     # Fresh diff-only error (e.g. case-9 triangle relaxation on d directly).
     if dzb.diff_bounds.error_coeffs is not None:
-        eps_d = LpEpsilon(dzb.diff_bounds.error_coeffs.input_shape)
+        eps_d = LpEpsilon(dzb.diff_bounds.error_coeffs.input_shape, reason=reason)
         d_result = d_result + dzb.diff_bounds.error_coeffs(eps_d)
 
     from boundlab.prop import bound_width
@@ -239,7 +241,7 @@ def linearizer_to_hander(linearizer):
                 xs.append(a);
                 ys.append(a);
                 ds.append(expr.ConstVal(None))  # constant: diff is 0
-        return _build_triple_from_dzb(linearizer(xs, ys, ds), xs, ys, ds)
+        return _build_triple_from_dzb(linearizer(xs, ys, ds), xs, ys, ds, reason=linearizer.__name__)
     return handler
 
 

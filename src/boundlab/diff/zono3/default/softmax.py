@@ -8,11 +8,11 @@ import torch
 
 from boundlab.diff.zono3 import expr
 from boundlab.expr import Expr, ConstVal
-from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from .bilinear import diff_bilinear_elementwise
 
 
-def diff_softmax_handler(x, dim: int = -1, dtype=None):
+def diff_softmax_handler(x, dim: int = -1, dtype=None, exp_handler=None, reciprocal_handler=None):
     r"""Differential softmax transformer.
 
     When *x* is a :class:`~boundlab.diff.expr.DiffExpr3`, the handler
@@ -46,6 +46,10 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     torch.Size([2, 3])
     """
     from .. import interpret
+    if exp_handler is None:
+        exp_handler = interpret["Exp"]
+    if reciprocal_handler is None:
+        reciprocal_handler = interpret["Reciprocal"]
     
     if isinstance(x, torch.Tensor):
         x = ConstVal(x)
@@ -86,9 +90,6 @@ def diff_softmax_handler(x, dim: int = -1, dtype=None):
     x_j_exp = x_j.expand(*broadcast_shape)
 
     x_shifted = x_j_exp - x_i_exp
-
-    exp_handler = interpret["Exp"]
-    reciprocal_handler = interpret["Reciprocal"]
 
     # exp of the pairwise-difference tensor.
     exp_shifted = exp_handler(x_shifted)

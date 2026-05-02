@@ -32,7 +32,7 @@ def register_all(interpret, linearizer_to_hander) -> None:
     (``Mul``, ``Softmax``, …) are left on their default implementations.
     """
     for linearizer, names in [
-        (relu_linearizer, ("relu", "Relu")),
+        # (relu_linearizer, ("relu", "Relu")),
         (exp_linearizer, ("exp", "Exp")),
         (tanh_linearizer, ("tanh", "Tanh")),
         (reciprocal_linearizer, ("reciprocal", "Reciprocal")),
@@ -40,7 +40,9 @@ def register_all(interpret, linearizer_to_hander) -> None:
         handler = linearizer_to_hander(linearizer)
         for name in names:
             interpret[name] = handler
-
+    from boundlab.diff.zono3.default.softmax import diff_softmax_handler
+    
+    interpret["Softmax"] = lambda X, axis=-1: diff_softmax_handler(X, dim=axis, exp_handler=interpret["Exp"], reciprocal_handler=interpret["Reciprocal"])
 
 __all__ = [
     "make_unary_diff_linearizer",

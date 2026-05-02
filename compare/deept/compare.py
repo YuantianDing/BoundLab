@@ -1,7 +1,7 @@
-"""Compare BoundLab vs DeepT on a 3-layer SST transformer (LayerNorm removed).
+"""Compare BoundLab vs DeepT on a 12-layer SST transformer (LayerNorm removed).
 
-This script loads weights from DeepT's ``sst_bert_small_3/ckpt-3`` checkpoint,
-constructs a 3-layer transformer with attention + FFN blocks (no LayerNorm), and
+This script loads weights from DeepT's ``sst_bert_small_12/ckpt-3`` checkpoint,
+constructs a 12-layer transformer with attention + FFN blocks (no LayerNorm), and
 compares output bounds under an L∞ perturbation on one token embedding.
 
 Run:
@@ -28,7 +28,7 @@ from Zonotope import make_zonotope_new_weights_same_args  # type: ignore
 
 
 HERE = Path(__file__).resolve().parent
-CKPT_DIR = HERE / "DeepT" / "Robustness-Verification-for-Transformers" / "sst_bert_small_3" / "ckpt-3"
+CKPT_DIR = HERE / "DeepT" / "Robustness-Verification-for-Transformers" / "sst_bert_small_12" / "ckpt-3"
 CKPT_PATH = CKPT_DIR / "pytorch_model.bin"
 VOCAB_PATH = CKPT_DIR / "vocab.txt"
 
@@ -64,7 +64,7 @@ def _linear_from_state(state: dict[str, torch.Tensor], prefix: str) -> nn.Linear
     return layer
 
 
-class SstSmall3NoLayerNorm(nn.Module):
+class SstSmallNoLayerNorm(nn.Module):
     def __init__(self, state: dict[str, torch.Tensor], num_layers: int = 3, num_heads: int = 1):
         super().__init__()
         self.num_layers = num_layers
@@ -158,7 +158,7 @@ def boundlab_bounds(exported: onnx_ir.Model, center: torch.Tensor, perturbed_idx
     return ub, lb, op_types
 
 
-def deept_bounds(model: SstSmall3NoLayerNorm, center: torch.Tensor, perturbed_idx: int, eps: float):
+def deept_bounds(model: SstSmallNoLayerNorm, center: torch.Tensor, perturbed_idx: int, eps: float):
     args = _deept_args(input_dim=center.shape[1])
     z = DeepTZonotope(args, p=float("inf"), eps=eps, perturbed_word_index=perturbed_idx, value=center)
 
@@ -192,7 +192,7 @@ def main() -> None:
     state = torch.load(CKPT_PATH, map_location="cpu")
     vocab = _load_vocab(VOCAB_PATH)
 
-    model = SstSmall3NoLayerNorm(state, num_layers=3, num_heads=1).eval()
+    model = SstSmallNoLayerNorm(state, num_layers=12, num_heads=1).eval()
     tokens = ["[CLS]", "a", "very", "good", "movie", "[SEP]"]
     center, perturbed_idx = build_input_from_embeddings(state, vocab, tokens)
     eps = 0.01
@@ -213,7 +213,7 @@ def main() -> None:
     dt_time = time.perf_counter() - t0
     max_dt_width = torch.max(dt_ub - dt_lb).item()
 
-    print("Model: sst_bert_small_3 (3-layer, LayerNorm removed)")
+    print("Model: sst_bert_small_12 (12-layer, LayerNorm removed)")
     print(f"Sentence tokens: {tokens}")
     print(f"Perturbed token index: {perturbed_idx} ({tokens[perturbed_idx]})")
     print(f"Epsilon (L_inf): {eps}")

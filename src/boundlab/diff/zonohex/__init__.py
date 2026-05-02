@@ -7,7 +7,7 @@ import torch
 
 from boundlab.diff import zono3
 from boundlab.diff.zono3 import DiffZonoBounds
-from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.expr import TupleExpr
 from boundlab.expr._core import Expr, ExprFlags
 from boundlab.expr._tuple import GetTupleItem
@@ -97,6 +97,10 @@ class ZonoHexGate(TupleExpr):
         """Return a new TupleExpr with the same flags but new children. This is used for expression rewriting during bound propagation."""
         assert len(new_children) == 3, f"Expected 3 children for ZonoHexGate, got {len(new_children)}"
         return ZonoHexGate(*new_children)
+    
+    def split_const(self):
+        """ZonoHexGate is a pure affine op, so the "const" part is just the bias."""
+        return 0, self
 
 def expr3_to_expr2(expr3, **_kwargs) -> DiffExpr2:
     """Convert a DiffExpr3 to a DiffExpr2 via a :class:`ZonoHexGate` relaxation.
@@ -107,8 +111,10 @@ def expr3_to_expr2(expr3, **_kwargs) -> DiffExpr2:
     handler's attributes via :class:`~boundlab.interp.FnListChain`).
     """
     if isinstance(expr3, DiffExpr3):
-        gate = ZonoHexGate(expr3.x, expr3.y, expr3.diff)
-        return DiffExpr2(gate[0], gate[1])
+        Xc, Xs = expr3.x.split_const()
+        Yc, Ys = expr3.y.split_const()
+        gate = ZonoHexGate(Xs, Ys, expr3.diff - (Xc - Yc))
+        return DiffExpr2(Xc + gate[0], Yc + gate[1])
     return expr3
 
 interpret: Interpreter[Union[Expr, DiffExpr2]] = zono3.interpret.and_then(expr3_to_expr2)

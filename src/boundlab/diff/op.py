@@ -16,7 +16,7 @@ import torch.library
 import onnxscript
 from onnxscript import opset18 as _opset18
 
-from boundlab.diff.zono3.expr import DiffExpr2
+from boundlab.diff.expr import DiffExpr2
 from boundlab.expr._affine import ConstVal
 
 def diff_pair(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:

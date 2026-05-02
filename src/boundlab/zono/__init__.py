@@ -111,9 +111,9 @@ interpret["exp"] = interpret["Exp"]
 interpret["reciprocal"] = interpret["Reciprocal"]
 
 # Bilinear handlers (supports Expr @ Expr and Expr * Expr)
-from .bilinear import matmul_handler, mul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
+from .bilinear import matmul_handler, bilinear_matmul, bilinear_elementwise  # noqa: F401
 interpret["MatMul"] = matmul_handler
-interpret["Mul"] = mul_handler
+# interpret["Mul"] = mul_handler
 
 
 from .softmax import softmax_handler, softmax_handler_basedon_softmax2

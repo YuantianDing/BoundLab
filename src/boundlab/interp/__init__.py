@@ -173,7 +173,7 @@ def _onnx_gather(data, indices, axis=0):
 
     # Handle DiffExpr3
     try:
-        from boundlab.diff.zono3.expr import DiffExpr3, DiffExpr2
+        from boundlab.diff.expr import DiffExpr3, DiffExpr2
         if isinstance(data, DiffExpr3):
             return DiffExpr3(
                 _onnx_gather(data.x, indices, axis),
@@ -247,7 +247,7 @@ def _onnx_einsum(*inputs, equation):
 
     # DiffExpr support: evaluate component-wise
     try:
-        from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
         diff_positions = [i for i, v in enumerate(inputs) if isinstance(v, (DiffExpr3, DiffExpr2))]
     except Exception:
         DiffExpr2 = DiffExpr3 = ()
@@ -405,7 +405,7 @@ def _onnx_concat(*args, axis=0):
 
     # Check for DiffExpr types
     try:
-        from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
         if any(isinstance(x, DiffExpr3) for x in inputs):
             from boundlab.expr import Cat
             x_parts, y_parts, d_parts = [], [], []
@@ -473,7 +473,7 @@ def _as_const(x):
     if isinstance(x, CV):
         return x.value
     try:
-        from boundlab.diff.zono3.expr import DiffExpr2, DiffExpr3
+        from boundlab.diff.expr import DiffExpr2, DiffExpr3
         if isinstance(x, DiffExpr2):
             c = x.get_const()
             return c[0] if c is not None else _as_const(x.x)
@@ -503,17 +503,17 @@ class FnList(Generic[E]):
             self.fns[0]
             return self.fns[0](*args, **kwargs)
         errors = []
-        for fn in self.fns[::-1]:
-            try:
-                result = beartype.beartype()(fn)(*args, **kwargs)
-                if result is not NotImplemented:
-                    return result
-            except beartype.roar.BeartypeException as e:
-                errors.append(e)
-                continue
-            except NotImplementedError as e:
-                errors.append(e)
-                continue
+        for i, fn in enumerate(self.fns[::-1]):
+            # try:
+            result = fn(*args, **kwargs)
+            if result is not NotImplemented:
+                return result
+            # except NotImplementedError as e:
+            #     errors.append(e)
+            #     continue
+            # except Exception as e:
+            #     print(f"Error happened at {i}")
+            #     raise e
         raise TypeError(f"No matching handler found for arguments {args} {kwargs}. Errors: {errors}")
 
     def __add__(self, other: Callable[..., E] | FnList) -> FnList:
@@ -718,6 +718,7 @@ class Interpreter(Generic[E]):
 
                 # Dispatch on op_type (ignore domain)
                 def to_repr(x: Any) -> str:
+                    from boundlab.diff.expr import DiffExpr2
                     if isinstance(x, torch.Tensor):
                         return f"Tensor{list(x.shape)}({x.abs().max().item():.4g})"
                     return repr(x)
@@ -734,8 +735,7 @@ class Interpreter(Generic[E]):
                 result = handler(*args, **kwargs)
                 
 
-                if verbose and isinstance(result, Expr):
-                    result.simplify_ops_()
+                if verbose:
                     print(f"-> {to_repr(result)}")
 
                 assert not isinstance(result, tuple), f"Handler for {node.op_type} returned a tuple, but only single outputs are supported. Got: {result}"

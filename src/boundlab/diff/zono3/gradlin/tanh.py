@@ -22,5 +22,5 @@ def _tanh_grad_inv(lam: torch.Tensor) -> torch.Tensor:
 
 
 tanh_linearizer = make_unary_diff_linearizer(
-    torch.tanh, _tanh_grad_inv, _std_tanh_linearizer
+    torch.tanh, _std_tanh_linearizer, name="tanh_gradlin"
 )

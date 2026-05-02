@@ -1,246 +1,34 @@
-"""Gradient-descent-based linear bound tightening.
+"""Batched trapezoid linearization for unary functions.
 
-For a smooth function ``f: R^n -> R`` and a convex polytope region
-``R = { x : lb <= x <= ub, A_extra x <= b_extra }``, find ``lam in R^n``
-and ``L, U in R`` such that
+This module now focuses on a simpler problem:
 
-    lam . x + L  <=  f(x)  <=  lam . x + U    for all x in R.
+    bound f(x) - f(y) - lam_x * x - lam_y * y
 
-The tightest constants for a fixed ``lam`` are
+over the batched trapezoid
 
-    U(lam) = max_{x in R} [ f(x) - lam . x ]
-    L(lam) = min_{x in R} [ f(x) - lam . x ]
+    lx <= x <= ux,
+    ly <= y <= uy,
+    ld <= x - y <= ud.
 
-Candidate points for these extrema:
-  * all polytope vertices (intersections of ``n`` active constraints);
-  * every interior stationary point returned by ``grad_inv(lam)`` that
-    lies in R (``grad_inv`` may return multiple candidates when the
-    gradient equation has multiple solutions, e.g. the two branches of
-    ``sech^2(y) = c`` for ``tanh``);
-  * axis-face candidates: each interior candidate with one coordinate
-    replaced by its box bound. For separable ``f`` these coincide with
-    the true axis-face criticals; for non-separable ``f`` they are
-    in-region points that don't introduce unsound tightening.
+The workflow is intentionally two-stage:
 
-Extrema on faces that aren't axis-aligned (e.g. the ``x - y = c`` face
-for bilinear ``x*y``) are **not** enumerated — pass the region as a box
-(make the diff bounds loose enough to never bind) if correctness matters
-for such ``f``.
+1. Sample many feasible points inside each trapezoid and estimate a good
+   slope pair ``(lam_x, lam_y)``. By default we use a batched Gurobi LP fit
+   on those samples. Callers can opt out and fall back to a batched least
+   squares fit.
+2. Freeze the slopes and use Adam to search the feasible region for the
+   extremal residuals, producing ``L`` and ``U`` such that
 
-The outer optimisation over ``lam`` uses Adam on the gap ``U - L``.
+       L <= f(x) - f(y) - lam_x * x - lam_y * y <= U.
+
+All major tensor work is batched and vectorized.
 """
 
 from __future__ import annotations
 
-from itertools import combinations
 from typing import Callable
 
 import torch
-
-
-def _enumerate_vertices(A: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Enumerate candidate vertices of the polytope ``{x : A x <= b}``.
-
-    Takes every size-``n`` subset of the ``m`` constraint rows, solves for the
-    intersection point, and checks feasibility against all ``m`` constraints.
-
-    Parameters
-    ----------
-    A : ``(*batch, m, n)``
-    b : ``(*batch, m)``
-
-    Returns
-    -------
-    vertices : ``(*batch, V, n)`` where ``V = C(m, n)``
-    feasible : ``(*batch, V)`` bool mask
-    """
-    m, n = A.shape[-2], A.shape[-1]
-    device, dtype = A.device, A.dtype
-
-    subsets = list(combinations(range(m), n))
-    idx = torch.tensor(subsets, dtype=torch.long, device=device)  # (V, n)
-
-    A_sub = A[..., idx, :]           # (*batch, V, n, n)
-    b_sub = b[..., idx]              # (*batch, V, n)
-
-    det = torch.linalg.det(A_sub)     # (*batch, V)
-    regular = det.abs() > 1e-10
-
-    eye = torch.eye(n, device=device, dtype=dtype).expand_as(A_sub)
-    safe_A = torch.where(regular[..., None, None], A_sub, eye)
-    safe_b = torch.where(regular[..., None], b_sub, torch.zeros_like(b_sub))
-
-    vertices = torch.linalg.solve(safe_A, safe_b.unsqueeze(-1)).squeeze(-1)  # (*batch, V, n)
-
-    Ax = torch.einsum("...mn,...vn->...vm", A, vertices)  # (*batch, V, m)
-    feasible = regular & (Ax <= b.unsqueeze(-2) + 1e-6).all(dim=-1)
-
-    return vertices, feasible
-
-
-def _build_full_polytope(
-    lb: torch.Tensor,
-    ub: torch.Tensor,
-    A_extra: torch.Tensor | None,
-    b_extra: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    n = lb.shape[-1]
-    batch_shape = lb.shape[:-1]
-    device, dtype = lb.device, lb.dtype
-
-    eye = torch.eye(n, device=device, dtype=dtype)
-    box_A = torch.cat([-eye, eye], dim=0)          # (2n, n)
-    box_A = box_A.expand(*batch_shape, 2 * n, n)
-    box_b = torch.cat([-lb, ub], dim=-1)           # (*batch, 2n)
-
-    if A_extra is None:
-        return box_A.contiguous(), box_b.contiguous()
-    return torch.cat([box_A, A_extra], dim=-2), torch.cat([box_b, b_extra], dim=-1)
-
-
-def _axis_face_candidates(
-    x_crit: torch.Tensor,
-    lb: torch.Tensor,
-    ub: torch.Tensor,
-) -> torch.Tensor:
-    """Produce ``K * 2n`` coordinate-replacement candidates.
-
-    For each of ``K`` interior candidates, for each dimension ``i`` and
-    each box bound (``lb[i]`` / ``ub[i]``), emit the candidate with the
-    ``i``-th coordinate replaced. For separable ``f`` these are exact
-    axis-face critical points.
-
-    Parameters
-    ----------
-    x_crit : ``(*batch, K, n)``
-
-    Returns
-    -------
-    candidates : ``(*batch, K * 2n, n)``
-    """
-    n = x_crit.shape[-1]
-    x_exp = x_crit.unsqueeze(-2)                                # (*batch, K, 1, n)
-    eye = torch.eye(n, dtype=torch.bool, device=x_crit.device)  # (n, n)
-    lb_bc = lb.unsqueeze(-2).unsqueeze(-2)                      # (*batch, 1, 1, n)
-    ub_bc = ub.unsqueeze(-2).unsqueeze(-2)
-    lo = torch.where(eye, lb_bc, x_exp)                         # (*batch, K, n, n)
-    hi = torch.where(eye, ub_bc, x_exp)
-    stacked = torch.cat([lo, hi], dim=-2)                       # (*batch, K, 2n, n)
-    return stacked.flatten(-3, -2)                              # (*batch, K*2n, n)
-
-
-def _evaluate_bounds(
-    f: Callable[[torch.Tensor], torch.Tensor],
-    grad_inv: Callable[[torch.Tensor], torch.Tensor],
-    A: torch.Tensor,
-    b: torch.Tensor,
-    lb: torch.Tensor,
-    ub: torch.Tensor,
-    lam: torch.Tensor,
-    vertices: torch.Tensor,
-    vertex_feasible: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute ``L(lam), U(lam)`` from all candidate points."""
-    n = lam.shape[-1]
-
-    # Vertex candidates
-    f_v = f(vertices)  # (*batch, V)
-    h_v = f_v - (vertices * lam.unsqueeze(-2)).sum(dim=-1)
-
-    # Interior critical(s). grad_inv may return (*batch, n) or (*batch, K, n).
-    x_crit = grad_inv(lam)
-    if x_crit.dim() == lam.dim():
-        x_crit = x_crit.unsqueeze(-2)                                         # (*batch, 1, n)
-    Ax_crit = torch.einsum("...mn,...kn->...km", A, x_crit)
-    crit_feasible = (Ax_crit <= b.unsqueeze(-2) + 1e-6).all(dim=-1) & torch.isfinite(x_crit).all(dim=-1)
-    h_crit = f(x_crit) - (x_crit * lam.unsqueeze(-2)).sum(dim=-1)             # (*batch, K)
-
-    # Axis-face candidates via coordinate replacement on each interior candidate.
-    x_face = _axis_face_candidates(x_crit, lb, ub)                            # (*batch, K*2n, n)
-    Ax_face = torch.einsum("...mn,...kn->...km", A, x_face)
-    face_feasible = (Ax_face <= b.unsqueeze(-2) + 1e-6).all(dim=-1) & torch.isfinite(x_face).all(dim=-1)
-    h_face = f(x_face) - (x_face * lam.unsqueeze(-2)).sum(dim=-1)
-
-    h_all = torch.cat([h_v, h_crit, h_face], dim=-1)
-    mask_all = torch.cat([vertex_feasible, crit_feasible, face_feasible], dim=-1)
-
-    neg_inf = torch.full_like(h_all, float("-inf"))
-    pos_inf = torch.full_like(h_all, float("inf"))
-    U = torch.where(mask_all, h_all, neg_inf).amax(dim=-1)
-    L = torch.where(mask_all, h_all, pos_inf).amin(dim=-1)
-    return L, U
-
-
-def gradlin(
-    f: Callable[[torch.Tensor], torch.Tensor],
-    grad_inv: Callable[[torch.Tensor], torch.Tensor],
-    lb: torch.Tensor,
-    ub: torch.Tensor,
-    A_extra: torch.Tensor | None = None,
-    b_extra: torch.Tensor | None = None,
-    iters: int = 200,
-    lr: float = 0.1,
-    lam_init: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Tighten linear bounds on ``f`` over a box + extra-constraints region.
-
-    Parameters
-    ----------
-    f : callable
-        ``f(x)`` reducing the trailing ``n`` axis of ``x``. Must accept
-        shapes ``(*batch, n)`` and ``(*batch, K, n)``.
-    grad_inv : callable
-        Inverse gradient: ``grad_inv(lam) = x`` with ``grad f(x) = lam``.
-        Shape in/out: ``(*batch, n)``. Must accept ``(*batch, K, n)``.
-        May return non-finite values when ``lam`` is outside the image
-        of ``grad f``; those are masked.
-    lb, ub : ``(*batch, n)`` — axis-aligned box bounds.
-    A_extra, b_extra : optional extra constraints ``A_extra x <= b_extra``.
-        Shapes ``(*batch, m, n)`` and ``(*batch, m)``.
-    iters : number of Adam steps.
-    lr : Adam learning rate.
-    lam_init : optional warm-start for ``lam`` with shape ``(*batch, n)``.
-        Defaults to zeros. Useful for seeding with a closed-form slope so the
-        returned bound is guaranteed at least as tight as that seed (best-seen
-        tracking below ensures no regression from the init).
-
-    Returns
-    -------
-    lam : ``(*batch, n)``
-    L, U : ``(*batch,)``
-    """
-    A, b = _build_full_polytope(lb, ub, A_extra, b_extra)
-    batch_shape = lb.shape[:-1]
-    n = lb.shape[-1]
-    device, dtype = lb.device, lb.dtype
-
-    vertices, vertex_feasible = _enumerate_vertices(A, b)
-
-    if lam_init is None:
-        lam_param = torch.zeros(*batch_shape, n, device=device, dtype=dtype)
-    else:
-        lam_param = lam_init.detach().to(device=device, dtype=dtype).expand(*batch_shape, n).contiguous()
-    lam_param = lam_param.requires_grad_(True)
-    optimizer = torch.optim.Adam([lam_param], lr=lr)
-
-    with torch.no_grad():
-        best_L, best_U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam_param, vertices, vertex_feasible)
-        best_lam = lam_param.detach().clone()
-
-    for _ in range(iters):
-        optimizer.zero_grad()
-        L, U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam_param, vertices, vertex_feasible)
-        loss = (U - L).sum()
-        loss.backward()
-        optimizer.step()
-        with torch.no_grad():
-            cur_L, cur_U = _evaluate_bounds(f, grad_inv, A, b, lb, ub, lam_param, vertices, vertex_feasible)
-            improved = (cur_U - cur_L) < (best_U - best_L)
-            best_lam = torch.where(improved.unsqueeze(-1), lam_param.detach(), best_lam)
-            best_L = torch.where(improved, cur_L, best_L)
-            best_U = torch.where(improved, cur_U, best_U)
-
-    return best_lam, best_L, best_U
 
 
 def trapezoid_region(
@@ -251,20 +39,318 @@ def trapezoid_region(
     ld: torch.Tensor,
     ud: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build box bounds + diff-constraint rows for the 2D trapezoid
-    ``{(x, y) : lx<=x<=ux, ly<=y<=uy, ld<=x-y<=ud}``.
-
-    All inputs are tensors of shape ``(*batch,)``.
+    """Build box bounds + diff-constraint rows for the 2D trapezoid.
 
     Returns
     -------
-    lb, ub : ``(*batch, 2)`` — axis box bounds.
-    A_extra, b_extra : ``(*batch, 2, 2), (*batch, 2)`` — the two diff rows.
+    lb, ub : ``(*batch, 2)`` axis-aligned box bounds.
+    A_extra, b_extra : ``(*batch, 2, 2)``, ``(*batch, 2)`` for
+        ``-x + y <= -ld`` and ``x - y <= ud``.
     """
     device, dtype = lx.device, lx.dtype
     lb = torch.stack([lx, ly], dim=-1)
     ub = torch.stack([ux, uy], dim=-1)
-    rows = torch.tensor([[-1.0, 1.0], [1.0, -1.0]], device=device, dtype=dtype)  # (2, 2)
+    rows = torch.tensor([[-1.0, 1.0], [1.0, -1.0]], device=device, dtype=dtype)
     A_extra = rows.expand(*lx.shape, 2, 2)
     b_extra = torch.stack([-ld, ud], dim=-1)
     return lb, ub, A_extra, b_extra
+
+
+def _flatten_batch(*tensors: torch.Tensor) -> tuple[list[torch.Tensor], torch.Size]:
+    batch_shape = tensors[0].shape[:-1]
+    return [t.reshape(-1) for t in tensors], batch_shape
+
+
+def _sample_feasible_points(
+    lx: torch.Tensor,
+    ux: torch.Tensor,
+    ly: torch.Tensor,
+    uy: torch.Tensor,
+    ld: torch.Tensor,
+    ud: torch.Tensor,
+    num_samples: int,
+    *,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample feasible ``(x, y)`` pairs from each batched trapezoid."""
+    x_lo = torch.maximum(lx, ly + ld)
+    x_hi = torch.minimum(ux, uy + ud)
+    x_w = (x_hi - x_lo).clamp_min(0.0)
+
+    # If the region is feasible, x in [x_lo, x_hi] guarantees a non-empty y-interval.
+    rx = torch.rand(num_samples, *lx.shape, device=lx.device, dtype=lx.dtype, generator=generator)
+    x = x_lo.unsqueeze(0) + rx * x_w.unsqueeze(0)
+
+    y_lo = torch.maximum(ly.unsqueeze(0), x - ud.unsqueeze(0))
+    y_hi = torch.minimum(uy.unsqueeze(0), x - ld.unsqueeze(0))
+    ry = torch.rand(x.shape, device=lx.device, dtype=lx.dtype, generator=generator)
+    y = y_lo + ry * (y_hi - y_lo).clamp_min(0.0)
+    return x, y
+
+
+def _sample_unconstrained_starts(
+    lx: torch.Tensor,
+    ux: torch.Tensor,
+    ly: torch.Tensor,
+    uy: torch.Tensor,
+    ld: torch.Tensor,
+    ud: torch.Tensor,
+    num_starts: int,
+    *,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x, y = _sample_feasible_points(lx, ux, ly, uy, ld, ud, num_starts, generator=generator)
+    return x, y
+
+
+def _safe_logit01(x: torch.Tensor) -> torch.Tensor:
+    x = x.clamp(1e-6, 1.0 - 1e-6)
+    return torch.log(x) - torch.log1p(-x)
+
+
+def _fit_lam_lstsq(
+    fx: torch.Tensor,
+    fy: torch.Tensor,
+    x: torch.Tensor,
+    y: torch.Tensor,
+) -> torch.Tensor:
+    """Least-squares fallback for batched slope fitting."""
+    target = (fx - fy).transpose(0, 1).unsqueeze(-1)  # (*batch, S, 1)
+    A = torch.stack([x.transpose(0, 1), y.transpose(0, 1)], dim=-1)  # (*batch, S, 2)
+    sol = torch.linalg.lstsq(A, target).solution.squeeze(-1)
+    return sol
+
+
+def _fit_lam_gurobi(
+    fx: torch.Tensor,
+    fy: torch.Tensor,
+    x: torch.Tensor,
+    y: torch.Tensor,
+) -> torch.Tensor | None:
+    """LP fit for ``lam_x, lam_y`` using Gurobi."""
+    try:
+        import gurobipy as gp
+        from gurobipy import GRB
+    except Exception:
+        return None
+
+    target = (fx - fy).transpose(0, 1)  # (*batch, S)
+    x_t = x.transpose(0, 1)
+    y_t = y.transpose(0, 1)
+    batch = target.shape[0]
+    out = []
+
+    for b in range(batch):
+        model = gp.Model()
+        model.Params.OutputFlag = 0
+        model.Params.LogToConsole = 0
+        lamx = model.addVar(lb=-GRB.INFINITY, name="lamx")
+        lamy = model.addVar(lb=-GRB.INFINITY, name="lamy")
+        t = model.addVar(lb=0.0, name="t")
+        for i in range(target.shape[1]):
+            ri = float(target[b, i].item())
+            xi = float(x_t[b, i].item())
+            yi = float(y_t[b, i].item())
+            model.addConstr(ri - lamx * xi - lamy * yi <= t)
+            model.addConstr(-(ri - lamx * xi - lamy * yi) <= t)
+        model.setObjective(t, GRB.MINIMIZE)
+        model.optimize()
+        if model.Status != GRB.OPTIMAL:
+            return None
+        out.append((float(lamx.X), float(lamy.X)))
+
+    return torch.tensor(out, device=fx.device, dtype=fx.dtype)
+
+
+def _score_lam(
+    fx: torch.Tensor,
+    fy: torch.Tensor,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    lam: torch.Tensor,
+) -> torch.Tensor:
+    residual = (fx - fy) - lam[..., 0].unsqueeze(0) * x - lam[..., 1].unsqueeze(0) * y
+    return residual.amax(dim=0) - residual.amin(dim=0)
+
+
+def _estimate_lam(
+    f: Callable[[torch.Tensor], torch.Tensor],
+    lx: torch.Tensor,
+    ux: torch.Tensor,
+    ly: torch.Tensor,
+    uy: torch.Tensor,
+    ld: torch.Tensor,
+    ud: torch.Tensor,
+    *,
+    num_samples: int,
+    lam_init: torch.Tensor | None,
+    use_gurobi: bool,
+    generator: torch.Generator | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    x, y = _sample_feasible_points(lx, ux, ly, uy, ld, ud, num_samples, generator=generator)
+    fx = f(x)
+    fy = f(y)
+
+    lam = _fit_lam_gurobi(fx, fy, x, y) if use_gurobi else None
+    if lam is None:
+        lam = _fit_lam_lstsq(fx, fy, x, y)
+
+    if lam_init is not None:
+        lam_init = lam_init.reshape_as(lam).to(device=lam.device, dtype=lam.dtype)
+        lam_score = _score_lam(fx, fy, x, y, lam).reshape(-1)
+        init_score = _score_lam(fx, fy, x, y, lam_init).reshape(-1)
+        improved = (init_score < lam_score).unsqueeze(-1)
+        lam = torch.where(improved, lam_init, lam)
+
+    return lam, x, y, fx - fy
+
+
+def _feasible_xy_from_params(
+    sx: torch.Tensor,
+    sy: torch.Tensor,
+    lx: torch.Tensor,
+    ux: torch.Tensor,
+    ly: torch.Tensor,
+    uy: torch.Tensor,
+    ld: torch.Tensor,
+    ud: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x_lo = torch.maximum(lx, ly + ld)
+    x_hi = torch.minimum(ux, uy + ud)
+    x = x_lo.unsqueeze(0) + torch.sigmoid(sx) * (x_hi - x_lo).clamp_min(1e-6).unsqueeze(0)
+
+    y_lo = torch.maximum(ly.unsqueeze(0), x - ud.unsqueeze(0))
+    y_hi = torch.minimum(uy.unsqueeze(0), x - ld.unsqueeze(0))
+    y = y_lo + torch.sigmoid(sy) * (y_hi - y_lo).clamp_min(0.0)
+    return x, y
+
+
+def _search_extremum(
+    f: Callable[[torch.Tensor], torch.Tensor],
+    lam: torch.Tensor,
+    lx: torch.Tensor,
+    ux: torch.Tensor,
+    ly: torch.Tensor,
+    uy: torch.Tensor,
+    ld: torch.Tensor,
+    ud: torch.Tensor,
+    *,
+    num_starts: int,
+    iters: int,
+    lr: float,
+    maximize: bool,
+    generator: torch.Generator | None,
+) -> torch.Tensor:
+    x0, y0 = _sample_unconstrained_starts(lx, ux, ly, uy, ld, ud, num_starts, generator=generator)
+    x_lo = torch.maximum(lx, ly + ld)
+    x_hi = torch.minimum(ux, uy + ud)
+    sx = torch.nn.Parameter(_safe_logit01((x0 - x_lo.unsqueeze(0)) / (x_hi - x_lo).clamp_min(1e-6).unsqueeze(0)))
+
+    y_lo0 = torch.maximum(ly.unsqueeze(0), x0 - ud.unsqueeze(0))
+    y_hi0 = torch.minimum(uy.unsqueeze(0), x0 - ld.unsqueeze(0))
+    sy = torch.nn.Parameter(_safe_logit01((y0 - y_lo0) / (y_hi0 - y_lo0).clamp_min(1e-6)))
+
+    opt = torch.optim.Adam([sx, sy], lr=lr)
+    best = None
+    beta = 20.0
+    patience = 5
+    stale = 0
+    tol = 1e-4
+
+    lamx = lam[..., 0]
+    lamy = lam[..., 1]
+
+    for _ in range(iters):
+        opt.zero_grad()
+        x, y = _feasible_xy_from_params(sx, sy, lx, ux, ly, uy, ld, ud)
+        resid = f(x) - f(y) - lamx.unsqueeze(0) * x - lamy.unsqueeze(0) * y
+        if maximize:
+            smooth = torch.logsumexp(beta * resid, dim=0) / beta
+            loss = -smooth.mean()
+        else:
+            smooth = -torch.logsumexp(-beta * resid, dim=0) / beta
+            loss = smooth.mean()
+        loss.backward()
+        opt.step()
+
+        hard = resid.detach().amax(dim=0) if maximize else resid.detach().amin(dim=0)
+        if best is None:
+            best = hard
+        elif maximize:
+            improved = (hard > best + tol).any().item()
+            best = torch.maximum(best, hard)
+            stale = 0 if improved else stale + 1
+        else:
+            improved = (hard < best - tol).any().item()
+            best = torch.minimum(best, hard)
+            stale = 0 if improved else stale + 1
+
+        if stale >= patience:
+            break
+
+    x, y = _feasible_xy_from_params(sx, sy, lx, ux, ly, uy, ld, ud)
+    resid = f(x) - f(y) - lamx.unsqueeze(0) * x - lamy.unsqueeze(0) * y
+    hard = resid.detach().amax(dim=0) if maximize else resid.detach().amin(dim=0)
+    if best is None:
+        best = hard
+    elif maximize:
+        best = torch.maximum(best, hard)
+    else:
+        best = torch.minimum(best, hard)
+    return best
+
+
+def gradlin(
+    f: Callable[[torch.Tensor], torch.Tensor],
+    lx: torch.Tensor,
+    ux: torch.Tensor,
+    ly: torch.Tensor,
+    uy: torch.Tensor,
+    ld: torch.Tensor,
+    ud: torch.Tensor,
+    *,
+    num_samples: int = 16,
+    num_starts: int = 1,
+    lam_init: torch.Tensor | None = None,
+    use_gurobi: bool = True,
+    iters: int = 40,
+    lr: float = 0.05,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Estimate ``lam_x, lam_y, L, U`` for a batched trapezoid.
+
+    Parameters
+    ----------
+    f
+        Unary function accepting tensors of shape ``(*batch, S)``.
+    lx, ux, ly, uy, ld, ud
+        Batched trapezoid parameters with shape ``(*batch,)``.
+    num_samples
+        Number of sample points used to estimate the slopes.
+    num_starts
+        Number of Adam restarts used when searching for the extrema.
+    lam_init
+        Optional warm start for ``(lam_x, lam_y)`` with shape ``(*batch, 2)``.
+
+    Returns
+    -------
+    lam : ``(*batch, 2)``
+    L, U : ``(*batch,)``
+    """
+    lam, _, _, _ = _estimate_lam(
+        f, lx, ux, ly, uy, ld, ud,
+        num_samples=num_samples,
+        lam_init=lam_init,
+        use_gurobi=use_gurobi,
+        generator=generator,
+    )
+
+    L = _search_extremum(
+        f, lam, lx, ux, ly, uy, ld, ud,
+        num_starts=num_starts, iters=iters, lr=lr, maximize=False, generator=generator,
+    )
+    U = _search_extremum(
+        f, lam, lx, ux, ly, uy, ld, ud,
+        num_starts=num_starts, iters=iters, lr=lr, maximize=True, generator=generator,
+    )
+    return lam, L, U

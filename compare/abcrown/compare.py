@@ -282,6 +282,7 @@ def abcrown_max_output_width(
         print(" ".join(cmd_common))
         t0 = time.perf_counter()
         try:
+            print(cmd_common + ["--vnnlib_path", str(spec_lb), "--output_file", str(out_lb)])
             p1 = subprocess.run(
                 cmd_common + ["--vnnlib_path", str(spec_lb), "--output_file", str(out_lb)],
                 capture_output=True, text=True, timeout=timeout + 30,

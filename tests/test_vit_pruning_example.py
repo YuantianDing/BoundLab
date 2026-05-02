@@ -16,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from boundlab import expr
-from boundlab.diff.zono3.expr import DiffExpr3
+from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.op import heaviside_pruning
 from boundlab.diff.zono3 import interpret as diff_interpret
 

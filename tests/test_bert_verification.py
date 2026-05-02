@@ -161,7 +161,7 @@ def test_bert_differential_sound():
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
 
     from boundlab.diff.net import diff_net
-    from boundlab.diff.zono3.expr import DiffExpr3
+    from boundlab.diff.expr import DiffExpr3
     from boundlab.diff.zono3 import interpret as diff_interpret
 
     model1 = BertModel(hidden=16, intermediate=32, num_heads=2, head_dim=8,
