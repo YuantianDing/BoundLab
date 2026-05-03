@@ -357,7 +357,7 @@ def certify(
     gm_score = onnx_export(scoring, ([17, 64],))
     op_score = zono.interpret(gm_score)
 
-    from certify import PostConcatStage
+    from BoundLab.examples.mnist_vit.old_ver.certify import PostConcatStage
     post = PostConcatStage(vit).eval()
     gm_post = onnx_export(post, ([17, 64],))
     op_post = zono.interpret(gm_post)

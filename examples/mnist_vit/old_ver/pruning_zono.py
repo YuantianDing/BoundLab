@@ -37,8 +37,8 @@ from boundlab.diff import zono3, zonohex
 from boundlab.interp.onnx import onnx_export
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
 
 
 # ---------------------------------------------------------------------------

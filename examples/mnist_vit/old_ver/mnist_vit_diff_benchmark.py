@@ -40,20 +40,18 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import boundlab.expr as expr
 import boundlab.prop as prop
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
-from certify_pruned_diff_v2 import (
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned_diff_v2 import (
     MaskedModel,
     certify_differential,
     certify_zono_sub,
     certify_int_sub,
-    monte_carlo,
     load_test_samples,
 )
 

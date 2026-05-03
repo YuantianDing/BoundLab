@@ -30,14 +30,13 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import boundlab.expr  # resolve circular import before boundlab.prop
 import boundlab.prop as prop
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
 from pruning_zono import MaskedModel, load_test_samples
 
 

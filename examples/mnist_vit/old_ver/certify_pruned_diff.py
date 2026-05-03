@@ -15,12 +15,10 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
 
-import onnx_ir
 import torch
 from torch import nn, Tensor
 
@@ -37,8 +35,8 @@ from boundlab.diff.zono3 import interpret as diff_interpret
 from boundlab.interp.onnx import onnx_export
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +165,7 @@ def main():
     ap.add_argument("--n-samples", type=int, default=5, dest="n_samples")
     ap.add_argument("--mc-samples", type=int, default=1000, dest="mc_samples")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--data-dir", default=os.path.join(os.getcwd(), "./mnist_data"), dest="data_dir")
+    ap.add_argument("--data-dir", default="./mnist_data", dest="data_dir")
     ap.add_argument("--no-normalize", dest="normalize",
                     action="store_false", default=True)
     ap.add_argument("--mean", type=float, default=0.1307)
@@ -213,98 +211,50 @@ def main():
             x = vit.to_patch_embedding(x)
             center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
 
-        # Get importance score bounds for top-K classification
+        # Get importance scores to determine pruning mask
         full_zono = build_zonotope_no_cat(vit, img, args.eps, op_patch)
         prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
-        score_zono = op_score(full_zono)
-        ub_sc, lb_sc = score_zono.ublb()
+        ub_sc, lb_sc = op_score(full_zono).ublb()
 
-        # Classify tokens using ONLY zonotope bounds — no concrete ranking
-        definite_keep, definite_prune, uncertain = classify_topk(
-            ub_sc, lb_sc, args.K
-        )
-
-        K_remaining = args.K - len(definite_keep)
-        if K_remaining < 0:
-            K_remaining = 0
-            uncertain = set()
-        if K_remaining > len(uncertain):
-            K_remaining = len(uncertain)
-
-        uncertain_list = sorted(uncertain)
-        if len(uncertain_list) == 0 or K_remaining == len(uncertain_list):
-            cases = [definite_keep | uncertain]
-        elif K_remaining == 0:
-            cases = [definite_keep.copy()]
-        else:
-            from itertools import combinations
-            cases = [definite_keep | set(c)
-                     for c in combinations(uncertain_list, K_remaining)]
-
-        n_cases = len(cases)
-
-        # Full model graph (mask=ones, same for all cases)
-        mask_full = torch.ones(17, 64)
-        gm_full = onnx_export(MaskedModel(vit, mask_full).eval(), ([17, 64],))
-        onnx_ir.save(gm_full, f"full_{i}.onnx")
-
-        # MC ground truth: use TRUE top-K on each perturbed input
-        mc_max = 0.0
-        model_full_mc = MaskedModel(vit, mask_full).eval()
+        # Use concrete top-K for the mask (deterministic case)
         with torch.no_grad():
-            for t in range(args.mc_samples):
-                torch.manual_seed(t)
-                delta = (2 * torch.rand_like(center) - 1) * args.eps
-                xp = center + delta
-                sc = scoring(xp)
-                _, topk = sc.topk(args.K)
-                kept_mc = set(topk.tolist())
-                mp = torch.zeros(17, 64); mp[0] = 1.0
-                for p in kept_mc: mp[p + 1] = 1.0
-                model_pruned_mc = MaskedModel(vit, mp).eval()
-                diff = model_full_mc(xp) - model_pruned_mc(xp)
-                mc_max = max(mc_max, diff.abs().max().item())
-        all_mc.append(mc_max)
+            concrete_scores = scoring(center)
+            _, topk_idx = concrete_scores.topk(args.K)
+            kept = set(topk_idx.tolist())
 
-        print(f"  [{i+1}/{len(samples)}] label={label}, "
-              f"keep={len(definite_keep)} prune={len(definite_prune)} "
-              f"unc={len(uncertain)} cases={n_cases}")
+        # Build masks
+        mask_full = torch.ones(17, 64)
+        mask_pruned = torch.zeros(17, 64)
+        mask_pruned[0] = 1.0  # CLS
+        for p in kept:
+            mask_pruned[p + 1] = 1.0
 
-        # For each method: case-split, union bounds across all pruning decisions
+        model_full = MaskedModel(vit, mask_full).eval()
+        model_pruned = MaskedModel(vit, mask_pruned).eval()
+
+        gm1 = onnx_export(model_full, ([17, 64],))
+        gm2 = onnx_export(model_pruned, ([17, 64],))
+
+        # MC ground truth
+        mc = monte_carlo(model_full, model_pruned, center, args.eps, args.mc_samples)
+        all_mc.append(mc)
+
+        print(f"  [{i+1}/{len(samples)}] label={label}, kept={sorted(kept)}")
+
         for name, fn in methods:
             t0 = time.perf_counter()
-            best_d_ub = None
-            best_d_lb = None
             try:
-                for case_kept in cases:
-                    mask_pruned = torch.zeros(17, 64)
-                    mask_pruned[0] = 1.0
-                    for p in case_kept:
-                        mask_pruned[p + 1] = 1.0
-                    gm_pruned = onnx_export(
-                        MaskedModel(vit, mask_pruned).eval(), ([17, 64],))
-
-                    d_ub, d_lb = fn(gm_full, gm_pruned, center, args.eps)
-
-                    if best_d_ub is None:
-                        best_d_ub = d_ub.clone()
-                        best_d_lb = d_lb.clone()
-                    else:
-                        best_d_ub = torch.maximum(best_d_ub, d_ub)
-                        best_d_lb = torch.minimum(best_d_lb, d_lb)
-
+                d_ub, d_lb = fn(gm1, gm2, center, args.eps)
                 elapsed = time.perf_counter() - t0
-                bound = max(best_d_ub.abs().max().item(),
-                            best_d_lb.abs().max().item())
-                width = (best_d_ub - best_d_lb).mean().item()
+                bound = max(d_ub.abs().max().item(), d_lb.abs().max().item())
+                width = (d_ub - d_lb).mean().item()
                 all_results[name].append((bound, elapsed, width))
-                print(f"    {name:<15} bound={bound:.4f}  "
-                      f"width={width:.4f}  time={elapsed:.1f}s")
+                print(f"    {name:<15} bound={bound:.4f}  width={width:.4f}  time={elapsed:.1f}s")
             except Exception as e:
                 elapsed = time.perf_counter() - t0
                 print(f"    {name:<15} FAILED: {e} ({elapsed:.1f}s)")
 
-        print(f"    {'MC':<15} max|diff|={mc_max:.6f}")
+        print(f"    {'MC':<15} max|diff|={mc:.6f}")
 
     # Summary
     print()

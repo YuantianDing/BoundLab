@@ -1,27 +1,18 @@
-"""Token-pruning differential verification for MNIST ViT (depth=3).
-
-Follows the same pipeline as run_k8_k15.py:
-  1. Zonotope scoring → classify_topk → case splitting on uncertain tokens
-  2. For each case: build mask, diff_net merge, differential verify
-  3. Union bounds across all cases
-
-MaskedModel extended to iterate all 3 transformer layers.
+"""K=8,15 benchmark: differential vs zonotope subtraction.
 
 Usage:
     cd examples/mnist_vit
-    python run_k8_k15_3layer.py
+    caffeinate python run_k8_k15.py
 """
 from __future__ import annotations
 import sys, time, warnings, os
 from pathlib import Path
 from math import comb
-from itertools import combinations
 
 warnings.filterwarnings("ignore")
 os.environ["PYTHONWARNINGS"] = "ignore"
 
 import torch
-from torch import nn, Tensor
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -35,42 +26,11 @@ from boundlab.diff.net import diff_net
 from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
 
-from mnist_vit import ViT
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from mnist_vit import build_mnist_vit
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned_diff_v2 import MaskedModel, load_test_samples
 
-
-# ---------------------------------------------------------------------------
-# MaskedModel for N-layer ViT (extends certify_pruned_diff_v2 to depth>1)
-# ---------------------------------------------------------------------------
-
-class MaskedModel(nn.Module):
-    """PostConcat with a mask Mul as the first op.
-
-    Iterates over ALL transformer layers (not just layer 0).
-    Both the full model (mask=ones) and pruned model (mask=pruned_zeros)
-    use this class, ensuring identical ONNX graph structure for diff_net.
-    """
-
-    def __init__(self, vit, mask: Tensor):
-        super().__init__()
-        self.transformer = vit.transformer
-        self.pool = vit.pool
-        self.mlp_head = vit.mlp_head
-        self.register_buffer("mask", mask)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = x * self.mask
-        for attn, ff in self.transformer.layers:
-            x = attn(x)
-            x = ff(x)
-        x = x.mean(dim=0) if self.pool == "mean" else x[0]
-        return self.mlp_head(x)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 class _Quiet:
     def __enter__(self):
@@ -83,41 +43,24 @@ class _Quiet:
         self._devnull.close()
 
 
-def build_mnist_vit_3layer(checkpoint_path):
-    """Build depth=3 MNIST ViT and load checkpoint."""
-    model = ViT(
-        image_size=28, patch_size=7, num_classes=10, channels=1,
-        dim=64, depth=3, heads=4, mlp_dim=128,
-        layer_norm_type="no_var", pool="cls", dim_head=64,
-    )
-    sd = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    model.load_state_dict(sd, strict=True)
-    return model.eval()
+K_LIST = [8, 15]
+EPS_LIST = [0.01, 0.03, 0.05]
+N = 100
+MAX_CASES = 20
 
 
-def load_test_samples(n, data_dir, seed):
-    try:
-        from torchvision import datasets, transforms
-        ds = datasets.MNIST(
-            data_dir, train=False, download=True, transform=transforms.ToTensor()
-        )
-        g = torch.Generator().manual_seed(seed)
-        indices = torch.randperm(len(ds), generator=g)[:n].tolist()
-        return [(ds[i][0], int(ds[i][1])) for i in indices]
-    except Exception:
-        g = torch.Generator().manual_seed(seed)
-        return [(torch.rand(1, 28, 28, generator=g), -1) for _ in range(n)]
+def verify_one(method, vit, gm_full, center, eps, kept_set):
+    mask_p = torch.zeros(17, 64)
+    mask_p[0] = 1.0
+    for p in kept_set:
+        mask_p[p + 1] = 1.0
 
-
-# ---------------------------------------------------------------------------
-# Verification
-# ---------------------------------------------------------------------------
-
-def verify_one(method, gm_full, gm_pruned, center, eps):
     with _Quiet():
+        gm_p = onnx_export(MaskedModel(vit, mask_p).eval(), ([17, 64],))
+
         if method == "diff":
             prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
-            merged = diff_net(gm_full, gm_pruned)
+            merged = diff_net(gm_full, gm_p)
             op = diff_interpret(merged)
             x_expr = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
             out = op(x_expr)
@@ -128,7 +71,7 @@ def verify_one(method, gm_full, gm_pruned, center, eps):
         else:
             prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
             op1 = zono.interpret(gm_full)
-            op2 = zono.interpret(gm_pruned)
+            op2 = zono.interpret(gm_p)
             x_expr = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
             y1 = op1(x_expr)
             y2 = op2(x_expr)
@@ -138,13 +81,7 @@ def verify_one(method, gm_full, gm_pruned, center, eps):
 def compute_D(method, vit, gm_full, center, eps, cases):
     best_ub, best_lb = None, None
     for kept in cases:
-        mask_p = torch.zeros(17, 64)
-        mask_p[0] = 1.0
-        for p in kept:
-            mask_p[p + 1] = 1.0
-        with _Quiet():
-            gm_p = onnx_export(MaskedModel(vit, mask_p).eval(), ([17, 64],))
-        ub, lb = verify_one(method, gm_full, gm_p, center, eps)
+        ub, lb = verify_one(method, vit, gm_full, center, eps, kept)
         if best_ub is None:
             best_ub, best_lb = ub.clone(), lb.clone()
         else:
@@ -153,20 +90,11 @@ def compute_D(method, vit, gm_full, center, eps, cases):
     return max(best_ub.abs().max().item(), best_lb.abs().max().item())
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-K_LIST = [8, 15]
-EPS_LIST = [0.01, 0.03, 0.05]
-N = 100
-MAX_CASES = 20
-CHECKPOINT = "mnist_transformer3.pt"
-
+# Setup
 torch.manual_seed(0)
-print("Loading 3-layer model...", flush=True)
+print("Loading model...", flush=True)
 with _Quiet():
-    vit = build_mnist_vit_3layer(CHECKPOINT)
+    vit = build_mnist_vit("mnist_transformer.pt")
     patchify = PatchifyStage(vit, True, 0.1307, 0.3081).eval()
     op_patch = zono.interpret(onnx_export(patchify, ([1, 28, 28],)))
     scoring = ScoringModel(vit).eval()
@@ -174,8 +102,8 @@ with _Quiet():
     mask_full = torch.ones(17, 64)
     gm_full = onnx_export(MaskedModel(vit, mask_full).eval(), ([17, 64],))
 
-samples = load_test_samples(N, "./mnist_data", 0)
-print(f"Ready. {sum(p.numel() for p in vit.parameters()):,} params, depth=3\n", flush=True)
+samples = load_test_samples(N, "../mnist_data", 0)
+print("Ready.\n", flush=True)
 
 grand_t0 = time.perf_counter()
 
@@ -219,6 +147,7 @@ for K in K_LIST:
             else:
                 n_combos = comb(len(uncertain_list), K_remaining)
                 if n_combos <= MAX_CASES:
+                    from itertools import combinations
                     cases = [definite_keep | set(c)
                              for c in combinations(uncertain_list, K_remaining)]
                 else:
@@ -251,4 +180,4 @@ for K in K_LIST:
         print(f"  Total time: {time.perf_counter() - t_total:.0f}s\n")
 
 print(f"Grand total: {time.perf_counter() - grand_t0:.0f}s "
-      f"({(time.perf_counter() - grand_t0)/60:.1f}min)")
+      f"({(time.perf_counter() - grand_t0)/60:.1f}m)")

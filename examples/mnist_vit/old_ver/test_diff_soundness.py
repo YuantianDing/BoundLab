@@ -1,17 +1,13 @@
 """Soundness test for certify_pruned_diff.py differential bounds."""
-import sys; sys.path.insert(0, '.')
+import sys; sys.path.insert(0, '..')
 import warnings; warnings.filterwarnings('ignore')
 import torch
-from torch import nn
-import boundlab.expr as expr, boundlab.prop as prop, boundlab.zono as zono
-from boundlab.diff.expr import DiffExpr3
-from boundlab.diff.net import diff_net
-from boundlab.diff.zono3 import interpret as diff_interpret
+import boundlab.prop as prop, boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
-from certify_pruned_diff import MaskedModel, certify_int_sub, certify_zono_sub, certify_differential
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned_diff import MaskedModel, certify_int_sub, certify_zono_sub, certify_differential
 
 vit = build_mnist_vit('mnist_transformer.pt')
 eps = 0.004; K = 8
