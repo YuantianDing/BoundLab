@@ -247,12 +247,18 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--data-dir", default=os.path.join(os.getcwd(), "./mnist_data"), dest="data_dir")
     ap.add_argument("--no-normalize", dest="normalize", action="store_false", default=True)
+    ap.add_argument("--cuda", action="store_true",
+                    help="Run concrete inference and Monte Carlo sampling on CUDA if available.")
     ap.add_argument("--mean", type=float, default=0.1307)
     ap.add_argument("--std", type=float, default=0.3081)
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
-    vit = build_mnist_vit(args.checkpoint)
+    vit = build_mnist_vit(args.checkpoint).eval()
+    run_device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
+    if args.cuda and run_device.type != "cuda":
+        print("[warn] CUDA requested but not available; falling back to CPU.")
+    vit_run = build_mnist_vit(args.checkpoint).to(run_device).eval() if run_device.type == "cuda" else vit
 
     patchify = PatchifyStage(vit, args.normalize, args.mean, args.std).eval()
     gm_patch = onnx_export(patchify, ([1, 28, 28],))
@@ -261,6 +267,7 @@ def main():
     scoring = ScoringModel(vit).eval()
     gm_score = onnx_export(scoring, ([17, 64],))
     op_score = zono.interpret(gm_score)
+    scoring_run = ScoringModel(vit_run).eval()
 
     samples = load_test_samples(args.n_samples, args.data_dir, args.seed)
 
@@ -276,23 +283,26 @@ def main():
     print(f"  Differential Verification (Zono): full vs top-{args.K} pruned ViT")
     print("=" * 75)
     print(f"  eps={args.eps}, K={args.K}, MC={args.mc_samples}")
+    print(f"  device={run_device}")
     print()
 
     all_results = {name: [] for name, _ in methods}
     all_mc = []
     onnx_cache: dict[bytes, object] = {}
     mask_full = torch.ones(17, 64)
+    mask_full_run = mask_full.to(run_device)
     gm_full = _export_masked_onnx(vit, mask_full, onnx_cache)
-    model_full_mc = MaskedModel(vit, mask_full).eval()
+    model_full_mc = MaskedModel(vit_run, mask_full_run).eval()
 
     for i, (img, label) in enumerate(samples):
         with torch.no_grad():
+            img_run = img.to(run_device)
             if args.normalize:
-                x = (img - args.mean) / args.std
+                x = (img_run - args.mean) / args.std
             else:
-                x = img
-            x = vit.to_patch_embedding(x)
-            center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
+                x = img_run
+            x = vit_run.to_patch_embedding(x)
+            center = torch.cat((vit_run.cls_token[0], x), dim=0) + vit_run.pos_embedding[0]
 
         full_zono = build_zonotope_no_cat(vit, img, args.eps, op_patch)
         prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
@@ -326,12 +336,13 @@ def main():
                 torch.manual_seed(t)
                 delta = (2 * torch.rand_like(center) - 1) * args.eps
                 xp = center + delta
-                sc = scoring(xp)
+                sc = scoring_run(xp)
                 _, topk = sc.topk(args.K)
                 kept_mc = set(topk.tolist())
-                mp = torch.zeros(17, 64); mp[0] = 1.0
+                mp = torch.zeros(17, 64, device=run_device)
+                mp[0] = 1.0
                 for p in kept_mc: mp[p + 1] = 1.0
-                model_pruned_mc = MaskedModel(vit, mp).eval()
+                model_pruned_mc = MaskedModel(vit_run, mp).eval()
                 diff = model_full_mc(xp) - model_pruned_mc(xp)
                 mc_max = max(mc_max, diff.abs().max().item())
         all_mc.append(mc_max)
