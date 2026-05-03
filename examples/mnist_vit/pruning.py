@@ -151,16 +151,14 @@ class ScoringModel(nn.Module):
 class MaskedPostConcat(nn.Module):
     """Transformer + head with pruning via masked softmax.
 
-    Handles any number of transformer layers.  Takes a single **embedding
-    mask** ``(N+1, D)`` and derives the softmax column mask from it.
-    At every attention layer, softmax is replaced by::
+    Handles any number of transformer layers.  Layers before
+    ``mask_from_layer`` run standard (unmasked) attention.  At
+    ``mask_from_layer``, the embedding mask is applied and masked
+    softmax begins::
 
         exp_scores = exp(Q @ K^T * scale)
         exp_masked = exp_scores * col_mask   # col_mask = emb_mask[:, 0]
         attn_w     = exp_masked * reciprocal(sum(exp_masked))
-
-    This is exact (pruned columns contribute exactly zero to softmax) and
-    keeps all paired initializer differences in {0, 1} for ``diff_net``.
 
     Parameters
     ----------
@@ -169,12 +167,16 @@ class MaskedPostConcat(nn.Module):
     emb_mask : Tensor
         Shape ``(N+1, D)``.  Ones for kept tokens, zeros for pruned.
         CLS (row 0) must always be 1.
+    mask_from_layer : int
+        First layer at which pruning is applied.  Layers before this
+        run standard attention.  Default 0 (mask at all layers).
     """
 
-    def __init__(self, vit, emb_mask: Tensor):
+    def __init__(self, vit, emb_mask: Tensor, mask_from_layer: int = 0):
         super().__init__()
         self.pool = vit.pool
         self.mlp_head = vit.mlp_head
+        self.mask_from_layer = mask_from_layer
         self.register_buffer("emb_mask", emb_mask)  # (N+1, D)
 
         # Store per-layer attention + FF components
@@ -195,22 +197,22 @@ class MaskedPostConcat(nn.Module):
             self.scale_list.append(attn_block.fn.fn.scale)
 
     def forward(self, x: Tensor) -> Tensor:
-        # --- Embedding mask ---
-        x = x * self.emb_mask
-
-        # --- Derive softmax column mask ---
+        # --- Derive softmax column mask (used from mask_from_layer onward) ---
         col_mask = self.emb_mask[:, 0]                        # (N+1,) 1/0
         col_mask = col_mask.unsqueeze(0).unsqueeze(0)         # (1, 1, N+1)
 
         # --- Transformer layers ---
         for layer_idx in range(self.n_layers):
+            # Apply embedding mask at the pruning boundary
+            if layer_idx == self.mask_from_layer:
+                x = x * self.emb_mask
+
             n = x.shape[0]
             h = self.heads_list[layer_idx]
             d = self.dim_head_list[layer_idx]
             scale = self.scale_list[layer_idx]
             attn = self.attns[layer_idx]
 
-            # Self-attention with masked softmax
             residual = x
             xn = self.attn_norms[layer_idx](x)
 
@@ -218,10 +220,16 @@ class MaskedPostConcat(nn.Module):
             k = attn.to_k(xn).reshape(n, h, d).permute(1, 0, 2)
             v = attn.to_v(xn).reshape(n, h, d).permute(1, 0, 2)
 
-            raw_scores = (q @ k.transpose(-2, -1)) * scale   # (h, N+1, N+1)
-            exp_scores = torch.exp(raw_scores)
-            exp_masked = exp_scores * col_mask                # pruned cols -> 0
-            attn_w = exp_masked * torch.reciprocal(exp_masked.sum(dim=-1, keepdim=True))
+            raw_scores = (q @ k.transpose(-2, -1)) * scale
+
+            if layer_idx >= self.mask_from_layer:
+                # Masked softmax: pruned columns get zero attention
+                exp_scores = torch.exp(raw_scores)
+                exp_masked = exp_scores * col_mask
+                attn_w = exp_masked * torch.reciprocal(exp_masked.sum(dim=-1, keepdim=True))
+            else:
+                # Standard softmax: all tokens participate
+                attn_w = raw_scores.softmax(dim=-1)
 
             out = (attn_w @ v).permute(1, 0, 2).reshape(n, h * d)
             out = attn.to_out(out)
@@ -356,9 +364,10 @@ def export_patchify(vit, img_shape: list[int],
 
 
 def export_masked_post_concat(vit, emb_mask: Tensor,
-                               num_tokens: int, dim: int):
+                               num_tokens: int, dim: int,
+                               mask_from_layer: int = 0):
     """Export ``MaskedPostConcat``, return ONNX graph model."""
-    model = MaskedPostConcat(vit, emb_mask).eval()
+    model = MaskedPostConcat(vit, emb_mask, mask_from_layer=mask_from_layer).eval()
     return onnx_export(model, ([num_tokens + 1, dim],))
 
 
@@ -379,6 +388,7 @@ def certify_pruned_sample_diff(
     vit, img: Tensor, eps: float, K: int,
     op_patch, op_score,
     num_tokens: int, dim: int,
+    mask_from_layer: int = 0,
 ) -> CertifyResult:
     """Certify via differential verification: ``full - pruned``.
 
@@ -399,12 +409,14 @@ def certify_pruned_sample_diff(
 
     gm_full = export_masked_post_concat(
         vit, build_full_emb_mask(num_tokens, dim), num_tokens, dim,
+        mask_from_layer=mask_from_layer,
     )
 
     best_ub = best_lb = None
     for kept in cases:
         gm_pruned = export_masked_post_concat(
             vit, build_emb_mask(num_tokens, dim, kept), num_tokens, dim,
+            mask_from_layer=mask_from_layer,
         )
 
         prop._UB_CACHE.clear(); prop._LB_CACHE.clear()

@@ -76,10 +76,10 @@ def build_mnist_vit_3layer(checkpoint_path: str = "mnist_transformer_3.pt"):
 
 def monte_carlo_bound(
     vit, scoring_model, emb_center, eps, K,
-    num_tokens, dim, n_mc=1000,
+    num_tokens, dim, n_mc=1000, mask_from_layer=0,
 ):
     full_mask = build_full_emb_mask(num_tokens, dim)
-    model_full = MaskedPostConcat(vit, full_mask).eval()
+    model_full = MaskedPostConcat(vit, full_mask, mask_from_layer=mask_from_layer).eval()
 
     mc_max = 0.0
     with torch.no_grad():
@@ -91,6 +91,7 @@ def monte_carlo_bound(
             kept = set(topk_idx.tolist())
             model_pruned = MaskedPostConcat(
                 vit, build_emb_mask(num_tokens, dim, kept),
+                mask_from_layer=mask_from_layer,
             ).eval()
             diff = model_full(xp) - model_pruned(xp)
             mc_max = max(mc_max, diff.abs().max().item())
@@ -116,12 +117,13 @@ def _diff_case(gm_full, gm_pruned, full_zono):
     return (out.x - out.y).ublb()
 
 
-def _run_method(method_fn, gm_full, cases, vit, num_tokens, dim, full_zono):
+def _run_method(method_fn, gm_full, cases, vit, num_tokens, dim, full_zono, mask_from_layer=0):
     best_ub = best_lb = None
     t0 = time.perf_counter()
     for kept in cases:
         emb_mask = build_emb_mask(num_tokens, dim, kept)
-        gm_pruned = export_masked_post_concat(vit, emb_mask, num_tokens, dim)
+        gm_pruned = export_masked_post_concat(vit, emb_mask, num_tokens, dim,
+                                               mask_from_layer=mask_from_layer)
         d_ub, d_lb = method_fn(gm_full, gm_pruned, full_zono)
         if best_ub is None:
             best_ub, best_lb = d_ub.clone(), d_lb.clone()
@@ -160,7 +162,8 @@ def run(
     op_score, scoring_model = export_scoring(vit, num_tokens, dim, score_layer=score_layer)
 
     full_mask = build_full_emb_mask(num_tokens, dim)
-    gm_full = export_masked_post_concat(vit, full_mask, num_tokens, dim)
+    gm_full = export_masked_post_concat(vit, full_mask, num_tokens, dim,
+                                         mask_from_layer=score_layer)
 
     print(f"[setup] done ({time.time() - t0:.1f}s)\n")
 
@@ -226,20 +229,20 @@ def run(
         t_mc = time.perf_counter()
         mc_bound = monte_carlo_bound(
             vit, scoring_model, emb_center, eps, K,
-            num_tokens, dim, mc_samples,
+            num_tokens, dim, mc_samples, mask_from_layer=score_layer,
         )
         t_mc = time.perf_counter() - t_mc
         all_mc.append(mc_bound)
 
         zs_bound, zs_width, t_zs = _run_method(
             _zono_sub_case, gm_full, cases,
-            vit, num_tokens, dim, full_zono,
+            vit, num_tokens, dim, full_zono, mask_from_layer=score_layer,
         )
         all_zs.append(zs_bound)
 
         diff_bound, diff_width, t_diff = _run_method(
             _diff_case, gm_full, cases,
-            vit, num_tokens, dim, full_zono,
+            vit, num_tokens, dim, full_zono, mask_from_layer=score_layer,
         )
         all_diff.append(diff_bound)
 
