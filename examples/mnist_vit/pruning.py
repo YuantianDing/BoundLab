@@ -91,14 +91,35 @@ class PatchifyStage(nn.Module):
 class ScoringModel(nn.Module):
     """``(N+1, D) embeddings -> (N,) importance`` per patch token.
 
-    Computes mean-over-heads CLS attention weights via softmax on the first
-    transformer layer's Q/K projections, then returns the N patch-token
-    scores (excluding the CLS-to-CLS self-attention at index 0).
+    Computes mean-over-heads CLS attention weights at a chosen layer.
+    If ``score_layer > 0``, the model first propagates through layers
+    ``0..score_layer-1`` (standard attention, no pruning) to obtain
+    the embeddings at that layer's input.
+
+    Parameters
+    ----------
+    vit : ViT
+        The source ViT model.
+    score_layer : int
+        Which transformer layer's CLS attention to use for scoring.
+        Default 0 (first layer).
     """
 
-    def __init__(self, vit):
+    def __init__(self, vit, score_layer: int = 0):
         super().__init__()
-        attn_block = vit.transformer.layers[0][0]
+        assert 0 <= score_layer < len(vit.transformer.layers), \
+            f"score_layer={score_layer} but model has {len(vit.transformer.layers)} layers"
+
+        self.score_layer = score_layer
+
+        # Store prefix layers (0..score_layer-1) for propagation
+        self.prefix_layers = nn.ModuleList()
+        for i in range(score_layer):
+            attn_block, ff_block = vit.transformer.layers[i]
+            self.prefix_layers.append(nn.ModuleList([attn_block, ff_block]))
+
+        # Scoring layer's attention components
+        attn_block = vit.transformer.layers[score_layer][0]
         self.norm = attn_block.fn.norm
         self.attn = attn_block.fn.fn
         self.heads = self.attn.heads
@@ -106,6 +127,12 @@ class ScoringModel(nn.Module):
         self.scale = self.attn.scale
 
     def forward(self, x: Tensor) -> Tensor:
+        # Propagate through prefix layers (standard attention, no masking)
+        for attn_block, ff_block in self.prefix_layers:
+            x = attn_block(x)
+            x = ff_block(x)
+
+        # Compute CLS attention at the scoring layer
         xn = self.norm(x)
         n = xn.shape[0]
         h, d = self.heads, self.dim_head
@@ -313,9 +340,9 @@ def build_zonotope_no_cat(vit, img: Tensor, eps: float, op_patch):
 # Export helpers
 # ---------------------------------------------------------------------------
 
-def export_scoring(vit, num_tokens: int, dim: int):
+def export_scoring(vit, num_tokens: int, dim: int, score_layer: int = 0):
     """Export scoring model, return ``(op_score, scoring_model)``."""
-    scoring = ScoringModel(vit).eval()
+    scoring = ScoringModel(vit, score_layer=score_layer).eval()
     gm = onnx_export(scoring, ([num_tokens + 1, dim],))
     return zono.interpret(gm), scoring
 

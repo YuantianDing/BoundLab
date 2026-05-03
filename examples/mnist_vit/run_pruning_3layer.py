@@ -143,7 +143,7 @@ def run(
     eps=0.004, K=8,
     n_samples=3, mc_samples=500, seed=0,
     normalize=True, mean=0.1307, std=0.3081,
-    debug=False,
+    debug=False, score_layer=0,
 ):
     torch.manual_seed(seed)
     num_tokens, dim = 16, 64
@@ -157,7 +157,7 @@ def run(
     gm_patch = onnx_export(patchify, ([1, 28, 28],))
     op_patch = zono.interpret(gm_patch)
 
-    op_score, scoring_model = export_scoring(vit, num_tokens, dim)
+    op_score, scoring_model = export_scoring(vit, num_tokens, dim, score_layer=score_layer)
 
     full_mask = build_full_emb_mask(num_tokens, dim)
     gm_full = export_masked_post_concat(vit, full_mask, num_tokens, dim)
@@ -259,7 +259,7 @@ def run(
     print("=" * 72)
     print(f"  Differential Pruning Verification — MNIST ViT (3 layers)")
     print(f"  checkpoint: {checkpoint}")
-    print(f"  eps={eps}, K={K}/{num_tokens}, MC={mc_samples}")
+    print(f"  eps={eps}, K={K}/{num_tokens}, score_layer={score_layer}, MC={mc_samples}")
     if normalize:
         print(f"  normalize=on (mean={mean}, std={std})")
     print("=" * 72)
@@ -308,6 +308,8 @@ def main():
     ap.add_argument("--mean", type=float, default=0.1307)
     ap.add_argument("--std", type=float, default=0.3081)
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--score-layer", type=int, default=0, dest="score_layer",
+                    help="Which transformer layer's CLS attention to use for scoring")
     args = ap.parse_args()
 
     run(**vars(args))
