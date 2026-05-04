@@ -201,6 +201,8 @@ class EinsumOp(LinearOp):
 
     def __matmul__(self, other: "LinearOp") -> "LinearOp":
         """Compose this EinsumOp with another LinearOp: (self ∘ other)(x) = self(other(x))."""
+        if isinstance(other, EinsumOp):
+            return merge_einsumop(self, other)
         if self.is_full():
             assert self.tensor.dim() >= len(other.output_shape), "What's wrong?"
             op = self.permute_for_input()
@@ -212,8 +214,6 @@ class EinsumOp(LinearOp):
             assert result.input_shape == other.input_shape, f"EinsumOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
             assert result.output_shape == self.output_shape, f"EinsumOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
             return result
-        if isinstance(other, EinsumOp):
-            return merge_einsumop(self, other)
         if isinstance(other, ScalarOp):
             if other.scalar == 1.0:
                 return self
@@ -469,6 +469,10 @@ class EinsumOp(LinearOp):
             other_new = other - intersect_op.remove_conditions(other.mul_conditions)
             self_new = self + intersect_op.remove_conditions(self.mul_conditions)
             return self_new, other_new
+    
+    def with_tensor(self, tensor: torch.Tensor) -> "EinsumOp":
+        """Return a new EinsumOp with the same input/output dims but a different tensor."""
+        return EinsumOp(tensor, self.input_dims, self.output_dims, name=self.name)
             
 
 def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
@@ -492,6 +496,7 @@ def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
             input_dims.append(len(new_tensor_idx) - 1)
 
     y_idx, x_idx, new_tensor_idx = _to_ascii_letters(y_idx, x_idx, new_tensor_idx)
+    # print(f"merge_einsumop: {x} @ {y} -> einsum('{y_idx},{x_idx}->{new_tensor_idx}', y.tensor, x.tensor)")
     tensor = torch.einsum(f"{y_idx},{x_idx}->{new_tensor_idx}", y.tensor, x.tensor)
     result = EinsumOp(tensor, input_dims, output_dims, name=merge_name(x, "@", y))
     assert result.input_shape == y.input_shape, f"merge_einsumop: input_shape mismatch {result.input_shape} != {y.input_shape}"

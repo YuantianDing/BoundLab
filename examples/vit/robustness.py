@@ -1,231 +1,188 @@
-"""Poly-domain robustness certification for the CIFAR ViT examples.
+"""L∞ robustness certification for the MNIST ViT (1-layer and 3-layer).
 
-Runs BoundLab's poly interpreter on models from ``examples/vit/vit.py`` and
-reports whether each VNNLib property is certifiably robust.
+Run::
+
+    python robustness.py
+    python robustness.py --method poly --model 3 --eps 0.003 --n-samples 50
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple
 
 import torch
 
-# Allow importing local examples modules and project package when run as script.
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
 import boundlab.expr as expr
+import boundlab.zono as zono
 import boundlab.poly as poly
+from boundlab.interp import Interpreter
 from boundlab.interp.onnx import onnx_export
-import vit as vit_module
 
-_X_ASSERT_RE = re.compile(r"^\(assert \((<=|>=) X_(\d+) ([^\s\)]+)\)\)\s*$")
-_Y_PAIR_RE = re.compile(r"\(>= Y_(\d+) Y_(\d+)\)")
-_LABEL_RE = re.compile(r"label:\s*(\d+)")
-_INPUT_SHAPE = (3, 32, 32)
+from mnist_vit import mnist_vit, mnist_vit_3
 
-
-def _parse_vnnlib_box(
-    spec_path: Path, shape: Tuple[int, int, int] = _INPUT_SHAPE
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[int]]:
-    """Parse per-dimension input bounds and optional target label from VNNLIB."""
-    flat_dim = shape[0] * shape[1] * shape[2]
-    lb = torch.full((flat_dim,), float("-inf"), dtype=torch.float32)
-    ub = torch.full((flat_dim,), float("inf"), dtype=torch.float32)
-    label: Optional[int] = None
-    y_rhs: Optional[int] = None
-
-    with spec_path.open("r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if line.startswith(";"):
-                if label is None:
-                    m_label = _LABEL_RE.search(line)
-                    if m_label:
-                        label = int(m_label.group(1))
-                continue
-
-            m = _X_ASSERT_RE.match(line)
-            if m is not None:
-                op, idx_s, val_s = m.groups()
-                idx = int(idx_s)
-                if 0 <= idx < flat_dim:
-                    val = float(val_s)
-                    if op == "<=":
-                        ub[idx] = val
-                    else:
-                        lb[idx] = val
-                continue
-
-            for m_y in _Y_PAIR_RE.finditer(line):
-                rhs = int(m_y.group(2))
-                if y_rhs is None:
-                    y_rhs = rhs
-                elif y_rhs != rhs:
-                    raise ValueError(f"Inconsistent output label in VNNLIB: {spec_path}")
-
-    if not torch.isfinite(lb).all() or not torch.isfinite(ub).all():
-        raise ValueError(f"Incomplete X bounds in VNNLIB: {spec_path}")
-    if (ub < lb).any():
-        raise ValueError(f"Inconsistent bounds (ub < lb) in VNNLIB: {spec_path}")
-    if label is None:
-        label = y_rhs
-    elif y_rhs is not None and label != y_rhs:
-        raise ValueError(f"Conflicting labels in VNNLIB comments/output: {spec_path}")
-
-    center = ((lb + ub) * 0.5).view(*shape)
-    radius = ((ub - lb) * 0.5).view(*shape)
-    return center, radius, label
+METHODS: dict[str, Interpreter] = {
+    "zono": zono.interpret,
+    "poly": poly.interpret,
+}
 
 
-def _model_from_spec_name(spec_name: str) -> str:
-    if spec_name.startswith("ibp_3_3_8"):
-        return "ibp_3_3_8"
-    if spec_name.startswith("pgd_2_3_16"):
-        return "pgd_2_3_16"
-    raise ValueError(f"Cannot infer model from spec filename: {spec_name}")
+def load_test_samples(n: int, data_dir: str, seed: int):
+    try:
+        from torchvision import datasets, transforms
+        ds = datasets.MNIST(
+            data_dir, train=False, download=True, transform=transforms.ToTensor()
+        )
+        g = torch.Generator().manual_seed(seed)
+        indices = torch.randperm(len(ds), generator=g)[:n].tolist()
+        samples = [(ds[i][0], int(ds[i][1])) for i in indices]
+        print(f"[data] loaded {len(samples)} real MNIST test samples")
+        return samples
+    except Exception as e:
+        print(f"[data] WARNING: MNIST unavailable ({type(e).__name__}: {e}).")
+        print("[data] Falling back to synthetic inputs (smoke test only).")
+        g = torch.Generator().manual_seed(seed)
+        return [(torch.rand(1, 28, 28, generator=g), -1) for _ in range(n)]
 
-
-def _build_poly_op(model_name: str, layer_norm_type: str):
-    ctor = {
-        "ibp_3_3_8": vit_module.vit_ibp_3_3_8,
-        "pgd_2_3_16": vit_module.vit_pgd_2_3_16,
-    }[model_name]
-    model = ctor(layer_norm_type=layer_norm_type).eval()
-    print(f"Exporting {model_name} to ONNX ...", flush=True)
-    t0 = time.time()
-    gm = onnx_export(model, ([3, 32, 32],))
-    op = poly.interpret(gm, verbose=True)
-    print(f"  Export + compile done ({time.time() - t0:.1f}s)\n")
-    return model, op
-
-
-def certify_vit_poly_vnnlib(
+DEFAULT_DATA_DIR = Path(__file__).parent / "./mnist_data"
+def certify(
     *,
-    model_name: str = "auto",
-    layer_norm_type: str = "no_var",
-    spec_dir: Path = _HERE / "vnnlib_seed1",
-    specs: Optional[list[str]] = None,
+    method: str = "zono",
+    model: int = 1,
+    eps: float = 0.005,
+    n_samples: int = 20,
+    seed: int = 0,
+    data_dir: str = DEFAULT_DATA_DIR,
+    input_norm: tuple[float, float] | None = (0.1307, 0.3081),
 ) -> dict:
-    """Certify VNNLib robustness specs with poly bound propagation."""
-    if specs is None:
-        specs = ["ibp_3_3_8_167.vnnlib", "pgd_2_3_16_38.vnnlib"]
+    if method not in METHODS:
+        raise ValueError(f"Unknown method {method!r}. Choose from: {list(METHODS)}")
 
-    results = []
-    model_cache: dict[str, tuple[torch.nn.Module, object]] = {}
-    resolved_specs = []
-    for spec in specs:
-        spec_path = Path(spec)
-        if not spec_path.exists():
-            spec_path = spec_dir / spec
-        if not spec_path.exists():
-            raise FileNotFoundError(f"Spec not found: {spec}")
-        resolved_specs.append(spec_path)
+    torch.manual_seed(seed)
+    net = (mnist_vit(input_norm=input_norm) if model == 1
+           else mnist_vit_3(input_norm=input_norm)).eval()
 
-    for i, spec_path in enumerate(resolved_specs):
-        model_key = model_name if model_name != "auto" else _model_from_spec_name(spec_path.name)
-        if model_key not in model_cache:
-            model_cache[model_key] = _build_poly_op(model_key, layer_norm_type)
-        model, op = model_cache[model_key]
-        center, radius, label = _parse_vnnlib_box(spec_path)
+    print(f"[export] building {method} interpreter ...", flush=True)
+    t0 = time.time()
+    op = METHODS[method](onnx_export(net, ([1, 28, 28],)))
+    print(f"[export] done in {time.time() - t0:.1f}s\n")
 
+    samples = load_test_samples(n_samples, data_dir, seed)
+    print()
+
+    n_correct = n_certified = 0
+    sum_max_width = 0.0
+    hdr = f"{'#':>3} {'label':>5} {'pred':>4} {'correct':>7} {'margin':>10}  {'time':>6}  status"
+    print(hdr)
+    print("-" * len(hdr))
+
+    for i, (img, label) in enumerate(samples):
         with torch.no_grad():
-            logits = model(center)
-            predicted = int(logits.argmax().item())
+            pred = int(net(img).argmax().item())
+        correct = (label >= 0) and (pred == label)
+        n_correct += int(correct)
 
-        t1 = time.time()
-        x = expr.ConstVal(center) + radius * expr.LpEpsilon([3, 32, 32])
-        out = op(x)
-        ub, lb = out.ublb()
-        elapsed = time.time() - t1
+        t0 = time.time()
+        x = expr.ConstVal(img) + eps * expr.LpEpsilon(list(img.shape))
+        ub, lb = op(x).ublb()
+        dt = time.time() - t0
+        max_width = float((ub - lb).max().item())
+        sum_max_width += max_width
 
-        target = predicted if label is None else label
         ub_others = ub.clone()
-        ub_others[target] = float("-inf")
-        margin = float(lb[target] - ub_others.max())
+        ub_others[pred] = float("-inf")
+        margin = float(lb[pred] - ub_others.max())
         certified = margin > 0.0
+        n_certified += int(certified)
 
-        results.append(
-            {
-                "sample": i + 1,
-                "spec": str(spec_path),
-                "target": target,
-                "predicted": predicted,
-                "certified": certified,
-                "margin": margin,
-                "elapsed": elapsed,
-            }
-        )
+        tag = "CERT" if certified else "fail"
+        lbl = f"{label:>5}" if label >= 0 else "    -"
+        cor = "yes" if correct else ("  -" if label < 0 else " no")
+        print(f"{i+1:>3} {lbl} {pred:>4} {cor:>7} {margin:>+10.4f} {dt:>5.1f}s  {tag}")
 
-        tag = "CERTIFIED" if certified else "not certified"
-        print(
-            f"  [{i + 1}/{len(resolved_specs)}] {spec_path.name} "
-            f"pred={predicted:2d} target={target:2d}  {tag}  "
-            f"margin={margin:+.4f}  ({elapsed:.1f}s)"
-        )
+    print()
+    print("=" * 58)
+    print(f"  method         : {method}")
+    print(f"  model          : mnist_vit (depth={model})")
+    print(f"  eps (L∞ pixel) : {eps}")
+    norm_str = f"(μ={input_norm[0]}, σ={input_norm[1]})" if input_norm else "off"
+    print(f"  input_norm     : {norm_str}")
+    print(f"  samples        : {n_samples}")
+    if any(lbl >= 0 for _, lbl in samples):
+        print(f"  clean accuracy : {n_correct}/{n_samples}"
+              f" = {100*n_correct/n_samples:.1f}%")
+    print(f"  certified      : {n_certified}/{n_samples}"
+          f" = {100*n_certified/n_samples:.1f}%")
+    print(f"  avg max width  : {sum_max_width / n_samples:.6f}")
+    print("=" * 58)
 
-    n_certified = sum(r["certified"] for r in results)
-    return {"n_certified": n_certified, "n_total": len(resolved_specs), "results": results}
+    return {
+        "n_total": n_samples,
+        "n_correct": n_correct,
+        "n_certified": n_certified,
+        "avg_max_width": sum_max_width / n_samples,
+    }
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Poly certification for ViT from VNNLIB specs."
+def _parse_input_norm(s: str) -> tuple[float, float] | None:
+    if s.lower() == "none":
+        return None
+    mean, std = s.split(",")
+    return float(mean), float(std)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="BoundLab robustness certification for MNIST ViT.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--model",
-        choices=["auto", "ibp_3_3_8", "pgd_2_3_16"],
-        default="auto",
-        help="ViT checkpoint to load (auto infers from spec filename).",
-    )
-    parser.add_argument(
-        "--layer-norm",
-        choices=["standard", "no_var"],
-        default="no_var",
-        dest="layer_norm",
-        help="LayerNorm variant (default: no_var).",
-    )
-    parser.add_argument(
-        "--spec-dir",
-        type=Path,
-        default=Path(__file__).resolve().parent / "vnnlib_seed1",
-        help="Directory containing VNNLIB specs.",
-    )
-    parser.add_argument(
-        "--specs",
-        nargs="+",
-        default=["ibp_3_3_8_167.vnnlib", "pgd_2_3_16_38.vnnlib"],
-        help="VNNLIB specs to run (filenames under --spec-dir, or full paths).",
-    )
-    args = parser.parse_args()
+    ap.add_argument("--method", nargs="+", default=list(METHODS),
+                    choices=list(METHODS),
+                    help="Verification method(s). Defaults to all.")
+    ap.add_argument("--model", type=int, choices=[1, 3], default=1,
+                    help="ViT depth: 1-layer or 3-layer.")
+    ap.add_argument("--eps", type=float, default=0.005,
+                    help="L∞ perturbation radius on pixel values.")
+    ap.add_argument("--n-samples", type=int, default=20, dest="n_samples")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, dest="data_dir")
+    ap.add_argument("--input-norm", default="0.1307,0.3081", dest="input_norm",
+                    help="Normalisation as 'mean,std', or 'none' to disable.")
+    args = ap.parse_args()
+    args.input_norm = _parse_input_norm(args.input_norm)
+    methods = args.method
 
     print("=" * 58)
-    print("  Poly Certification — Vision Transformer")
-    print("=" * 58)
-    print(f"  model       : {args.model}")
-    print(f"  layer_norm  : {args.layer_norm}")
-    print(f"  spec_dir    : {args.spec_dir}")
-    print(f"  specs       : {len(args.specs)} file(s)")
+    print(f"  BoundLab Certification — MNIST ViT (depth={args.model})")
     print("=" * 58)
     print()
 
-    result = certify_vit_poly_vnnlib(
-        model_name=args.model,
-        layer_norm_type=args.layer_norm,
-        spec_dir=args.spec_dir,
-        specs=args.specs,
-    )
+    results = {}
+    for m in methods:
+        print(f"[ {m} ]")
+        results[m] = certify(**{**vars(args), "method": m})
+        print()
 
-    n_c = result["n_certified"]
-    n_t = result["n_total"]
-    pct = 100 * n_c / n_t if n_t else 0.0
-    print(f"\\nCertified {n_c}/{n_t} ({pct:.0f}%)")
+    if len(methods) > 1:
+        print("=" * 58)
+        print("  Summary")
+        print(f"  {'method':<8}  {'certified':>10}  {'avg max width':>14}")
+        print("-" * 58)
+        for m, r in results.items():
+            print(f"  {m:<8}  {r['n_certified']:>4}/{r['n_total']:<4}"
+                  f"  {r['avg_max_width']:>14.6f}")
+        if "poly" in results and "zono" in results:
+            delta = results["poly"]["avg_max_width"] - results["zono"]["avg_max_width"]
+            print("-" * 58)
+            print(f"  {'poly - zono':<8}  {'':>10}  {delta:>+14.6f}")
+        print("=" * 58)
+
+
+if __name__ == "__main__":
+    main()

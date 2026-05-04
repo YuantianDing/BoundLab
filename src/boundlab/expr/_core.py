@@ -9,7 +9,6 @@ import itertools
 import sys
 from typing import Callable, Literal, Union
 
-from numpy import indices
 import torch
 import enum
 

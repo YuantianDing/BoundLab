@@ -91,8 +91,8 @@ class PolyBoundGate(Expr):
             f"upper_lam={upper_lam.shape}, lower_lam={lower_lam.shape}"
         )
         self._child = child
-        self.upper_lam = upper_lam
-        self.lower_lam = lower_lam
+        self.lam_mean = EinsumOp.from_hardmard((upper_lam + lower_lam) / 2, len(child.shape))
+        self.lam_halfdiff = EinsumOp.from_hardmard((upper_lam - lower_lam) / 2, len(child.shape))
         self.reason = reason if reason is not None else str(inspect.stack()[1].function)
 
     @property
@@ -111,28 +111,15 @@ class PolyBoundGate(Expr):
         if direction == "==":
             return None
 
-        jac = weights.jacobian()
-        in_ndim = len(weights.input_shape)
-
-        jac_pos = jac.clamp(min=0)
-        jac_neg = jac.clamp(max=0)
+        einop: EinsumOp = weights.einsum_op()
 
         if direction == "<=":
-            new_jac = jac_pos * self.upper_lam + jac_neg * self.lower_lam
-            bias_sign = 1.0
+            new_op = einop @ self.lam_mean + einop.abs() @ self.lam_halfdiff
+            bias = einop.norm_input(p=1).jacobian()
         else:
-            new_jac = jac_pos * self.lower_lam + jac_neg * self.upper_lam
-            bias_sign = -1.0
+            new_op = einop @ self.lam_mean - einop.abs() @ self.lam_halfdiff
+            bias = -einop.norm_input(p=1).jacobian()
 
-        abs_jac = jac.abs()
-        if in_ndim > 0:
-            reduce_dims = tuple(range(jac.dim() - in_ndim, jac.dim()))
-            bias = abs_jac.sum(dim=reduce_dims)
-        else:
-            bias = abs_jac
-        bias = bias_sign * bias
-
-        new_op = EinsumOp.from_full(new_jac, in_ndim)
         return bias, [new_op]
 
     def to_string(self, child_str: str) -> str:
@@ -240,10 +227,8 @@ interpret["Tanh"] = interpret["tanh"]
 
 # Softmax
 from .softmax import softmax_handler
-from .softmax2 import softmax2_handler
 from .bilinear import matmul_handler, mul_handler
 interpret["Softmax"] = lambda X, axis=-1: softmax_handler(X, dim=axis)
-interpret["Softmax2"] = softmax2_handler
 interpret["MatMul"] = matmul_handler
 interpret["Mul"] = mul_handler
 
@@ -257,7 +242,6 @@ __all__ = [
     "tanh_linearizer",
     "square_linearizer",
     "softmax_handler",
-    "softmax2_handler",
     "matmul_handler",
     "mul_handler",
 ]

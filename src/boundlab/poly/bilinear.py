@@ -1,39 +1,45 @@
-"""Bilinear matmul handler for poly abstract interpretation."""
+"""Bilinear operation handlers for polytope abstract interpretation."""
 
 from __future__ import annotations
+
+from typing import Union
 
 import torch
 
 from boundlab.expr._affine import ConstVal
 from boundlab.expr._core import Expr
 from boundlab.expr._var import LpEpsilon
-from .square import square_linearizer
-
-
-def _square_expr(x: Expr) -> Expr:
-    from . import _bounds_to_expr
-
-    ub, lb = x.ublb()
-    return _bounds_to_expr(x, square_linearizer(ub, lb), reason=square_linearizer.__name__)
 
 
 def bilinear_elementwise(A: Expr, B: Expr) -> Expr:
-    """Linearize elementwise product using (x+y)^2/4 - (x-y)^2/4."""
+    """Linearize element-wise product of two symbolic expressions."""
     assert A.shape == B.shape, \
         f"Shapes must match for element-wise product: {A.shape} vs {B.shape}"
-    return 0.25 * (_square_expr(A + B) - _square_expr(A - B))
+
+    Ac, As = A.split_const()
+    Bc, Bs = B.split_const()
+
+    result = Ac * Bs + As * Bc + Ac * Bc
+
+    if As.is_symmetric_to_0():
+        Ahw = As.ub()
+    else:
+        A_ub, A_lb = As.ublb()
+        Ahw = (A_ub - A_lb) / 2.0
+
+    if Bs.is_symmetric_to_0():
+        Bhw = Bs.ub()
+    else:
+        B_ub, B_lb = Bs.ublb()
+        Bhw = (B_ub - B_lb) / 2.0
+
+    error_bound = Ahw * Bhw
+    new_eps = LpEpsilon(error_bound.shape)
+    return result + error_bound * new_eps
 
 
 def square_matmul(A: Expr, B: Expr) -> Expr:
-    """Linearize ``A @ B`` using the optimal-λ square-split bound.
-
-    For each (m, k, n) position, uses the identity
-    ``As[m,k] * Bs[k,n] = ((λAs + λ⁻¹Bs)² - (λAs - λ⁻¹Bs)²) / 4``
-    with ``λ = sqrt(|Au| / |Bu|)`` to produce a tighter bound than the
-    naive McCormick ``|Au| @ |Bu|``. Unlike the zono version, symmetry
-    around zero is not assumed; ``max(|ub|, |lb|)² / 4`` is used so the
-    formula remains valid for asymmetric expressions.
-    """
+    """Linearize ``A @ B`` using a square-split bilinear relaxation."""
     assert len(A.shape) >= 2 and len(B.shape) >= 2, \
         f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
     assert A.shape[:-2] == B.shape[:-2], \
@@ -41,47 +47,61 @@ def square_matmul(A: Expr, B: Expr) -> Expr:
     assert A.shape[-1] == B.shape[-2], \
         f"Inner dims must match: {A.shape} @ {B.shape}"
 
-    Au, Al = A.ublb()
-    Bu, Bl = B.ublb()
-    Ac = (Au + Al) / 2
-    As = (Au - Al) / 2
-    
-    result = Ac @ B + As @ Bc + Ac @ Bc
+    Ac, As = A.split_const()
+    Bc, Bs = B.split_const()
 
-    m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
-    Au_abs = torch.maximum(As.ub().abs(), As.lb().abs())  # (..., m, k)
-    Bu_abs = torch.maximum(Bs.ub().abs(), Bs.lb().abs())  # (..., k, n)
+    result = Ac @ Bs + As @ Bc + Ac @ Bc
 
-    # Naive element-wise absolute bound, then sum over k.
-    Au_exp = Au_abs.unsqueeze(-1).expand(*Au_abs.shape, n)       # (..., m, k, n)
-    Bu_exp = Bu_abs.unsqueeze(-3).expand(*Bu_abs.shape[:-2], m, k, n)  # (..., m, k, n)
-    U = (Au_exp * Bu_exp).sum(dim=-2)  # (..., m, n)
-    L = -U
+    if As.is_symmetric_to_0() and Bs.is_symmetric_to_0():
+        m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
+        Au = As.ub()
+        Bu = Bs.ub()
+        U = Au @ Bu
+        L = -U
 
-    # Expand symbolic parts to (..., m, k, n).
-    As_exp = As.unsqueeze(-1).expand(*As.shape, n)
-    Bs_exp = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n)
+        Au = Au.unsqueeze(-1).expand(*Au.shape, n)
+        Bu = Bu.unsqueeze(-3).expand(*Bu.shape[:-2], m, k, n)
+        As = As.unsqueeze(-1).expand(*As.shape, n)
+        Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n)
 
-    a = torch.sqrt(Au_exp)
-    b = torch.sqrt(Bu_exp)
-    lama = torch.nan_to_num(a / b, nan=1.0, posinf=1.0)
-    lamb = torch.nan_to_num(b / a, nan=1.0, posinf=1.0)
+        a = torch.sqrt(Au)
+        b = torch.sqrt(Bu)
+        lama = a / b
+        lamb = b / a
+        Pos = torch.nan_to_num((lama * As + lamb * Bs).ub() ** 2 / 4, nan=1e10, posinf=1e10, neginf=1e10)
+        Neg = torch.nan_to_num(-(lama * As - lamb * Bs).ub() ** 2 / 4, nan=-1e10, posinf=-1e10, neginf=-1e10)
+        U = torch.minimum(Pos.sum(dim=-2), U)
+        L = torch.maximum(Neg.sum(dim=-2), L)
+    else:
+        m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
+        Au, Al = A.ublb()
+        Bu, Bl = B.ublb()
+        Ac = (Au + Al) / 2
+        As = A - Ac
+        Bc = (Bu + Bl) / 2
+        Bs = B - Bc
 
-    ep = lama * As_exp + lamb * Bs_exp
-    em = lama * As_exp - lamb * Bs_exp
+        result = Ac @ Bc + As @ Bc + Ac @ Bs
+        Asu = (Au - Al) / 2
+        Bsu = (Bu - Bl) / 2
+        U = Asu @ Bsu
+        L = -U
 
-    # ub(x²/4) = max(|lb(x)|, |ub(x)|)²/4  (needed since ep/em may not be symmetric)
-    Pos = torch.nan_to_num(
-        torch.maximum(ep.ub().abs(), ep.lb().abs()) ** 2 / 4,
-        nan=1e10, posinf=1e10, neginf=1e10,
-    )
-    Neg = torch.nan_to_num(
-        -torch.maximum(em.ub().abs(), em.lb().abs()) ** 2 / 4,
-        nan=-1e10, posinf=-1e10, neginf=-1e10,
-    )
+        Asu = Asu.unsqueeze(-1).expand(*Asu.shape, n)
+        Bsu = Bsu.unsqueeze(-3).expand(*Bsu.shape[:-2], m, k, n)
+        As = As.unsqueeze(-1).expand(*As.shape, n)
+        Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n)
 
-    U = torch.minimum(Pos.sum(dim=-2), U)
-    L = torch.maximum(Neg.sum(dim=-2), L)
+        a = torch.sqrt(Asu)
+        b = torch.sqrt(Bsu)
+        lama = a / b
+        lamb = b / a
+        PosU, PosL = (lama * As + lamb * Bs).ublb()
+        NegU, NegL = (lama * As - lamb * Bs).ublb()
+        Pos = torch.nan_to_num(torch.maximum(PosU ** 2, PosL ** 2) / 4, nan=1e10, posinf=1e10, neginf=1e10)
+        Neg = torch.nan_to_num(-torch.maximum(NegU ** 2, NegL ** 2) / 4, nan=-1e10, posinf=-1e10, neginf=-1e10)
+        U = torch.minimum(Pos.sum(dim=-2), U)
+        L = torch.maximum(Neg.sum(dim=-2), L)
 
     result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(result.shape)
     return result
@@ -93,6 +113,7 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
 
 
 def matmul_handler(A, B):
+    """Dispatcher implementation for ``torch.matmul``."""
     if isinstance(A, Expr) and _is_const(B):
         return A @ B
     if _is_const(A) and isinstance(B, Expr):
@@ -101,10 +122,11 @@ def matmul_handler(A, B):
         return torch.matmul(A, B)
     if isinstance(A, Expr) and isinstance(B, Expr):
         return bilinear_matmul(A, B)
-    return A @ B
+    return NotImplemented
 
 
 def mul_handler(A, B):
+    """Dispatcher implementation for element-wise multiplication."""
     if isinstance(A, Expr) and _is_const(B):
         return _mul_expr_const(A, B)
     if _is_const(A) and isinstance(B, Expr):
@@ -113,7 +135,7 @@ def mul_handler(A, B):
         return torch.mul(A, B)
     if isinstance(A, Expr) and isinstance(B, Expr):
         return bilinear_elementwise(A, B)
-    return A * B
+    return NotImplemented
 
 
 def _mul_expr_const(x: Expr, c):
@@ -134,5 +156,5 @@ def _mul_expr_const(x: Expr, c):
     return x * c
 
 
-def _is_const(tensor) -> bool:
+def _is_const(tensor: Union[torch.Tensor, Expr, int]) -> bool:
     return isinstance(tensor, torch.Tensor) or isinstance(tensor, ConstVal) or isinstance(tensor, (int, float))

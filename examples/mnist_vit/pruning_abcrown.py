@@ -153,26 +153,19 @@ class BatchedMaskedModel(nn.Module):
         k = m.attn.to_k(xn).reshape(B, N, h, d).permute(0, 2, 1, 3)
         v = m.attn.to_v(xn).reshape(B, N, h, d).permute(0, 2, 1, 3)
         scores = (q @ k.transpose(-2, -1)) * m.scale
-        # Use exp/sum instead of softmax: avoids BoundReduceMax which CROWN
-        # cannot propagate backward through when indices are perturbed.
+        # exp/sum instead of softmax: avoids BoundReduceMax, which blocks CROWN backward.
         e = scores.exp()
         attn_w = e / e.sum(dim=-1, keepdim=True)
         out = (attn_w @ v).permute(0, 2, 1, 3).reshape(B, N, h * d)
         out = m.attn.to_out(out)
         x = residual + out
         x = m.ff_block(x)
-        # narrow+squeeze avoids a Gather ONNX node that onnx2pytorch can't trace
         x = x.mean(dim=1) if m.pool == "mean" else x.narrow(1, 0, 1).squeeze(1)
         return m.mlp_head(x)
 
 
 def _autolirpa_get_bounds(bm: nn.Module, center: Tensor, eps: float) -> tuple[Tensor, Tensor]:
-    """Compute per-class (lb, ub) via auto_LiRPA: CROWN with IBP fallback.
-
-    CROWN fails on attention models because BoundReduceMax (from softmax numerical
-    stability decomposition) doesn't implement bound_backward for perturbed indexes.
-    IBP is looser but always succeeds.
-    """
+    """Compute per-class (lb, ub) via auto_LiRPA CROWN (IBP fallback for safety)."""
     abcrown_script = find_abcrown_script()
     if abcrown_script is not None:
         verifier_dir = str(abcrown_script.parent)
@@ -190,6 +183,22 @@ def _autolirpa_get_bounds(bm: nn.Module, center: Tensor, eps: float) -> tuple[Te
     return lb.squeeze(0).detach(), ub.squeeze(0).detach()
 
 
+class DiffBatchedMaskedModel(nn.Module):
+    """f_full(x) - f_pruned(x) as a single network with a shared input.
+
+    Running CROWN on this directly preserves input correlation, giving the
+    same structural advantage as certify_zono_sub (shared noise symbol).
+    """
+
+    def __init__(self, full: BatchedMaskedModel, pruned: BatchedMaskedModel):
+        super().__init__()
+        self.full = full
+        self.pruned = pruned
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.full(x) - self.pruned(x)
+
+
 def certify_abcrown(
     bm_full: BatchedMaskedModel,
     bm_pruned: BatchedMaskedModel,
@@ -197,11 +206,9 @@ def certify_abcrown(
     eps: float,
     num_classes: int = 10,
 ) -> tuple[Tensor, Tensor, dict]:
-    """Bound difference via auto_LiRPA: independent bounds on each model, then subtract."""
-    lb1, ub1 = _autolirpa_get_bounds(bm_full, center, eps)
-    lb2, ub2 = _autolirpa_get_bounds(bm_pruned, center, eps)
-    d_ub = ub1 - lb2
-    d_lb = lb1 - ub2
+    """Bound difference via auto_LiRPA CROWN on the merged diff network."""
+    diff_bm = DiffBatchedMaskedModel(bm_full, bm_pruned)
+    d_lb, d_ub = _autolirpa_get_bounds(diff_bm, center, eps)
     return d_ub, d_lb, {}
 
 

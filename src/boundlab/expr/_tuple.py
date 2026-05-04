@@ -7,7 +7,6 @@ the expression framework.
 from copy import copy
 from typing import Callable, Literal, Union
 
-from numpy import indices
 import torch
 
 from boundlab.expr._core import _EXPR_ID_COUNTER, Expr, ExprFlags
