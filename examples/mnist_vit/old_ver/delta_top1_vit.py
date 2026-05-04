@@ -20,7 +20,6 @@ from itertools import combinations
 from pathlib import Path
 
 import torch
-from torch import nn, Tensor
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -38,9 +37,9 @@ from boundlab.diff.delta_top1 import (
 )
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
-from certify_pruned_diff_v2 import MaskedModel
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned_diff_v2 import MaskedModel
 
 import warnings
 warnings.filterwarnings("ignore")

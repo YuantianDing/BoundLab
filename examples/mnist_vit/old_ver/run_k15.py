@@ -27,9 +27,9 @@ from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
-from certify_pruned_diff_v2 import MaskedModel, load_test_samples
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned_diff_v2 import MaskedModel, load_test_samples
 
 
 class _Quiet:
@@ -102,7 +102,7 @@ with _Quiet():
     mask_full = torch.ones(17, 64)
     gm_full = onnx_export(MaskedModel(vit, mask_full).eval(), ([17, 64],))
 
-samples = load_test_samples(N, "./mnist_data", 0)
+samples = load_test_samples(N, "../mnist_data", 0)
 print("Ready.\n", flush=True)
 
 for eps in EPS_LIST:

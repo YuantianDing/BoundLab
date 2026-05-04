@@ -52,9 +52,9 @@ from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.zono3 import interpret as diff_interpret
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
-from certify_pruned_diff_v2 import MaskedModel, load_test_samples
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned_diff_v2 import MaskedModel, load_test_samples
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +351,7 @@ def main():
         )
         gm_tail = onnx_export(PostAttentionStage(vit).eval(), ([17, 64],))
 
-    samples = load_test_samples(N, "./mnist_data", 0)
+    samples = load_test_samples(N, "../mnist_data", 0)
     print(f"Ready. {len(samples)} samples loaded.\n", flush=True)
 
     grand_t0 = time.perf_counter()

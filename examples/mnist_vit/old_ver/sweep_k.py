@@ -26,11 +26,11 @@ import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
-from certify_pruned_diff_v2 import load_test_samples
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned_diff_v2 import load_test_samples
 
-from mnist_vit_diff_benchmark import (
+from BoundLab.examples.mnist_vit.old_ver.mnist_vit_diff_benchmark import (
     eps_sweep,
     certifiable_eps_search,
     print_sweep_report,

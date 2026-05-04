@@ -1,16 +1,17 @@
-"""Differential verification: full model vs pruned model.
+"""Differential verification of pruned ViT using zonotope methods.
 
-Bounds ||model(x) - model_pruned(x)|| under L∞ perturbation using three
-methods (Int-Sub, Zono-Sub, Differential) and compares tightness against
-Monte Carlo ground truth.
+Bounds ||model(x) - model_pruned(x)|| under L∞ perturbation using:
+  - zono/interval: Independent interval bounds, subtract
+  - zono:          Shared zonotope, subtract (noise cancels)
+  - zono3:         Differential zonotope via diff_net (tightest)
+  - zono3/gradlin: Differential zonotope with gradient linearization
 
-Both models have identical ONNX graph structure (mask Mul node baked in),
-enabling diff_net to merge and exploit shared computation.
+Compares tightness against Monte Carlo ground truth.
 
 Usage::
 
-    python certify_pruned_diff.py --checkpoint mnist_transformer.pt --eps 0.002 --K 8 --n-samples 5
-    python certify_pruned_diff.py --eps 0.004 --K 4 --n-samples 10
+    python pruning_zono.py --checkpoint mnist_transformer.pt --eps 0.002 --K 8 --n-samples 5
+    python pruning_zono.py --eps 0.004 --K 4 --n-samples 10
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ import sys
 import time
 from pathlib import Path
 
-import onnx_ir
 import torch
 from torch import nn, Tensor
 
@@ -33,12 +33,12 @@ import boundlab.prop as prop
 import boundlab.zono as zono
 from boundlab.diff.expr import DiffExpr3
 from boundlab.diff.net import diff_net
-from boundlab.diff.zono3 import interpret as diff_interpret
+from boundlab.diff import zono3, zonohex
 from boundlab.interp.onnx import onnx_export
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage
-from certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
+from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
+from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
 
 
 # ---------------------------------------------------------------------------
@@ -85,18 +85,78 @@ class MaskedModel(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Three verification methods
+# Bound-width breakdown helpers
+# ---------------------------------------------------------------------------
+
+def _bound_width_reasons(e: expr.Expr) -> dict[str, Tensor]:
+    return {
+        reason: value.detach()
+        for reason, value in e.bound_width_reasons_breakdown().items()
+    }
+
+
+def _merge_reason_breakdowns(
+    merged: dict[str, Tensor] | None,
+    current: dict[str, Tensor],
+) -> dict[str, Tensor]:
+    if merged is None:
+        return {reason: value.clone() for reason, value in current.items()}
+    result = {reason: value.clone() for reason, value in merged.items()}
+    zeros = None
+    for value in list(result.values()) + list(current.values()):
+        zeros = torch.zeros_like(value)
+        break
+    if zeros is None:
+        return result
+    for reason in set(result) | set(current):
+        lhs = result.get(reason, zeros)
+        rhs = current.get(reason, zeros)
+        result[reason] = torch.maximum(lhs, rhs)
+    return result
+
+
+def _format_reason_breakdown(breakdown: dict[str, Tensor], width: float) -> str:
+    if not breakdown:
+        return "(none)"
+    parts = []
+    for reason, contribution in sorted(
+        breakdown.items(),
+        key=lambda item: item[1].mean().item(),
+        reverse=True,
+    ):
+        mean = contribution.mean().item()
+        pct = 100.0 * mean / width if width > 0 else 0.0
+        parts.append(f"{reason}={mean:.4f} ({pct:.1f}%)")
+    return ", ".join(parts)
+
+
+def _mask_cache_key(mask: Tensor) -> bytes:
+    """Stable cache key for a binary mask tensor."""
+    return mask.detach().to(dtype=torch.uint8).contiguous().cpu().numpy().tobytes()
+
+
+def _export_masked_onnx(vit, mask: Tensor, cache: dict[bytes, object]):
+    """Export and cache a MaskedModel ONNX graph keyed by the binary mask."""
+    key = _mask_cache_key(mask)
+    if key not in cache:
+        cache[key] = onnx_export(MaskedModel(vit, mask).eval(), ([17, 64],))
+    return cache[key]
+
+
+# ---------------------------------------------------------------------------
+# Zonotope certification methods
 # ---------------------------------------------------------------------------
 
 def certify_int_sub(gm1, gm2, center, eps):
     """Independent interval bounds, then subtract."""
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     x1 = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
-    ub1, lb1 = zono.interpret(gm1)(x1).ublb()
+    y1 = zono.interpret(gm1)(x1)
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     x2 = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
-    ub2, lb2 = zono.interpret(gm2)(x2).ublb()
-    return ub1 - lb2, lb1 - ub2
+    y2 = zono.interpret(gm2)(x2)
+    d = y1 - y2
+    return (*d.ublb(), _bound_width_reasons(d))
 
 
 def certify_zono_sub(gm1, gm2, center, eps):
@@ -106,32 +166,50 @@ def certify_zono_sub(gm1, gm2, center, eps):
     op1 = zono.interpret(gm1)
     op2 = zono.interpret(gm2)
     d = op1(x) - op2(x)
-    return d.ublb()
+    return (*d.ublb(), _bound_width_reasons(d))
 
 
-def certify_differential(gm1, gm2, center, eps):
+def certify_zono3(gm1, gm2, center, eps):
     """Differential verification via diff_net (tightest)."""
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     merged = diff_net(gm1, gm2)
-    op = diff_interpret(merged)
+    op = zono3.interpret(merged)
     x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
     out = op(x)
     if isinstance(out, DiffExpr3):
-        return out.diff.ublb()
+        d = out.diff
     else:
-        return (out.x - out.y).ublb()
+        d = out.x - out.y
+    return (*d.ublb(), _bound_width_reasons(d))
 
 
-def monte_carlo(model1, model2, center, eps, n=1000):
-    """MC ground truth for max |model1(x) - model2(x)|."""
-    mc_max = 0.0
-    with torch.no_grad():
-        for t in range(n):
-            torch.manual_seed(t)
-            delta = (2 * torch.rand_like(center) - 1) * eps
-            diff = model1(center + delta) - model2(center + delta)
-            mc_max = max(mc_max, diff.abs().max().item())
-    return mc_max
+def certify_zono3_gradlin(gm1, gm2, center, eps):
+    """Differential verification via diff_net with gradient linearization."""
+    prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
+    merged = diff_net(gm1, gm2)
+    op = zono3.interpret_gradlin(merged)
+    x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
+    out = op(x)
+    if isinstance(out, DiffExpr3):
+        d = out.diff
+    else:
+        d = out.x - out.y
+    return (*d.ublb(), _bound_width_reasons(d))
+
+
+def certify_zonohex(gm1, gm2, center, eps):
+    """Differential verification via zonohex."""
+    prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
+    merged = diff_net(gm1, gm2)
+    op = zonohex.interpret(merged, verbose=True)
+    x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
+    out = op(x)
+    print("result:", repr(out))
+    if isinstance(out, DiffExpr3):
+        d = out.diff
+    else:
+        d = out.x - out.y
+    return (*d.ublb(), _bound_width_reasons(d))
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +236,7 @@ def load_test_samples(n, data_dir, seed):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Differential verification: full vs pruned ViT.",
+        description="Differential verification (zonotope): full vs pruned ViT.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument("--checkpoint", default="mnist_transformer.pt")
@@ -168,16 +246,21 @@ def main():
     ap.add_argument("--mc-samples", type=int, default=1000, dest="mc_samples")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--data-dir", default=os.path.join(os.getcwd(), "./mnist_data"), dest="data_dir")
-    ap.add_argument("--no-normalize", dest="normalize",
-                    action="store_false", default=True)
+    ap.add_argument("--no-normalize", dest="normalize", action="store_false", default=True)
+    ap.add_argument("--cuda", action="store_true",
+                    help="Run concrete inference and Monte Carlo sampling on CUDA if available.")
     ap.add_argument("--mean", type=float, default=0.1307)
     ap.add_argument("--std", type=float, default=0.3081)
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
-    vit = build_mnist_vit(args.checkpoint)
+    vit = build_mnist_vit(args.checkpoint).eval()
+    run_device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
+    torch.set_default_device(run_device)
+    if args.cuda and run_device.type != "cuda":
+        print("[warn] CUDA requested but not available; falling back to CPU.")
+    vit_run = build_mnist_vit(args.checkpoint).to(run_device).eval() if run_device.type == "cuda" else vit
 
-    # Build patchify + scoring interpreters
     patchify = PatchifyStage(vit, args.normalize, args.mean, args.std).eval()
     gm_patch = onnx_export(patchify, ([1, 28, 28],))
     op_patch = zono.interpret(gm_patch)
@@ -185,44 +268,49 @@ def main():
     scoring = ScoringModel(vit).eval()
     gm_score = onnx_export(scoring, ([17, 64],))
     op_score = zono.interpret(gm_score)
+    scoring_run = ScoringModel(vit_run).eval()
 
     samples = load_test_samples(args.n_samples, args.data_dir, args.seed)
 
     methods = [
-        ("Int-Sub", certify_int_sub),
-        ("Zono-Sub", certify_zono_sub),
-        ("Differential", certify_differential),
+        ("zonohex", certify_zonohex),
+        ("zono/interval", certify_int_sub),
+        ("zono", certify_zono_sub),
+        ("zono3", certify_zono3),
+        ("zono3/gradlin", certify_zono3_gradlin),
     ]
 
     print("=" * 75)
-    print(f"  Differential Verification: full vs top-{args.K} pruned ViT")
+    print(f"  Differential Verification (Zono): full vs top-{args.K} pruned ViT")
     print("=" * 75)
     print(f"  eps={args.eps}, K={args.K}, MC={args.mc_samples}")
+    print(f"  device={run_device}")
     print()
 
     all_results = {name: [] for name, _ in methods}
     all_mc = []
+    onnx_cache: dict[bytes, object] = {}
+    mask_full = torch.ones(17, 64)
+    mask_full_run = mask_full.to(run_device)
+    gm_full = _export_masked_onnx(vit, mask_full, onnx_cache)
+    model_full_mc = MaskedModel(vit_run, mask_full_run).eval()
 
     for i, (img, label) in enumerate(samples):
-        # Get embedding center
         with torch.no_grad():
+            img_run = img.to(run_device)
             if args.normalize:
-                x = (img - args.mean) / args.std
+                x = (img_run - args.mean) / args.std
             else:
-                x = img
-            x = vit.to_patch_embedding(x)
-            center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
+                x = img_run
+            x = vit_run.to_patch_embedding(x)
+            center = torch.cat((vit_run.cls_token[0], x), dim=0) + vit_run.pos_embedding[0]
 
-        # Get importance score bounds for top-K classification
         full_zono = build_zonotope_no_cat(vit, img, args.eps, op_patch)
         prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
         score_zono = op_score(full_zono)
         ub_sc, lb_sc = score_zono.ublb()
 
-        # Classify tokens using ONLY zonotope bounds — no concrete ranking
-        definite_keep, definite_prune, uncertain = classify_topk(
-            ub_sc, lb_sc, args.K
-        )
+        definite_keep, definite_prune, uncertain = classify_topk(ub_sc, lb_sc, args.K)
 
         K_remaining = args.K - len(definite_keep)
         if K_remaining < 0:
@@ -243,25 +331,19 @@ def main():
 
         n_cases = len(cases)
 
-        # Full model graph (mask=ones, same for all cases)
-        mask_full = torch.ones(17, 64)
-        gm_full = onnx_export(MaskedModel(vit, mask_full).eval(), ([17, 64],))
-        onnx_ir.save(gm_full, f"full_{i}.onnx")
-
-        # MC ground truth: use TRUE top-K on each perturbed input
         mc_max = 0.0
-        model_full_mc = MaskedModel(vit, mask_full).eval()
         with torch.no_grad():
             for t in range(args.mc_samples):
                 torch.manual_seed(t)
                 delta = (2 * torch.rand_like(center) - 1) * args.eps
                 xp = center + delta
-                sc = scoring(xp)
+                sc = scoring_run(xp)
                 _, topk = sc.topk(args.K)
                 kept_mc = set(topk.tolist())
-                mp = torch.zeros(17, 64); mp[0] = 1.0
+                mp = torch.zeros(17, 64, device=run_device)
+                mp[0] = 1.0
                 for p in kept_mc: mp[p + 1] = 1.0
-                model_pruned_mc = MaskedModel(vit, mp).eval()
+                model_pruned_mc = MaskedModel(vit_run, mp).eval()
                 diff = model_full_mc(xp) - model_pruned_mc(xp)
                 mc_max = max(mc_max, diff.abs().max().item())
         all_mc.append(mc_max)
@@ -270,43 +352,34 @@ def main():
               f"keep={len(definite_keep)} prune={len(definite_prune)} "
               f"unc={len(uncertain)} cases={n_cases}")
 
-        # For each method: case-split, union bounds across all pruning decisions
         for name, fn in methods:
             t0 = time.perf_counter()
             best_d_ub = None
             best_d_lb = None
-            try:
-                for case_kept in cases:
-                    mask_pruned = torch.zeros(17, 64)
-                    mask_pruned[0] = 1.0
-                    for p in case_kept:
-                        mask_pruned[p + 1] = 1.0
-                    gm_pruned = onnx_export(
-                        MaskedModel(vit, mask_pruned).eval(), ([17, 64],))
-
-                    d_ub, d_lb = fn(gm_full, gm_pruned, center, args.eps)
-
-                    if best_d_ub is None:
-                        best_d_ub = d_ub.clone()
-                        best_d_lb = d_lb.clone()
-                    else:
-                        best_d_ub = torch.maximum(best_d_ub, d_ub)
-                        best_d_lb = torch.minimum(best_d_lb, d_lb)
-
-                elapsed = time.perf_counter() - t0
-                bound = max(best_d_ub.abs().max().item(),
-                            best_d_lb.abs().max().item())
-                width = (best_d_ub - best_d_lb).mean().item()
-                all_results[name].append((bound, elapsed, width))
-                print(f"    {name:<15} bound={bound:.4f}  "
-                      f"width={width:.4f}  time={elapsed:.1f}s")
-            except Exception as e:
-                elapsed = time.perf_counter() - t0
-                print(f"    {name:<15} FAILED: {e} ({elapsed:.1f}s)")
+            best_breakdown = None
+            for case_kept in cases:
+                mask_pruned = torch.zeros(17, 64)
+                mask_pruned[0] = 1.0
+                for p in case_kept:
+                    mask_pruned[p + 1] = 1.0
+                gm_pruned = _export_masked_onnx(vit, mask_pruned, onnx_cache)
+                d_ub, d_lb, breakdown = fn(gm_full, gm_pruned, center, args.eps)
+                if best_d_ub is None:
+                    best_d_ub = d_ub.clone()
+                    best_d_lb = d_lb.clone()
+                else:
+                    best_d_ub = torch.maximum(best_d_ub, d_ub)
+                    best_d_lb = torch.minimum(best_d_lb, d_lb)
+                best_breakdown = _merge_reason_breakdowns(best_breakdown, breakdown)
+            elapsed = time.perf_counter() - t0
+            bound = max(best_d_ub.abs().max().item(), best_d_lb.abs().max().item())
+            width = (best_d_ub - best_d_lb).mean().item()
+            all_results[name].append((bound, elapsed, width))
+            print(f"    {name:<15} bound={bound:.4f}  width={width:.4f}  time={elapsed:.1f}s")
+            print(f"    {'reasons':<15} {_format_reason_breakdown(best_breakdown or {}, width)}")
 
         print(f"    {'MC':<15} max|diff|={mc_max:.6f}")
 
-    # Summary
     print()
     print("=" * 75)
     print(f"  SUMMARY: {len(samples)} samples, eps={args.eps}, K={args.K}")
@@ -318,7 +391,7 @@ def main():
 
     int_width = None
     for name, _ in methods:
-        r = all_results[name]
+        r = all_results.get(name, [])
         if r:
             avg_b = sum(b for b, _, _ in r) / len(r)
             avg_w = sum(w for _, _, w in r) / len(r)
@@ -329,6 +402,8 @@ def main():
             else:
                 vs = f"{(1 - avg_w / int_width) * 100:>+.1f}%"
             print(f"  {name:<15} {avg_b:>10.4f} {avg_w:>10.4f} {avg_t:>8.1f}s {vs:>10}")
+        else:
+            print(f"  {name:<15} {'(no data)':>10}")
 
 
 if __name__ == "__main__":
