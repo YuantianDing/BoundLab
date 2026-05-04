@@ -66,7 +66,7 @@ def build_mnist_vit_3layer(checkpoint_path: str = "mnist_transformer_3.pt"):
     )
     if not os.path.isabs(checkpoint_path):
         checkpoint_path = os.path.join(os.path.dirname(__file__), checkpoint_path)
-    sd = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    sd = torch.load(checkpoint_path, map_location="cuda", weights_only=True)
     model.load_state_dict(sd, strict=True)
     return model.eval()
 
@@ -172,7 +172,7 @@ def run(
         class NormVit(torch.nn.Module):
             def __init__(s):
                 super().__init__()
-                s.m, s.s, s.vit = torch.tensor(mean), torch.tensor(std), vit
+                s.m, s.s, s.vit = torch.tensor(mean).cuda(), torch.tensor(std).cuda(), vit
             def forward(s, x):
                 return s.vit((x - s.m) / s.s)
         concrete = NormVit().eval()
@@ -204,6 +204,7 @@ def run(
     all_mc, all_zs, all_diff = [], [], []
 
     for i, (img, label) in enumerate(samples):
+        img = img.cuda()
         with torch.no_grad():
             pred = int(concrete(img).argmax().item())
             x_img = (img - mean) / std if normalize else img

@@ -206,6 +206,7 @@ def run(
     all_mc, all_zs, all_diff = [], [], []
 
     for i, (img, label) in enumerate(samples):
+        img = img.cuda()
         with torch.no_grad():
             pred = int(concrete(img).argmax().item())
 
