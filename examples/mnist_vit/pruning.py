@@ -223,10 +223,26 @@ class MaskedPostConcat(nn.Module):
             raw_scores = (q @ k.transpose(-2, -1)) * scale
 
             if layer_idx >= self.mask_from_layer:
-                # Masked softmax: pruned columns get zero attention
-                exp_scores = torch.exp(raw_scores)
-                exp_masked = exp_scores * col_mask
-                attn_w = exp_masked * torch.reciprocal(exp_masked.sum(dim=-1, keepdim=True))
+                # Masked softmax via DeepT decomposition (no bilinear product).
+                #
+                # masked_softmax(s)_k = col_mask[k] / Σ_j col_mask[j] * exp(s_j - s_k)
+                #
+                # Pairwise diff → exp → mask (Expr*const) → sum → reciprocal → mask (Expr*const)
+                # Every col_mask multiply is Expr × const, not Expr × Expr.
+
+                # Pairwise differences: diff[..., k, j] = s_j - s_k
+                diff = raw_scores.unsqueeze(-2) - raw_scores.unsqueeze(-1)  # (h, n, n, n)
+                exp_diff = torch.exp(diff)                                   # (h, n, n, n)
+
+                # Mask pruned keys in the sum (j dimension = last)
+                col_mask_j = col_mask.unsqueeze(-2)                          # (1, 1, 1, n)
+                exp_masked = exp_diff * col_mask_j                           # Expr * const
+
+                # Sum over j → denominator per (query, key)
+                sum_exp = exp_masked.sum(dim=-1)                             # (h, n, n)
+
+                # Reciprocal + mask pruned key outputs
+                attn_w = torch.reciprocal(sum_exp) * col_mask                # Expr * const
             else:
                 # Standard softmax: all tokens participate
                 attn_w = raw_scores.softmax(dim=-1)
