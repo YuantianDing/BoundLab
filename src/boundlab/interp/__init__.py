@@ -671,6 +671,7 @@ class Interpreter(Generic[E]):
         initializers = {
             init.name: self.dispatcher["Initializer"](
                 torch.from_numpy(init.const_value.numpy().copy())
+                .to(torch.get_default_device())
             )
             for init in model.graph.initializers.values()
         }

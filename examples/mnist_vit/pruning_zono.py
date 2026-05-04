@@ -298,16 +298,16 @@ def main():
     model_full_mc = MaskedModel(vit, mask_full_run).eval()
 
     for i, (img, label) in enumerate(samples):
+        img_run = img.to(TORCH_DEVICE)
         with torch.no_grad():
-            img_run = img.to(TORCH_DEVICE)
             if args.normalize:
                 x = (img_run - args.mean) / args.std
             else:
                 x = img_run
             x = vit.to_patch_embedding(x)
             center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
-
-        full_zono = build_zonotope_no_cat(vit, img, args.eps, op_patch)
+    
+        full_zono = build_zonotope_no_cat(vit, img_run, args.eps, op_patch)
         prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
         score_zono = op_score(full_zono)
         ub_sc, lb_sc = score_zono.ublb()
