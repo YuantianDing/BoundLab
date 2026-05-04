@@ -37,6 +37,7 @@ def _filtered_print(*args, **kwargs):
 builtins.print = _filtered_print
 
 import torch
+torch.set_default_device("cuda")
 from torch import Tensor
 
 _HERE = Path(__file__).resolve().parent
