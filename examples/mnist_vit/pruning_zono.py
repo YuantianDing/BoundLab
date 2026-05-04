@@ -225,11 +225,11 @@ def load_test_samples(n, data_dir, seed):
         ds = datasets.MNIST(
             data_dir, train=False, download=True, transform=transforms.ToTensor()
         )
-        g = torch.Generator().manual_seed(seed)
+        g = torch.Generator(TORCH_DEVICE).manual_seed(seed)
         indices = torch.randperm(len(ds), generator=g)[:n].tolist()
         return [(ds[i][0], int(ds[i][1])) for i in indices]
     except Exception:
-        g = torch.Generator().manual_seed(seed)
+        g = torch.Generator(TORCH_DEVICE).manual_seed(seed)
         return [(torch.rand(1, 28, 28, generator=g), -1) for _ in range(n)]
 
 
