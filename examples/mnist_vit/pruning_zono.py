@@ -256,6 +256,7 @@ def main():
     torch.manual_seed(args.seed)
     vit = build_mnist_vit(args.checkpoint).eval()
     run_device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
+    torch.set_default_device(run_device)
     if args.cuda and run_device.type != "cuda":
         print("[warn] CUDA requested but not available; falling back to CPU.")
     vit_run = build_mnist_vit(args.checkpoint).to(run_device).eval() if run_device.type == "cuda" else vit
