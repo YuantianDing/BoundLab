@@ -44,7 +44,7 @@ def _onnx_attr_value(attr) -> Any:
     elif t == ir.AttributeType.STRING:
         return attr.as_string()
     elif t == ir.AttributeType.TENSOR:
-        return torch.from_numpy(attr.as_tensor().numpy().copy())
+        return torch.from_numpy(attr.as_tensor().numpy().copy()).to(torch.get_default_device())
     elif t == ir.AttributeType.FLOATS:
         return list(attr.as_floats())
     elif t == ir.AttributeType.INTS:
@@ -108,17 +108,17 @@ def _onnx_constant(value=None, value_float=None, value_int=None, value_string=No
     """ONNX Constant node: wrap the tensor attribute as a torch.Tensor."""
 
     if value is not None:
-        return torch.Tensor(value) if value is not None else None
+        return torch.tensor(value).to(torch.get_default_device()) if value is not None else None
     elif value_float is not None:
-        return torch.tensor(value_float)
+        return torch.tensor(value_float).to(torch.get_default_device())
     elif value_int is not None:
-        return torch.tensor(value_int)
+        return torch.tensor(value_int).to(torch.get_default_device())
     elif value_string is not None:
         return value_string
     elif value_floats is not None:
-        return torch.tensor(value_floats)
+        return torch.tensor(value_floats).to(torch.get_default_device())
     elif value_ints is not None:
-        return torch.tensor(value_ints)
+        return torch.tensor(value_ints).to(torch.get_default_device())
     elif value_strings is not None:
         return value_strings
     else:
