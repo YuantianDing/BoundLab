@@ -1,36 +1,17 @@
 """Token pruning utilities for ViT verification.
 
-Reusable components for certifying top-K token pruning in Vision Transformers.
-Handles **both** the embedding mask (zeroing pruned token rows) and the
-softmax mask (zeroing pruned columns in the exponentiated attention scores).
+Provides a ``MaskedSoftmax`` custom ONNX op with efficient zonotope and
+differential handlers that follow the DeepT decomposition internally
+(pairwise diff → exp linearizer on concrete bounds → sum → reciprocal).
+No bilinear elementwise products — same memory profile as standard DeepT.
 
-Typical usage::
+Usage::
 
     from pruning import (
-        PatchifyStage, ScoringModel, MaskedPostConcat,
-        build_zonotope_no_cat, classify_topk, enumerate_pruning_cases,
-        build_emb_mask, certify_pruned_sample_diff,
+        MaskedPostConcat, build_emb_mask, build_full_emb_mask,
+        classify_topk, enumerate_pruning_cases,
+        certify_pruned_sample_diff,
     )
-
-    vit = build_mnist_vit("mnist_transformer.pt")
-    ...
-    result = certify_pruned_sample_diff(vit, img, eps, K, op_patch, op_score, 16, 64)
-
-Design notes
-------------
-* ``MaskedPostConcat`` takes a single **embedding mask** ``(N+1, D)`` and
-  derives a column mask ``(1, 1, N+1)`` from it inside ``forward()``.
-
-* The **softmax mask** works by multiplying ``exp(scores)`` by the 0/1
-  column mask before normalizing::
-
-      exp_scores = exp(Q @ K^T * scale)
-      exp_masked = exp_scores * col_mask   # pruned columns -> 0
-      attn       = exp_masked / sum(exp_masked, dim=-1)
-
-  This is exact (no ``exp(-50) ≈ 0`` approximation) and diff-friendly:
-  ``diff_net`` only pairs 0/1 mask values, and the ``exp × mask`` product
-  is a standard bilinear op handled by McCormick relaxation.
 """
 from __future__ import annotations
 
@@ -44,17 +25,20 @@ from torch import nn, Tensor
 import boundlab.expr as expr
 import boundlab.prop as prop
 import boundlab.zono as zono
+from boundlab import utils
 from boundlab.expr._affine import AffineSum, ConstVal
 from boundlab.expr._core import Expr
+from boundlab.expr._var import LpEpsilon
 from boundlab.interp import _onnx_broadcast
 from boundlab.interp.onnx import onnx_export
 from boundlab.linearop import PadOp
 from boundlab.zono.bilinear import bilinear_elementwise
+from boundlab.zono.exp import exp_linearizer
+from boundlab.zono.reciprocal import reciprocal_linearizer
 
 
 # ---------------------------------------------------------------------------
-# Register bilinear elementwise Mul for the standard zonotope interpreter.
-# Without this, Mul(Expr, Expr) fails — needed for exp(scores) * col_mask.
+# Register bilinear elementwise Mul (needed for attn_w @ V in diff path)
 # ---------------------------------------------------------------------------
 
 def _mul_handler(X, Y):
@@ -64,6 +48,215 @@ def _mul_handler(X, Y):
     return X * Y
 
 zono.interpret["Mul"] = _mul_handler
+
+
+# ---------------------------------------------------------------------------
+# Custom ONNX op: MaskedSoftmax
+# ---------------------------------------------------------------------------
+
+def masked_softmax_op(scores: Tensor, col_mask: Tensor) -> Tensor:
+    """Custom ONNX op for masked softmax.
+
+    At concrete runtime returns zeros (use ``use_custom_op=False`` for MC).
+    During ONNX export creates a ``boundlab::MaskedSoftmax`` node that the
+    zonotope and differential interpreters handle efficiently.
+
+    Args:
+        scores: Raw attention scores, shape ``(h, n, n)``.
+        col_mask: Column mask, shape ``(n,)``.  1 for kept, 0 for pruned.
+    """
+    return torch.onnx.ops.symbolic(
+        "boundlab::MaskedSoftmax",
+        (scores, col_mask),
+        dtype=scores.dtype,
+        shape=scores.shape,
+        version=1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Zonotope handler: follows softmax_handler with mask on concrete coefficients
+# ---------------------------------------------------------------------------
+
+def masked_softmax_zono_handler(x, col_mask) -> Expr:
+    """Efficient masked softmax for zonotope abstract interpretation.
+
+    Follows the standard ``softmax_handler`` pattern: pairwise diff,
+    exp linearizer on concrete bounds, sum, reciprocal.  The col_mask
+    is multiplied into the concrete coefficients before summing — no
+    bilinear Expr × Expr products.
+
+    DeepT decomposition:
+        masked_softmax(s)_k = col_mask[k] / Σ_j col_mask[j] * exp(s_j - s_k)
+    """
+    if isinstance(x, torch.Tensor):
+        x = ConstVal(x)
+    if not isinstance(x, Expr):
+        return NotImplemented
+
+    if isinstance(col_mask, Expr):
+        # col_mask should be a constant (from initializer)
+        col_mask = prop.center(col_mask)
+
+    # Pairwise diff: diff[..., i, j] = x_j - x_i  (last dim)
+    dim = len(x.shape) - 1
+    diff = -utils.pairwise_diff(x, dim)     # Expr, shape (..., n, n)
+    ub, lb = diff.ublb()                     # concrete bounds
+
+    # Exp linearizer on concrete bounds → (weights, bias, error)
+    expbounds = exp_linearizer(ub, lb)
+    weights = expbounds.input_weights[0]     # concrete tensor
+    bias = expbounds.bias
+    error = expbounds.error_coeffs.tensor
+
+    # Finite-value safety (same as standard handler)
+    finite_mask = (torch.isfinite(weights) & torch.isfinite(error)
+                   & torch.isfinite(bias) & (lb < 30) & (ub < 30))
+    weights = torch.where(finite_mask, weights, 0)
+    bias = torch.where(finite_mask, bias, 0)
+    error = torch.where(finite_mask, error, 0)
+
+    # --- MASK: multiply col_mask into concrete coefficients before sum ---
+    # col_mask shape (n,) broadcasts to last dim (j = sum index)
+    weights = weights * col_mask
+    bias = bias * col_mask
+    error = error * col_mask
+
+    # Sum over j (last dim) → shape (..., n)
+    sum_exp = ((weights * diff).sum(dim=-1)
+               + error.sum(dim=-1) * LpEpsilon(diff.shape[:-2], reason="masked_softmax_exp")
+               + bias.sum(dim=-1))
+    finite_mask = finite_mask.all(dim=-1)
+
+    # Tighten sum bounds (same as standard handler, but with mask)
+    sum_exp_ub, sum_exp_lb = sum_exp.ublb()
+    sum_exp_ub = torch.minimum(sum_exp_ub, (torch.exp(ub) * col_mask).sum(dim=-1))
+    sum_exp_lb = torch.maximum(sum_exp_lb, (torch.exp(lb) * col_mask).sum(dim=-1))
+
+    # Reciprocal linearizer
+    bounds = reciprocal_linearizer(sum_exp_ub, sum_exp_lb)
+    w = bounds.input_weights[0]
+    mu = bounds.bias
+    beta = bounds.error_coeffs.tensor
+
+    result = finite_mask * (w * sum_exp + mu
+                            + beta * LpEpsilon(sum_exp.shape, reason="masked_softmax_recip"))
+
+    # --- MASK: zero pruned key outputs ---
+    # result shape: (h, n, n) — col_mask must match exactly for Expr multiply
+    target_shape = list(result.shape)
+    col_mask_nd = col_mask.view(*([1] * (len(target_shape) - 1)), -1).expand(target_shape).contiguous()
+    result = result * col_mask_nd
+
+    return result
+
+
+# Register for standard zonotope interpreter
+zono.interpret["MaskedSoftmax"] = masked_softmax_zono_handler
+
+
+# ---------------------------------------------------------------------------
+# Differential handler: follows diff_softmax_handler with mask insertion
+# ---------------------------------------------------------------------------
+
+def diff_masked_softmax_handler(x, col_mask):
+    """Differential masked softmax handler.
+
+    Follows ``diff_softmax_handler`` pattern: pairwise diff → diff exp →
+    mask (const multiply, preserves correlations) → sum → diff reciprocal.
+    Same memory as standard diff softmax — the mask only adds linear ops.
+
+    Falls back to ``masked_softmax_zono_handler`` for plain Expr input.
+    """
+    from boundlab.diff.expr import DiffExpr2, DiffExpr3
+    from boundlab.diff.zono3 import interpret as _diff_interpret
+
+    # Extract concrete col_mask for each network
+    if isinstance(col_mask, (DiffExpr2, DiffExpr3)):
+        col_mask_x = prop.center(col_mask.x) if isinstance(col_mask.x, Expr) else col_mask.x
+        col_mask_y = prop.center(col_mask.y) if isinstance(col_mask.y, Expr) else col_mask.y
+    elif isinstance(col_mask, torch.Tensor):
+        col_mask_x = col_mask_y = col_mask
+    elif isinstance(col_mask, Expr):
+        col_mask_x = col_mask_y = prop.center(col_mask)
+    else:
+        return NotImplemented
+
+    delta_mask = col_mask_x - col_mask_y  # 1 on pruned-only, 0 elsewhere
+
+    # Plain Expr → efficient standard handler
+    if isinstance(x, Expr) and not isinstance(x, (DiffExpr2, DiffExpr3)):
+        return masked_softmax_zono_handler(x, col_mask_x)
+
+    if isinstance(x, DiffExpr2):
+        x = DiffExpr3(x.x, x.y, x.x - x.y)
+    if not isinstance(x, DiffExpr3):
+        return NotImplemented
+
+    exp_handler = _diff_interpret["Exp"]
+    reciprocal_handler = _diff_interpret["Reciprocal"]
+
+    dim = len(x.shape) - 1
+    n = x.shape[dim]
+
+    # --- 1. Pairwise diff (same as diff_softmax_handler) ---
+    x_i = x.unsqueeze(dim + 1)
+    x_j = x.unsqueeze(dim)
+    broadcast_shape = list(x.shape)
+    broadcast_shape.insert(dim + 1, n)
+    x_i_exp = x_i.expand(*broadcast_shape)
+    x_j_exp = x_j.expand(*broadcast_shape)
+    x_shifted = x_j_exp - x_i_exp  # DiffExpr3, shape (..., n, n)
+
+    # --- 2. Exp (diff handler preserves correlations) ---
+    exp_shifted = exp_handler(x_shifted)  # DiffExpr3
+
+    # --- 3. Mask on j-axis (const multiply — preserves correlations) ---
+    # j is at dim+1 in the expanded shape
+    j_axis = dim + 1
+    # Expand masks to match exp_shifted shape
+    mask_shape = [1] * len(exp_shifted.shape)
+    mask_shape[j_axis] = n
+    col_mask_x_j = col_mask_x.view(mask_shape).expand(exp_shifted.shape).contiguous()
+    col_mask_y_j = col_mask_y.view(mask_shape).expand(exp_shifted.shape).contiguous()
+    delta_mask_j = col_mask_x_j - col_mask_y_j
+
+    # Multiply: a*c - b*d = a*(c-d) + (a-b)*d → preserves exp diff correlation
+    exp_masked = DiffExpr3(
+        exp_shifted.x * col_mask_x_j,
+        exp_shifted.y * col_mask_y_j,
+        exp_shifted.x * delta_mask_j + exp_shifted.diff * col_mask_y_j,
+    )
+
+    # --- 4. Sum over j ---
+    sum_exp = DiffExpr3(
+        exp_masked.x.sum(dim=j_axis, keepdim=False),
+        exp_masked.y.sum(dim=j_axis, keepdim=False),
+        exp_masked.diff.sum(dim=j_axis, keepdim=False),
+    )
+
+    # --- 5. Reciprocal (diff handler preserves correlations) ---
+    result = reciprocal_handler(sum_exp)  # DiffExpr3
+
+    # --- 6. Mask on output (k-axis = last dim) ---
+    k_shape = [1] * len(result.shape)
+    k_shape[-1] = n
+    col_mask_x_k = col_mask_x.view(k_shape).expand(result.shape).contiguous()
+    col_mask_y_k = col_mask_y.view(k_shape).expand(result.shape).contiguous()
+    delta_mask_k = col_mask_x_k - col_mask_y_k
+
+    result_final = DiffExpr3(
+        result.x * col_mask_x_k,
+        result.y * col_mask_y_k,
+        result.x * delta_mask_k + result.diff * col_mask_y_k,
+    )
+
+    return result_final
+
+
+# Register for differential interpreter
+from boundlab.diff.zono3 import interpret as diff_interpret
+diff_interpret["MaskedSoftmax"] = diff_masked_softmax_handler
 
 
 # ---------------------------------------------------------------------------
@@ -91,34 +284,23 @@ class PatchifyStage(nn.Module):
 class ScoringModel(nn.Module):
     """``(N+1, D) embeddings -> (N,) importance`` per patch token.
 
-    Computes mean-over-heads CLS attention weights at a chosen layer.
-    If ``score_layer > 0``, the model first propagates through layers
-    ``0..score_layer-1`` (standard attention, no pruning) to obtain
-    the embeddings at that layer's input.
-
     Parameters
     ----------
     vit : ViT
-        The source ViT model.
+        Source model.
     score_layer : int
-        Which transformer layer's CLS attention to use for scoring.
-        Default 0 (first layer).
+        Which layer's CLS attention to use.  Propagates through layers
+        ``0..score_layer-1`` (unmasked) first.
     """
 
     def __init__(self, vit, score_layer: int = 0):
         super().__init__()
-        assert 0 <= score_layer < len(vit.transformer.layers), \
-            f"score_layer={score_layer} but model has {len(vit.transformer.layers)} layers"
-
+        assert 0 <= score_layer < len(vit.transformer.layers)
         self.score_layer = score_layer
-
-        # Store prefix layers (0..score_layer-1) for propagation
         self.prefix_layers = nn.ModuleList()
         for i in range(score_layer):
             attn_block, ff_block = vit.transformer.layers[i]
             self.prefix_layers.append(nn.ModuleList([attn_block, ff_block]))
-
-        # Scoring layer's attention components
         attn_block = vit.transformer.layers[score_layer][0]
         self.norm = attn_block.fn.norm
         self.attn = attn_block.fn.fn
@@ -127,23 +309,17 @@ class ScoringModel(nn.Module):
         self.scale = self.attn.scale
 
     def forward(self, x: Tensor) -> Tensor:
-        # Propagate through prefix layers (standard attention, no masking)
         for attn_block, ff_block in self.prefix_layers:
             x = attn_block(x)
             x = ff_block(x)
-
-        # Compute CLS attention at the scoring layer
         xn = self.norm(x)
         n = xn.shape[0]
         h, d = self.heads, self.dim_head
-
         Q = self.attn.to_q(xn).reshape(n, h, d).permute(1, 0, 2)
         K = self.attn.to_k(xn).reshape(n, h, d).permute(1, 0, 2)
-
         Q_cls = Q[:, 0:1, :]
         scores = (Q_cls @ K.transpose(-2, -1)) * self.scale
         attn_weights = scores.softmax(dim=-1)
-
         importance = attn_weights.mean(dim=0).squeeze(0)
         return importance[1:]
 
@@ -151,35 +327,29 @@ class ScoringModel(nn.Module):
 class MaskedPostConcat(nn.Module):
     """Transformer + head with pruning via masked softmax.
 
-    Handles any number of transformer layers.  Layers before
-    ``mask_from_layer`` run standard (unmasked) attention.  At
-    ``mask_from_layer``, the embedding mask is applied and masked
-    softmax begins::
-
-        exp_scores = exp(Q @ K^T * scale)
-        exp_masked = exp_scores * col_mask   # col_mask = emb_mask[:, 0]
-        attn_w     = exp_masked * reciprocal(sum(exp_masked))
-
     Parameters
     ----------
     vit : ViT
-        The source ViT model (any depth).
+        Source model (any depth).
     emb_mask : Tensor
-        Shape ``(N+1, D)``.  Ones for kept tokens, zeros for pruned.
-        CLS (row 0) must always be 1.
+        Shape ``(N+1, D)``.  Ones for kept, zeros for pruned.
     mask_from_layer : int
-        First layer at which pruning is applied.  Layers before this
-        run standard attention.  Default 0 (mask at all layers).
+        First layer at which pruning applies.
+    use_custom_op : bool
+        If True, uses the ``MaskedSoftmax`` custom ONNX op (for
+        verification — efficient handler, returns zeros at runtime).
+        If False, uses concrete pairwise-diff computation (for MC).
     """
 
-    def __init__(self, vit, emb_mask: Tensor, mask_from_layer: int = 0):
+    def __init__(self, vit, emb_mask: Tensor, mask_from_layer: int = 0,
+                 use_custom_op: bool = False):
         super().__init__()
         self.pool = vit.pool
         self.mlp_head = vit.mlp_head
         self.mask_from_layer = mask_from_layer
-        self.register_buffer("emb_mask", emb_mask)  # (N+1, D)
+        self.use_custom_op = use_custom_op
+        self.register_buffer("emb_mask", emb_mask)
 
-        # Store per-layer attention + FF components
         self.n_layers = len(vit.transformer.layers)
         self.attn_norms = nn.ModuleList()
         self.attns = nn.ModuleList()
@@ -187,7 +357,6 @@ class MaskedPostConcat(nn.Module):
         self.heads_list = []
         self.dim_head_list = []
         self.scale_list = []
-
         for attn_block, ff_block in vit.transformer.layers:
             self.attn_norms.append(attn_block.fn.norm)
             self.attns.append(attn_block.fn.fn)
@@ -197,13 +366,9 @@ class MaskedPostConcat(nn.Module):
             self.scale_list.append(attn_block.fn.fn.scale)
 
     def forward(self, x: Tensor) -> Tensor:
-        # --- Derive softmax column mask (used from mask_from_layer onward) ---
-        col_mask = self.emb_mask[:, 0]                        # (N+1,) 1/0
-        col_mask = col_mask.unsqueeze(0).unsqueeze(0)         # (1, 1, N+1)
+        col_mask = self.emb_mask[:, 0]  # (N+1,)
 
-        # --- Transformer layers ---
         for layer_idx in range(self.n_layers):
-            # Apply embedding mask at the pruning boundary
             if layer_idx == self.mask_from_layer:
                 x = x * self.emb_mask
 
@@ -215,46 +380,32 @@ class MaskedPostConcat(nn.Module):
 
             residual = x
             xn = self.attn_norms[layer_idx](x)
-
             q = attn.to_q(xn).reshape(n, h, d).permute(1, 0, 2)
             k = attn.to_k(xn).reshape(n, h, d).permute(1, 0, 2)
             v = attn.to_v(xn).reshape(n, h, d).permute(1, 0, 2)
-
             raw_scores = (q @ k.transpose(-2, -1)) * scale
 
             if layer_idx >= self.mask_from_layer:
-                # Masked softmax via DeepT decomposition (no bilinear product).
-                #
-                # masked_softmax(s)_k = col_mask[k] / Σ_j col_mask[j] * exp(s_j - s_k)
-                #
-                # Pairwise diff → exp → mask (Expr*const) → sum → reciprocal → mask (Expr*const)
-                # Every col_mask multiply is Expr × const, not Expr × Expr.
-
-                # Pairwise differences: diff[..., k, j] = s_j - s_k
-                diff = raw_scores.unsqueeze(-2) - raw_scores.unsqueeze(-1)  # (h, n, n, n)
-                exp_diff = torch.exp(diff)                                   # (h, n, n, n)
-
-                # Mask pruned keys in the sum (j dimension = last)
-                col_mask_j = col_mask.unsqueeze(-2)                          # (1, 1, 1, n)
-                exp_masked = exp_diff * col_mask_j                           # Expr * const
-
-                # Sum over j → denominator per (query, key)
-                sum_exp = exp_masked.sum(dim=-1)                             # (h, n, n)
-
-                # Reciprocal + mask pruned key outputs
-                attn_w = torch.reciprocal(sum_exp) * col_mask                # Expr * const
+                if self.use_custom_op:
+                    # Custom ONNX op → efficient handler during verification
+                    attn_w = masked_softmax_op(raw_scores, col_mask)
+                else:
+                    # Concrete computation for MC
+                    diff = raw_scores.unsqueeze(-2) - raw_scores.unsqueeze(-1)
+                    exp_diff = torch.exp(diff)
+                    col_mask_j = col_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-2)
+                    exp_masked = exp_diff * col_mask_j
+                    sum_exp = exp_masked.sum(dim=-1)
+                    col_mask_k = col_mask.unsqueeze(0).unsqueeze(0)
+                    attn_w = torch.reciprocal(sum_exp) * col_mask_k
             else:
-                # Standard softmax: all tokens participate
                 attn_w = raw_scores.softmax(dim=-1)
 
             out = (attn_w @ v).permute(1, 0, 2).reshape(n, h * d)
             out = attn.to_out(out)
             x = residual + out
-
-            # Feed-forward block
             x = self.ff_blocks[layer_idx](x)
 
-        # --- Pool + head ---
         x = x.mean(dim=0) if self.pool == "mean" else x[0]
         return self.mlp_head(x)
 
@@ -263,15 +414,8 @@ class MaskedPostConcat(nn.Module):
 # Mask construction
 # ---------------------------------------------------------------------------
 
-def build_emb_mask(
-    num_tokens: int,
-    dim: int,
-    kept_patches: set[int],
-) -> Tensor:
-    """Build embedding mask ``(N+1, D)`` for a pruning decision.
-
-    CLS (index 0) is always kept.
-    """
+def build_emb_mask(num_tokens: int, dim: int, kept_patches: set[int]) -> Tensor:
+    """Build embedding mask ``(N+1, D)``.  CLS always kept."""
     total = num_tokens + 1
     emb_mask = torch.zeros(total, dim)
     emb_mask[0] = 1.0
@@ -286,21 +430,14 @@ def build_full_emb_mask(num_tokens: int, dim: int) -> Tensor:
 
 
 # ---------------------------------------------------------------------------
-# Token classification from zonotope bounds
+# Token classification
 # ---------------------------------------------------------------------------
 
-def classify_topk(
-    ub_scores: Tensor,
-    lb_scores: Tensor,
-    K: int,
-) -> tuple[set[int], set[int], set[int]]:
-    """Classify patch tokens as definite-keep / definite-prune / uncertain."""
+def classify_topk(ub_scores, lb_scores, K):
     N = len(ub_scores)
     n_prune = N - K
-
     wins = torch.zeros(N, dtype=torch.long)
     losses = torch.zeros(N, dtype=torch.long)
-
     for i in range(N):
         for j in range(N):
             if i == j:
@@ -309,51 +446,31 @@ def classify_topk(
                 wins[i] += 1
             if ub_scores[i] < lb_scores[j]:
                 losses[i] += 1
-
     definite_keep = {i for i in range(N) if wins[i] >= n_prune}
     definite_prune = {i for i in range(N) if losses[i] >= K}
     uncertain = set(range(N)) - definite_keep - definite_prune
     return definite_keep, definite_prune, uncertain
 
 
-# ---------------------------------------------------------------------------
-# Case enumeration
-# ---------------------------------------------------------------------------
-
-def enumerate_pruning_cases(
-    definite_keep: set[int],
-    uncertain: set[int],
-    K: int,
-) -> list[set[int]]:
-    """Enumerate all possible sets of kept patches under the top-K rule."""
+def enumerate_pruning_cases(definite_keep, uncertain, K):
     K_remaining = K - len(definite_keep)
-
     if K_remaining < 0:
         return [definite_keep.copy()]
     if K_remaining >= len(uncertain):
         return [definite_keep | uncertain]
     if K_remaining == 0:
         return [definite_keep.copy()]
-
-    return [
-        definite_keep | set(combo)
-        for combo in combinations(sorted(uncertain), K_remaining)
-    ]
+    return [definite_keep | set(c) for c in combinations(sorted(uncertain), K_remaining)]
 
 
 # ---------------------------------------------------------------------------
-# Zonotope construction (avoids Cat node)
+# Zonotope construction
 # ---------------------------------------------------------------------------
 
-def build_zonotope_no_cat(vit, img: Tensor, eps: float, op_patch):
-    """Build the embedding zonotope ``(N+1, D)`` without a Cat node."""
+def build_zonotope_no_cat(vit, img, eps, op_patch):
     num_patches = (img.shape[-1] // vit.patch_size) ** 2
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
-
-    patch_zono = op_patch(
-        expr.ConstVal(img) + eps * expr.LpEpsilon(list(img.shape))
-    )
-
+    patch_zono = op_patch(expr.ConstVal(img) + eps * expr.LpEpsilon(list(img.shape)))
     pad_op = PadOp(patch_zono.shape, [0, 0, 1, 0])
     padded = AffineSum((pad_op, patch_zono))
     cls_padded = F.pad(vit.cls_token[0], [0, 0, 0, num_patches])
@@ -364,31 +481,27 @@ def build_zonotope_no_cat(vit, img: Tensor, eps: float, op_patch):
 # Export helpers
 # ---------------------------------------------------------------------------
 
-def export_scoring(vit, num_tokens: int, dim: int, score_layer: int = 0):
-    """Export scoring model, return ``(op_score, scoring_model)``."""
+def export_scoring(vit, num_tokens, dim, score_layer=0):
     scoring = ScoringModel(vit, score_layer=score_layer).eval()
     gm = onnx_export(scoring, ([num_tokens + 1, dim],))
     return zono.interpret(gm), scoring
 
 
-def export_patchify(vit, img_shape: list[int],
-                    normalize=False, mean=0.0, std=1.0):
-    """Export patchify stage, return ``(op_patch, patchify_model)``."""
+def export_patchify(vit, img_shape, normalize=False, mean=0.0, std=1.0):
     patchify = PatchifyStage(vit, normalize, mean, std).eval()
     gm = onnx_export(patchify, (img_shape,))
     return zono.interpret(gm), patchify
 
 
-def export_masked_post_concat(vit, emb_mask: Tensor,
-                               num_tokens: int, dim: int,
-                               mask_from_layer: int = 0):
-    """Export ``MaskedPostConcat``, return ONNX graph model."""
-    model = MaskedPostConcat(vit, emb_mask, mask_from_layer=mask_from_layer).eval()
+def export_masked_post_concat(vit, emb_mask, num_tokens, dim, mask_from_layer=0):
+    """Export with custom op enabled (for verification)."""
+    model = MaskedPostConcat(vit, emb_mask, mask_from_layer=mask_from_layer,
+                              use_custom_op=True).eval()
     return onnx_export(model, ([num_tokens + 1, dim],))
 
 
 # ---------------------------------------------------------------------------
-# Per-sample certification
+# Certification
 # ---------------------------------------------------------------------------
 
 class CertifyResult(NamedTuple):
@@ -401,49 +514,34 @@ class CertifyResult(NamedTuple):
 
 
 def certify_pruned_sample_diff(
-    vit, img: Tensor, eps: float, K: int,
-    op_patch, op_score,
-    num_tokens: int, dim: int,
-    mask_from_layer: int = 0,
-) -> CertifyResult:
-    """Certify via differential verification: ``full - pruned``.
-
-    Case-splits on uncertain tokens, merges full/pruned models via
-    ``diff_net``, propagates with differential zonotope interpreter.
-    """
+    vit, img, eps, K, op_patch, op_score,
+    num_tokens, dim, mask_from_layer=0,
+):
     from boundlab.diff.expr import DiffExpr3
     from boundlab.diff.net import diff_net
-    from boundlab.diff.zono3 import interpret as diff_interpret
 
     full_zono = build_zonotope_no_cat(vit, img, eps, op_patch)
-
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     ub_scores, lb_scores = op_score(full_zono).ublb()
-
     definite_keep, definite_prune, uncertain = classify_topk(ub_scores, lb_scores, K)
     cases = enumerate_pruning_cases(definite_keep, uncertain, K)
 
     gm_full = export_masked_post_concat(
-        vit, build_full_emb_mask(num_tokens, dim), num_tokens, dim,
-        mask_from_layer=mask_from_layer,
+        vit, build_full_emb_mask(num_tokens, dim), num_tokens, dim, mask_from_layer,
     )
 
     best_ub = best_lb = None
     for kept in cases:
         gm_pruned = export_masked_post_concat(
-            vit, build_emb_mask(num_tokens, dim, kept), num_tokens, dim,
-            mask_from_layer=mask_from_layer,
+            vit, build_emb_mask(num_tokens, dim, kept), num_tokens, dim, mask_from_layer,
         )
-
         prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
         merged = diff_net(gm_full, gm_pruned)
         out = diff_interpret(merged)(full_zono)
-
         if isinstance(out, DiffExpr3):
             d_ub, d_lb = out.diff.ublb()
         else:
             d_ub, d_lb = (out.x - out.y).ublb()
-
         if best_ub is None:
             best_ub, best_lb = d_ub.clone(), d_lb.clone()
         else:
