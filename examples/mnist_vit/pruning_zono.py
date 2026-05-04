@@ -286,20 +286,20 @@ def main():
     print(f"  Differential Verification (Zono): full vs top-{args.K} pruned ViT")
     print("=" * 75)
     print(f"  eps={args.eps}, K={args.K}, MC={args.mc_samples}")
-    print(f"  device={run_device}")
+    print(f"  device={TORCH_DEVICE}")
     print()
 
     all_results = {name: [] for name, _ in methods}
     all_mc = []
     onnx_cache: dict[bytes, object] = {}
     mask_full = torch.ones(17, 64)
-    mask_full_run = mask_full.to(run_device)
+    mask_full_run = mask_full.to(TORCH_DEVICE)
     gm_full = _export_masked_onnx(vit, mask_full, onnx_cache)
     model_full_mc = MaskedModel(vit, mask_full_run).eval()
 
     for i, (img, label) in enumerate(samples):
         with torch.no_grad():
-            img_run = img.to(run_device)
+            img_run = img.to(TORCH_DEVICE)
             if args.normalize:
                 x = (img_run - args.mean) / args.std
             else:
