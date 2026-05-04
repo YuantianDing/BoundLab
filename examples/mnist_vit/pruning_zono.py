@@ -24,6 +24,9 @@ from pathlib import Path
 import torch
 from torch import nn, Tensor
 
+TORCH_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.set_default_device(TORCH_DEVICE)
+
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
@@ -254,12 +257,11 @@ def main():
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
+    if args.cuda and TORCH_DEVICE.type != "cuda":
+        assert False, "CUDA requested but not available. Please check your PyTorch installation and GPU availability."
+
     vit = build_mnist_vit(args.checkpoint).eval()
-    run_device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
-    torch.set_default_device(run_device)
-    if args.cuda and run_device.type != "cuda":
-        print("[warn] CUDA requested but not available; falling back to CPU.")
-    vit_run = build_mnist_vit(args.checkpoint).to(run_device).eval() if run_device.type == "cuda" else vit
+    
 
     patchify = PatchifyStage(vit, args.normalize, args.mean, args.std).eval()
     gm_patch = onnx_export(patchify, ([1, 28, 28],))
@@ -268,7 +270,7 @@ def main():
     scoring = ScoringModel(vit).eval()
     gm_score = onnx_export(scoring, ([17, 64],))
     op_score = zono.interpret(gm_score)
-    scoring_run = ScoringModel(vit_run).eval()
+    scoring_run = ScoringModel(vit).eval()
 
     samples = load_test_samples(args.n_samples, args.data_dir, args.seed)
 
@@ -293,7 +295,7 @@ def main():
     mask_full = torch.ones(17, 64)
     mask_full_run = mask_full.to(run_device)
     gm_full = _export_masked_onnx(vit, mask_full, onnx_cache)
-    model_full_mc = MaskedModel(vit_run, mask_full_run).eval()
+    model_full_mc = MaskedModel(vit, mask_full_run).eval()
 
     for i, (img, label) in enumerate(samples):
         with torch.no_grad():
@@ -302,8 +304,8 @@ def main():
                 x = (img_run - args.mean) / args.std
             else:
                 x = img_run
-            x = vit_run.to_patch_embedding(x)
-            center = torch.cat((vit_run.cls_token[0], x), dim=0) + vit_run.pos_embedding[0]
+            x = vit.to_patch_embedding(x)
+            center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
 
         full_zono = build_zonotope_no_cat(vit, img, args.eps, op_patch)
         prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
@@ -340,10 +342,10 @@ def main():
                 sc = scoring_run(xp)
                 _, topk = sc.topk(args.K)
                 kept_mc = set(topk.tolist())
-                mp = torch.zeros(17, 64, device=run_device)
+                mp = torch.zeros(17, 64, device=TORCH_DEVICE)
                 mp[0] = 1.0
                 for p in kept_mc: mp[p + 1] = 1.0
-                model_pruned_mc = MaskedModel(vit_run, mp).eval()
+                model_pruned_mc = MaskedModel(vit, mp).eval()
                 diff = model_full_mc(xp) - model_pruned_mc(xp)
                 mc_max = max(mc_max, diff.abs().max().item())
         all_mc.append(mc_max)
