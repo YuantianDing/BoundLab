@@ -33,9 +33,11 @@ def table_join_sorted(*args: Union[torch.Tensor, list[int]]) -> torch.Tensor:
             shape=(ShapeEnv.create_symintnode(), ShapeEnv.create_symintnode()),
         )
     else:
+        device = tensors[0].device
+        dtype = tensors[0].dtype
         df = [
             pd.DataFrame(
-                {f"t{columns[i][j]}": tensors[i][:, j].numpy() for j in range(tensors[i].shape[1])}
+                {f"t{columns[i][j]}": tensors[i][:, j].cpu().numpy() for j in range(tensors[i].shape[1])}
             )
             for i in range(len(tensors))
         ]
@@ -50,8 +52,11 @@ def table_join_sorted(*args: Union[torch.Tensor, list[int]]) -> torch.Tensor:
         N = max(max(column) for column in columns) + 1
         cols = [f"t{i}" for i in range(N)]
         if result.empty:
-            return torch.zeros((0, N), dtype=tensors[0].dtype)
-        return torch.tensor(result[cols].values, dtype=tensors[0].dtype)
+            return torch.zeros((0, N), dtype=dtype, device=device)
+        # ``.values`` may produce a numpy array with negative strides (e.g.
+        # after pandas' merge reorders columns); ``torch.tensor`` rejects
+        # those. ``.copy()`` materialises a contiguous-stride view first.
+        return torch.tensor(result[cols].values.copy(), dtype=dtype, device=device)
 
 def list_index_unique(tensor1: torch.Tensor, tensor2: torch.Tensor) -> torch.Tensor:
     """

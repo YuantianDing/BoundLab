@@ -1,15 +1,15 @@
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
 from boundlab.sparse.ops import list_index_unique, table_join_sorted
-
+from .dim import Dim
 Indices = torch.Tensor
 """A 1D tensor of int indices, used for typing."""
 
 
 class TorchTable:
-    """SQL-style table of integer columns, labelled by integer names (MCT dim IDs).
+    """SQL-style table of integer columns, labelled by :class:`Dim` objects.
 
     A column's data can be ``None``, meaning it's an *index column* conceptually equal to
     ``torch.arange(length)``. Supports sorting, deduplication, inner-join merging on shared
@@ -18,15 +18,20 @@ class TorchTable:
 
     def __init__(
         self,
-        columns: list[int],
+        columns: list[Dim],
         data: list[Optional[Indices]],
         length: Optional[int] = None,
     ):
         assert len(columns) == len(data), "Must provide data for each column."
         assert len(set(columns)) == len(columns), "Column names must be unique."
-        self.columns: list[int] = list(columns)
+        self.columns: list[Dim] = list(columns)
         self.data: list[Optional[Indices]] = list(data)
-        self.length: Optional[int] = length
+        set_len = set(int(d.shape[0]) for d in self.data if d is not None)
+        if length is not None:
+            set_len.add(length)
+        assert len(set_len) == 1, "All columns must have the same length as each other and the provided length."
+        self.length: int = set_len.pop()
+
         for dat in self.data:
             if dat is not None:
                 assert dat.dim() == 1, "Column data must be 1D."
@@ -39,6 +44,10 @@ class TorchTable:
             "Must provide at least one column of data or specify length."
         self.is_sorted = False
         self.is_unique = False
+    
+    def items(self):
+        """Iterator over (column_name, column_data) pairs."""
+        return zip(self.columns, self.data)
 
     def __len__(self) -> int:
         return self.length
@@ -58,7 +67,7 @@ class TorchTable:
         """True when every column is an index column (``data[k] is None``)."""
         return all(dat is None for dat in self.data)
 
-    def column_data(self, name: int) -> Optional[Indices]:
+    def column_data(self, name: Dim) -> Optional[Indices]:
         """Return the raw ``data`` entry for the given column name."""
         return self.data[self.columns.index(name)]
 
@@ -192,7 +201,7 @@ class TorchTable:
             return tables[0]
 
         col_sets = [set(t.columns) for t in tables]
-        shared: set[int] = set(col_sets[0])
+        shared: set[Dim] = set(col_sets[0])
         for s in col_sets[1:]:
             shared &= s
 
@@ -201,9 +210,9 @@ class TorchTable:
         )
         if all_shared_are_indices:
             min_length = min(t.length for t in tables)
-            new_columns: list[int] = []
+            new_columns: list[Dim] = []
             new_data: list[Optional[Indices]] = []
-            seen: set[int] = set()
+            seen: set[Dim] = set()
             for t in tables:
                 for name, dat in zip(t.columns, t.data):
                     if name in seen:
@@ -264,7 +273,7 @@ class TorchTable:
         return list_index_unique(self.materialize(), aligned_other.materialize())
 
     def filter_columns(
-        self, columns: list[int]
+        self, columns: list[Dim]
     ) -> tuple["TorchTable", Optional[Indices]]:
         """Project onto ``columns`` (possibly reordering/dropping) then sort+dedup.
 
