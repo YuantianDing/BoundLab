@@ -5,7 +5,6 @@ Implements the DeepT minimal-area relaxation for hyperbolic tangent.
 
 import torch
 
-from boundlab.linearop._base import LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._indices import SetIndicesOp
 # from .softmax2 import softmax2_lb, softmax2_ub2

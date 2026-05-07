@@ -248,3 +248,7 @@ def inverse_permutation(perm: list[int]) -> list[int]:
     for i, p in enumerate(perm):
         inv[p] = i
     return inv
+
+def is_sorted(lst: list) -> bool:
+    """Check if a list of integers is sorted in ascending order."""
+    return all(x <= y for x, y in zip(lst, lst[1:]))

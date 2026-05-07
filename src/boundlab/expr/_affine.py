@@ -131,7 +131,7 @@ class AffineSum(Expr):
         return " + ".join(parts)
     
     def simplify_ops_(self):
-        self.children_dict = {child: op.einsum_op() for child, op in self.children_dict.items()}
+        self.children_dict = {child: op for child, op in self.children_dict.items()}
         super().simplify_ops_()
 
     def split_const(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:

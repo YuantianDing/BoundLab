@@ -89,7 +89,7 @@ class Stack(Expr):
         Returns:
             ``(0, [child_weight_0, child_weight_1, ...])``
         """
-        from boundlab.linearop import PadOp, UnsqueezeOp, ComposedOp
+        from boundlab.linearop import PadOp, UnsqueezeOp
         n = len(self._children)
         child_ops = []
         for i, child in enumerate(self._children):
@@ -101,7 +101,7 @@ class Stack(Expr):
             pad_spec[2 * d_rev] = i
             pad_spec[2 * d_rev + 1] = n - i - 1
             pad = PadOp(unsq.output_shape, pad_spec)
-            embed_op = ComposedOp(pad, unsq)
+            embed_op = pad @ unsq
             child_ops.append(weights @ embed_op)
         return (0, child_ops)
 

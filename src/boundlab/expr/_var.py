@@ -10,7 +10,7 @@ import inspect
 import torch
 
 from boundlab.expr._core import Expr, ExprFlags
-from boundlab.linearop._base import LinearOp, LinearOpFlags, SumOp
+from boundlab.linearop._base import LinearOp
 from boundlab.linearop._einsum import EinsumOp
 
 

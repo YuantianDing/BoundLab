@@ -5,7 +5,6 @@ Implements the DeepT minimal-area relaxation for the reciprocal function (1/x).
 
 import torch
 
-from boundlab.linearop._base import LinearOpFlags
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._indices import SetIndicesOp
 
