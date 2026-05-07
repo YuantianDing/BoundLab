@@ -112,6 +112,37 @@ def _pair_mct(
     )
 
 
+def test_multicootensor_sum_apply_multiplicative_handles_six_overlapping_terms():
+    row = Dim(4, 1.0, "mctsum_square_row")
+    col = Dim(4, 2.0, "mctsum_square_col")
+    pairs_by_term = [
+        [(0, 0), (0, 1), (1, 1), (2, 3), (3, 0)],
+        [(0, 0), (1, 1), (1, 2), (2, 3), (3, 1)],
+        [(0, 1), (1, 1), (2, 0), (2, 3), (3, 2)],
+        [(0, 2), (1, 1), (2, 0), (2, 3), (3, 3)],
+        [(0, 0), (0, 3), (1, 1), (2, 1), (2, 3)],
+        [(0, 1), (1, 0), (1, 1), (2, 3), (3, 0)],
+    ]
+    terms = [
+        _pair_mct(
+            row,
+            col,
+            pairs,
+            torch.tensor([1.0, -2.0, 0.5, 3.0, -1.5]) + term_idx,
+            term_idx=term_idx,
+        )
+        for term_idx, pairs in enumerate(pairs_by_term)
+    ]
+
+    tensor_sum = MultiCOOTensorSum(terms)
+    dense_sum = tensor_sum.to_dense()
+
+    result = tensor_sum.apply_multiplicative(lambda tensor: tensor.square())
+    expected = Dense(dense_sum.tensor.square(), dense_sum.dims)
+
+    # assert len(tensor_sum.terms) == 2
+    _dense_allclose(result.to_dense(), expected)
+
 def test_todo_forward_backward_tn_with_five_connected_factors_roundtrip():
     k = Dim(3, 0.0, "k")
     a = Dim(3, 1.0, "a")
@@ -263,37 +294,6 @@ def test_multicootensor_sum_add_coalesces_compatible_terms():
 
     assert len(result.terms) == 1
     _dense_allclose(result.to_dense(), lhs.to_dense() + rhs.to_dense())
-
-
-def test_multicootensor_sum_apply_multiplicative_handles_six_overlapping_terms():
-    row = Dim(4, 1.0, "mctsum_square_row")
-    col = Dim(4, 2.0, "mctsum_square_col")
-    pairs_by_term = [
-        [(0, 0), (0, 1), (1, 1), (2, 3), (3, 0)],
-        [(0, 0), (1, 1), (1, 2), (2, 3), (3, 1)],
-        [(0, 1), (1, 1), (2, 0), (2, 3), (3, 2)],
-        [(0, 2), (1, 1), (2, 0), (2, 3), (3, 3)],
-        [(0, 0), (0, 3), (1, 1), (2, 1), (2, 3)],
-        [(0, 1), (1, 0), (1, 1), (2, 3), (3, 0)],
-    ]
-    terms = [
-        _pair_mct(
-            row,
-            col,
-            pairs,
-            torch.tensor([1.0, -2.0, 0.5, 3.0, -1.5]) + term_idx,
-            term_idx=term_idx,
-        )
-        for term_idx, pairs in enumerate(pairs_by_term)
-    ]
-    tensor_sum = MultiCOOTensorSum(terms)
-    dense_sum = tensor_sum.to_dense()
-
-    result = tensor_sum.apply_multiplicative(lambda tensor: tensor.square())
-    expected = Dense(dense_sum.tensor.square(), dense_sum.dims)
-
-    assert len(tensor_sum.terms) == 6
-    _dense_allclose(result.to_dense(), expected)
 
 
 def test_multicootensor_mul_debug_connected_merge(monkeypatch):

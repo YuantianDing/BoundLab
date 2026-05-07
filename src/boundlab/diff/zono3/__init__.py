@@ -287,7 +287,9 @@ def onnx_boardcasted(fn):
 
 interpret["Mul"] = onnx_boardcasted(diff_mul_handler)
 interpret["MatMul"] = diff_matmul_handler
-interpret["Div"] = onnx_boardcasted(lambda a, b: diff_mul_handler(a, interpret["Reciprocal"](b)))
+interpret["Div"] = onnx_boardcasted(
+    lambda a, b: diff_mul_handler(a, 1.0 / b if isinstance(b, torch.Tensor) else interpret["Reciprocal"](b))
+)
 
 interpret["Softmax"] = lambda X, axis=-1: diff_softmax_handler(X, dim=axis)
 

@@ -3,8 +3,7 @@
 import torch
 from boundlab.sparse.dim import Dim
 
-from boundlab.linearop._base import LinearOpFlags
-from boundlab.linearop._base import LinearOp
+from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
 from boundlab.linearop._sparse import tensor_from_edges
 from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor
 from boundlab.sparse.tn import TN
@@ -29,13 +28,17 @@ class ScalarOp(LinearOp):
         ]
         
         tensor = MultiCOOTensor(tn, MultiCOOSparsify(ops))
+        debug_jacobian = tensor.to_dense().expand(odims + idims) if DEBUG_LinearOp else None
         
         super().__init__(
             tensor,
             idims,
             odims,
             flags=LinearOpFlags.IS_NON_NEGATIVE if scalar >= 0 else LinearOpFlags.NONE,
+            debug_jacobian=debug_jacobian,
         )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
         self.name = name
 
     def __str__(self):
@@ -51,9 +54,17 @@ class ZeroOp(LinearOp):
         tensor, input_dims, output_dims = tensor_from_edges(
             input_shape, output_shape, input_coords, output_coords, torch.empty(0)
         )
-        super().__init__(tensor, input_dims, output_dims, flags=LinearOpFlags.IS_NON_NEGATIVE)
+        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        super().__init__(
+            tensor,
+            input_dims,
+            output_dims,
+            flags=LinearOpFlags.IS_NON_NEGATIVE,
+            debug_jacobian=debug_jacobian,
+        )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
         self.name = name
 
     def __str__(self):
         return self.name if self.name else "0"
-

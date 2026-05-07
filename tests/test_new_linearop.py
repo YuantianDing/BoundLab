@@ -18,7 +18,7 @@ from boundlab.linearop._indexing import GetIndicesOp, SetIndicesOp
 from boundlab.linearop._reshape import ReshapeOp, FlattenOp, UnflattenOp, SqueezeOp, UnsqueezeOp
 from boundlab.linearop._permute import PermuteOp
 from boundlab.linearop._expand import ExpandOp
-from boundlab.linearop._base import ComposedOp, ScalarOp
+from boundlab.linearop import ScalarOp
 from boundlab.linearop import GetItemOp, NarrowOp, SelectOp, PadOp
 
 import boundlab.expr as expr
@@ -284,7 +284,6 @@ class TestIndicesFusion:
         idx = torch.tensor([0, 2])
         gi = GetIndicesOp(e.output_shape, dim=0, indices=idx, added_shape=torch.Size([2]))
         fused = gi @ e
-        assert isinstance(fused, ComposedOp)
         x = torch.randn(4, 3)
         y_fused = fused.forward(x)
         y_ref = gi.forward(e.forward(x))
@@ -298,7 +297,6 @@ class TestIndicesFusion:
         idx = torch.tensor([0, 2])
         si = SetIndicesOp(torch.Size([4, 3]), dim=0, indices=idx, added_shape=torch.Size([2]))
         fused = e @ si
-        assert isinstance(fused, ComposedOp)
         x = torch.randn(2, 3)
         y_fused = fused.forward(x)
         y_ref = e.forward(si.forward(x))

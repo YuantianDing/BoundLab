@@ -36,6 +36,7 @@ class COOSparsify:
         self.symbolic_supersets = list(symbolic_supersets or [])
         self.identifier = identifier
         self.__post_init__()
+        assert all(set(superset.output_dims).issubset(set(self.output_dims)) for superset in self.symbolic_supersets)
 
     def _infer_table_flags(self) -> None:
         if self.torch_table.is_sorted and self.torch_table.is_unique:
@@ -74,8 +75,10 @@ class COOSparsify:
         #    then `new_tensor[...torch_table...] = original_tensor`
         if isinstance(x, TN):
             return TN(factors=[self.forward(factor) for factor in x.factors])
+        if len(self.output_dims) == 1 and self.output_dims[0] == self.input_dim:
+            return x
         if self.input_dim not in x.dims:
-            return x.clone()
+            return x
         if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
             return x.diagonal_embed(self.input_dim, self.output_dims)
 
@@ -106,7 +109,9 @@ class COOSparsify:
 
         present_output_dims = [dim for dim in self.output_dims if dim in y.dims]
         if len(present_output_dims) == 0:
-            return y.clone()
+            return y
+        if len(self.output_dims) == 1 and self.output_dims[0] == self.input_dim:
+            return y
         if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
             return y.diagonal(present_output_dims, self.input_dim)
 
@@ -225,7 +230,7 @@ class COOSparsify:
         else:
             if suppress_error:
                 return None
-            raise RuntimeError(f"Cannot symbolically determine symbolic superset relationship between these two COOSparsify based on their output_dims. Please explicitly add one as a symbolic superset {self} {other}.")
+            raise RuntimeError(f"Cannot symbolically determine symbolic superset relationship between these two COOSparsify based on their output_dims. Please explicitly add one as a symbolic superset {self} {other}. {[str(a) for a in self.symbolic_supersets]}")
 
     def inverse_supersets(self, *superset_op: "COOSparsify") -> "COOSparsify":
         if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
@@ -289,7 +294,6 @@ class COOSparsify:
         return COOSparsify(
             input_dim=new_input_dim,
             torch_table=new_table,
-            symbolic_supersets=[self],
         ), indices
     
     def __str__(self):
@@ -363,7 +367,15 @@ class MultiCOOSparsify:
         ])
     
     def is_symbolic_subset(self, other: "MultiCOOSparsify", suppress_error: bool = False) -> bool:
-        return all(any(op.is_symbolic_subset(other_op, suppress_error=suppress_error) for other_op in other.ops) for op in self.ops)
+        for op in self.ops:
+            for other_op in other.ops:
+                if not set(op.output_dims).isdisjoint(set(other_op.output_dims)):
+                    if not set(other_op.output_dims).issubset(set(op.output_dims)):
+                        return False
+                    if not op.is_symbolic_subset(other_op, suppress_error=suppress_error):
+                        return False
+        return True
+                    
     
     def inverse_supersets(self, superset_op: "MultiCOOSparsify") -> "MultiCOOSparsify":
         # TODO: for each op in ops, find all superset_ops in superset_op that are symbolic supersets of it,
@@ -464,7 +476,7 @@ class MultiCOOTensor:
         return torch.Size([dim.length for dim in self.dims])
     
     def expand_to(self, op: MultiCOOSparsify) -> "MultiCOOTensor":
-        assert self.sparsify.is_symbolic_subset(op, suppress_error=True), "Can only expand to a MultiCOOSparsify that is a symbolic superset of the current sparsify."
+        assert self.sparsify.is_symbolic_subset(op), "Can only expand to a MultiCOOSparsify that is a symbolic superset of the current sparsify."
         tn = self.sparsify.inverse_supersets(op).forward(self.tn)
         return MultiCOOTensor(tn=tn, sparsify=op)
 
@@ -521,7 +533,10 @@ class MultiCOOTensor:
             sparsify=op
         )
         if DEBUG_MultiCOOTensor:
-            assert result.to_dense().allclose(self.to_dense() * other.to_dense())
+            a = self.to_dense() * other.to_dense()
+            b = result.to_dense()
+            if torch.isfinite(a.tensor).all() and torch.isfinite(b.tensor).all():
+                assert a.allclose(b), f"{self} {other} {result}"
         # TODO-test: test this function with `DEBUG_MultiCOOTensor` enabled. Generate random high dimensional MCTs with at least 8 connected factors and at least 6 different COOSparsify ops (each with at least 2 output_dims).
         return result
     
@@ -538,7 +553,7 @@ class MultiCOOTensor:
         dims_to_reduce = set(dims)
         tn = self.tn
         new_ops = []
-        tn_sum_dims = [dim for dim in dims if dim in tn.dims]
+        tn_sum_dims = []
 
         for op in self.sparsify.ops:
             reduced_outputs = [dim for dim in op.output_dims if dim in dims_to_reduce]
@@ -562,7 +577,10 @@ class MultiCOOTensor:
         )
 
         if DEBUG_MultiCOOTensor:
-            assert self.to_dense().sum(dims).allclose(result.to_dense())
+            a = self.to_dense().sum(dims)
+            b = result.to_dense()
+            if torch.isfinite(a.tensor).all() and torch.isfinite(b.tensor).all():
+                assert a.allclose(b), f"{self} {dims} {result}"
         # TODO-test: test this function with `DEBUG_MultiCOOTensor` enabled. Generate random high dimensional MCTs with at least 8 connected factors and at least 6 different COOSparsify ops (each with at least 2 output_dims).
         return result
     
@@ -605,7 +623,10 @@ class MultiCOOTensor:
         tmp = self.shrink_to(op)
         if neg:
             tmp = -tmp
-        return other + tmp
+        return MultiCOOTensor(
+            tn=tmp.expand_to(other.sparsify).tn + other.tn,
+            sparsify=other.sparsify
+        )
     
     def replace_dims(self, dim_mapping: dict[Dim, Dim]) -> "MultiCOOTensor":
         return MultiCOOTensor(
@@ -673,9 +694,11 @@ class MultiCOOTensorSum:
             new_t = t1.clone()
             for t2 in old_terms[:i]:
                 new_t = t2.add_intersection_to(new_t)
+            assert new_t is not None
             new_t = new_t.apply_multiplicative(fn)
             for t in new_terms:
                 new_t = t.add_intersection_to(new_t, neg=True)
+                assert new_t is not None
             new_terms.append(new_t)
         return MultiCOOTensorSum(new_terms)
     

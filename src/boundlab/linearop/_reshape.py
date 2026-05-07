@@ -1,134 +1,143 @@
-"""Reshape LinearOp implementations.
-
-ReshapeOp is the base class; FlattenOp, UnflattenOp, SqueezeOp, and
-UnsqueezeOp are thin subclasses that delegate to ReshapeOp logic.
-"""
-
-from functools import reduce
+"""Reshape LinearOp implementations."""
 
 import torch
 
-from boundlab.linearop._base import LinearOp, LinearOpFlags, ScalarOp
-from boundlab.utils import merge_name
+from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._sparse import make_input_dims, make_output_dims, unravel
+from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
+from boundlab.sparse.dim import Dim
+from boundlab.sparse.table import TorchTable
+from boundlab.sparse.tn import TN
 
 
 def _meta_output_shape(fn, input_shape: torch.Size) -> torch.Size:
-    """Compute output shape by tracing *fn* on a meta-device tensor."""
     return fn(torch.empty(input_shape, device="meta")).shape
 
 
-class ReshapeOp(LinearOp):
-    """Reshape (view) the input tensor to *output_shape*."""
+def _prod(shape: torch.Size) -> int:
+    result = 1
+    for size in shape:
+        result *= int(size)
+    return result
 
+
+def _coords(shape: torch.Size) -> torch.Tensor:
+    flat = torch.arange(_prod(shape), dtype=torch.long)
+    return unravel(flat, shape)
+
+
+def _groups(input_shape: torch.Size, output_shape: torch.Size):
+    i = j = 0
+    while i < len(input_shape) or j < len(output_shape):
+        input_start, output_start = i, j
+        input_numel = output_numel = 1
+        if i < len(input_shape):
+            input_numel *= int(input_shape[i])
+            i += 1
+        if j < len(output_shape):
+            output_numel *= int(output_shape[j])
+            j += 1
+        while input_numel != output_numel:
+            if (input_numel < output_numel and i < len(input_shape)) or j == len(output_shape):
+                input_numel *= int(input_shape[i])
+                i += 1
+            else:
+                output_numel *= int(output_shape[j])
+                j += 1
+        yield list(range(input_start, i)), list(range(output_start, j))
+
+
+def _reshape_tensor(input_shape: torch.Size, output_shape: torch.Size):
+    input_dims = make_input_dims(input_shape)
+    output_dims = make_output_dims(output_shape)
+    ops = []
+    for group_idx, (input_axes, output_axes) in enumerate(_groups(input_shape, output_shape)):
+        in_dims = [input_dims[axis] for axis in input_axes]
+        out_dims = [output_dims[axis] for axis in output_axes]
+        if len(input_axes) == 0 and _prod(torch.Size(output_shape[axis] for axis in output_axes)) == 1:
+            continue
+        if len(output_axes) == 0 and _prod(torch.Size(input_shape[axis] for axis in input_axes)) == 1:
+            continue
+        if len(input_axes) == len(output_axes) == 1:
+            inner = Dim(int(input_shape[input_axes[0]]), 500.0 + group_idx, f"k{group_idx}")
+            ops.append(COOSparsify.md_eye(inner, out_dims + in_dims))
+            continue
+
+        in_shape = torch.Size(input_shape[axis] for axis in input_axes)
+        out_shape = torch.Size(output_shape[axis] for axis in output_axes)
+        length = _prod(in_shape)
+        edge = Dim(length, 500.0 + group_idx, f"k{group_idx}")
+        input_coords = _coords(in_shape)
+        output_coords = _coords(out_shape)
+        data = [
+            *(output_coords[:, idx].contiguous() for idx in range(len(out_dims))),
+            *(input_coords[:, idx].contiguous() for idx in range(len(in_dims))),
+        ]
+        ops.append(
+            COOSparsify(
+                edge,
+                TorchTable(columns=out_dims + in_dims, data=data, length=length),
+            )
+        )
+    tensor = MultiCOOTensor(TN(factors=[]), MultiCOOSparsify(ops))
+    return MultiCOOTensorSum([tensor]), input_dims, output_dims
+
+
+class ReshapeOp(LinearOp):
     def __init__(self, input_shape: torch.Size, output_shape: tuple[int, ...]):
+        input_shape = torch.Size(input_shape)
         if not isinstance(output_shape, torch.Size):
             output_shape = _meta_output_shape(lambda x: x.reshape(*output_shape), input_shape)
-        self.target_shape = tuple(output_shape)
-        self.reshape_groups = []
-        self.dims_map = {}
-        self.dims_map_inv = {}
+        self.target_shape = torch.Size(output_shape)
+        tensor, input_dims, output_dims = _reshape_tensor(input_shape, self.target_shape)
+        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        super().__init__(
+            tensor,
+            input_dims,
+            output_dims,
+            flags=LinearOpFlags.IS_NON_NEGATIVE,
+            debug_jacobian=debug_jacobian,
+        )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
-        # Edge case: either side is a scalar (0-dim). Allowed only when
-        # both sides have numel == 1.
-        if len(input_shape) == 0 or len(output_shape) == 0:
-            input_numel = reduce(lambda x, y: x * y, input_shape, 1)
-            output_numel = reduce(lambda x, y: x * y, output_shape, 1)
-            assert input_numel == output_numel, \
-                f"ReshapeOp: cannot align {input_shape} -> {output_shape} (numel {input_numel} != {output_numel})"
-            if len(input_shape) > 0 or len(output_shape) > 0:
-                self.reshape_groups.append((0, len(input_shape) - 1, 0, len(output_shape) - 1))
-            super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
-            return
-
-        i, j = 0, 0
-        input_win = 0
-        output_win = 0
-
-        while True:
-            input_numel = reduce(lambda x, y: x * y, input_shape[input_win:i+1], 1)
-            output_numel = reduce(lambda x, y: x * y, output_shape[output_win:j+1], 1)
-            if input_numel == output_numel:
-                if i > input_win or j > output_win:
-                    self.reshape_groups.append((input_win, i, output_win, j))
-                else:
-                    assert i == input_win and j == output_win
-                    self.dims_map[i] = j
-                    self.dims_map_inv[j] = i
-                i += 1
-                j += 1
-                input_win = i
-                output_win = j
-
-            if input_numel < output_numel:
-                i += 1
-
-            if input_numel > output_numel:
-                j += 1
-
-            if i >= len(input_shape) or j >= len(output_shape):
-                while i < len(input_shape) and input_shape[i] == 1:
-                    i += 1
-                while j < len(output_shape) and output_shape[j] == 1:
-                    j += 1
-                if input_win < i or output_win < j:
-                    self.reshape_groups.append((input_win, max(i - 1, input_win), output_win, max(j - 1, output_win)))
-                assert i == len(input_shape) and j == len(output_shape), \
-                    f"ReshapeOp: cannot align {input_shape} -> {output_shape} (i={i}, j={j})"
-                break
-
-        # TODO
     def __str__(self):
         return f"<reshape {list(self.input_shape)} -> {list(self.target_shape)}>"
 
 
 class FlattenOp(ReshapeOp):
-    """Flatten dimensions [start_dim .. end_dim] into a single dimension."""
-
     def __init__(self, input_shape: torch.Size, start_dim: int = 0, end_dim: int = -1):
         self.start_dim = start_dim
         self.end_dim = end_dim if end_dim >= 0 else len(input_shape) + end_dim
-        self.original_sizes = input_shape[self.start_dim:self.end_dim + 1]
-        target_shape = _meta_output_shape(
-            lambda x: x.flatten(start_dim, end_dim), input_shape)
-        super().__init__(input_shape, target_shape)
-
-    def forward(self, x):
-        return x.flatten(self.start_dim, self.end_dim)
-
-    def backward(self, grad):
-        return grad.unflatten(self.start_dim, self.original_sizes)
+        self.original_sizes = torch.Size(input_shape)[self.start_dim:self.end_dim + 1]
+        target_shape = _meta_output_shape(lambda x: x.flatten(start_dim, end_dim), torch.Size(input_shape))
+        super().__init__(torch.Size(input_shape), target_shape)
 
     def __str__(self):
         return f"<flatten {self.start_dim} {self.end_dim}>"
 
 
 class UnflattenOp(ReshapeOp):
-    """Unflatten dimension *dim* into *sizes*."""
-
     def __init__(self, input_shape: torch.Size, dim: int, sizes: tuple[int, ...]):
         self.dim = dim
-        self.sizes = sizes
+        self.sizes = tuple(sizes)
         self.end_dim = dim + len(sizes) - 1
-        target_shape = _meta_output_shape(
-            lambda x: x.unflatten(dim, sizes), input_shape)
-        super().__init__(input_shape, target_shape)
+        target_shape = _meta_output_shape(lambda x: x.unflatten(dim, sizes), torch.Size(input_shape))
+        super().__init__(torch.Size(input_shape), target_shape)
 
     def __str__(self):
         return f"<unflatten {self.dim} {list(self.sizes)}>"
 
 
 class SqueezeOp(ReshapeOp):
-    """Remove size-1 dimension(s)."""
-
     def __init__(self, input_shape: torch.Size, dim=None):
+        input_shape = torch.Size(input_shape)
         self.dim = dim
         if dim is not None:
-            self._is_noop = (input_shape[dim] != 1)
-            if self._is_noop:
-                target_shape = input_shape
-            else:
-                target_shape = torch.Size(
-                    s for i, s in enumerate(input_shape) if i != dim)
+            self._is_noop = input_shape[dim] != 1
+            target_shape = input_shape if self._is_noop else torch.Size(
+                s for i, s in enumerate(input_shape) if i != dim
+            )
         else:
             self._is_noop = all(s != 1 for s in input_shape)
             self._squeezed_dims = [i for i, s in enumerate(input_shape) if s == 1]
@@ -140,15 +149,13 @@ class SqueezeOp(ReshapeOp):
 
 
 class UnsqueezeOp(ReshapeOp):
-    """Insert a size-1 dimension at *dim*."""
-
     def __init__(self, input_shape: torch.Size, dim: int):
         if dim < 0:
             dim += len(input_shape) + 1
-        assert 0 <= dim <= len(input_shape), f"Invalid unsqueeze dim {dim} for input shape {input_shape}"
+        assert 0 <= dim <= len(input_shape)
         self.dim = dim
-        target_shape = _meta_output_shape(lambda x: x.unsqueeze(dim), input_shape)
-        super().__init__(input_shape, target_shape)
+        target_shape = _meta_output_shape(lambda x: x.unsqueeze(dim), torch.Size(input_shape))
+        super().__init__(torch.Size(input_shape), target_shape)
 
     def __str__(self):
         return f"<unsqueeze {list(self.input_shape)} {self.dim}>"

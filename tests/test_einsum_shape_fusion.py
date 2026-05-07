@@ -8,7 +8,6 @@ compared to the unfused ComposedOp.
 import torch
 import pytest
 
-from boundlab.linearop._base import ComposedOp
 from boundlab.linearop._einsum import EinsumOp
 from boundlab.linearop._shape import (
     ReshapeOp,

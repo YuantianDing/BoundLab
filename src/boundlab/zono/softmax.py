@@ -98,7 +98,7 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
 
     expbounds = exp_linearizer(ub, lb)
     bias = expbounds.bias
-    error = expbounds.error_coeffs.tensor
+    error = expbounds.error_coeffs.coeff
     weights = expbounds.input_weights[0]
 
     finite_mask = torch.isfinite(weights) & torch.isfinite(error) & torch.isfinite(bias) & (lb < 30) & (ub < 30)
@@ -114,7 +114,7 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     bounds = reciprocal_linearizer(sum_exp_ub, sum_exp_lb)
     w = bounds.input_weights[0]
     mu = bounds.bias
-    beta = bounds.error_coeffs.tensor
+    beta = bounds.error_coeffs.coeff
     result = finite_mask * (w * sum_exp + mu + beta * LpEpsilon(sum_exp.shape))
     return result
 
@@ -151,7 +151,7 @@ def softmax_handler_basedon_softmax2(x: Expr, dim: int = -1, dtype=None) -> Expr
         zonobounds = softmax2_linearizer(result_ub, result_lb, diff_ub[i], diff_lb[i])
         ub_ibp, lb_ibp = softmax2_ibp(result_ub, result_lb, diff_ub[i], diff_lb[i])
 
-        lam_x, lam_y, mu, beta = zonobounds.input_weights[0], zonobounds.input_weights[1], zonobounds.bias, zonobounds.error_coeffs.tensor
+        lam_x, lam_y, mu, beta = zonobounds.input_weights[0], zonobounds.input_weights[1], zonobounds.bias, zonobounds.error_coeffs.coeff
         result = lam_x * result + lam_y * diff[i] + mu + beta * LpEpsilon(result.shape)
         result_ub, result_lb = result.ublb()
         result_ub = torch.minimum(result_ub, ub_ibp)

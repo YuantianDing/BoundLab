@@ -30,7 +30,8 @@ torch.Size([3, 2])
 
 import torch
 
-from ._base import LinearOp, ComposedOp, SumOp, ScalarOp, ZeroOp
+from ._base import LinearOp
+from ._compat import ScalarOp, ZeroOp
 from ._einsum import EinsumOp
 
 # Reshape ops

@@ -22,7 +22,7 @@ import torch
 
 import boundlab.expr
 from boundlab.linearop import ScalarOp
-from boundlab.linearop._base import ZeroOp
+from boundlab.linearop import ZeroOp
 
 __all__ = [
     "ub",

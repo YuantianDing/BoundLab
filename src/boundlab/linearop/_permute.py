@@ -2,8 +2,7 @@
 
 import torch
 
-from boundlab.linearop._base import LinearOpFlags
-from boundlab.linearop._sparse import SparseLinearOp as LinearOp
+from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
 from boundlab.linearop._sparse import make_input_dims, make_output_dims
 from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
 from boundlab.sparse.dim import Dim
@@ -40,12 +39,16 @@ class PermuteOp(LinearOp):
             )
 
         tensor = MultiCOOTensor(TN(factors=[]), MultiCOOSparsify(ops))
+        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
         super().__init__(
             MultiCOOTensorSum([tensor]),
             input_dims,
             output_dims,
             flags=LinearOpFlags.IS_NON_NEGATIVE,
+            debug_jacobian=debug_jacobian,
         )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):
         return f"<permute {self.dims}>"

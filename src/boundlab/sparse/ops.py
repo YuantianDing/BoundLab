@@ -18,9 +18,36 @@ def table_join_sorted(*args: Union[torch.Tensor, list[int]]) -> torch.Tensor:
         torch.Tensor of shape (M, C) where M is the number of joined rows and C is the
         total number of output columns.
     """
-    tensors: list[torch.Tensor] = [args[i * 2] for i in range(len(args) // 2)]
     columns: list[list[int]] = [args[i * 2 + 1] for i in range(len(args) // 2)]
+    functorch = getattr(torch._C, "_functorch", None)
+    disable_functorch = getattr(torch._C, "_DisableFuncTorch", None)
+    has_wrapped_tensor = (
+        functorch is not None
+        and any(
+            functorch.is_functorch_wrapped_tensor(args[i * 2])
+            for i in range(len(args) // 2)
+        )
+    )
+    if has_wrapped_tensor and disable_functorch is not None:
+        with disable_functorch():
+            tensors = [
+                _unwrap_functorch_metadata(args[i * 2])
+                for i in range(len(args) // 2)
+            ]
+            return _table_join_sorted_from_tensors(tensors, columns, args)
 
+    tensors: list[torch.Tensor] = [
+        _unwrap_functorch_metadata(args[i * 2])
+        for i in range(len(args) // 2)
+    ]
+    return _table_join_sorted_from_tensors(tensors, columns, args)
+
+
+def _table_join_sorted_from_tensors(
+    tensors: list[torch.Tensor],
+    columns: list[list[int]],
+    original_args,
+) -> torch.Tensor:
     assert len(tensors) == len(columns)
     assert all(t.dim() == 2 and t.dtype in [torch.int8, torch.int16, torch.int32, torch.int64] for t in tensors)
     assert all(len(dims) == t.shape[1] for t, dims in zip(tensors, columns))
@@ -28,7 +55,7 @@ def table_join_sorted(*args: Union[torch.Tensor, list[int]]) -> torch.Tensor:
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
         return torch.onnx.ops.symbolic(
             "boundlab::TableJoinSorted",
-            inputs=args,
+            inputs=original_args,
             dtype=tensors[0].dtype,
             shape=(ShapeEnv.create_symintnode(), ShapeEnv.create_symintnode()),
         )
@@ -57,6 +84,19 @@ def table_join_sorted(*args: Union[torch.Tensor, list[int]]) -> torch.Tensor:
         # after pandas' merge reorders columns); ``torch.tensor`` rejects
         # those. ``.copy()`` materialises a contiguous-stride view first.
         return torch.tensor(result[cols].values.copy(), dtype=dtype, device=device)
+
+
+def _unwrap_functorch_metadata(tensor: torch.Tensor) -> torch.Tensor:
+    """Return the plain tensor behind functorch wrappers for integer metadata."""
+    functorch = getattr(torch._C, "_functorch", None)
+    if functorch is None:
+        return tensor
+    try:
+        if functorch.is_functorch_wrapped_tensor(tensor):
+            return functorch.get_unwrapped(tensor).detach().clone()
+    except RuntimeError:
+        return tensor
+    return tensor
 
 def list_index_unique(tensor1: torch.Tensor, tensor2: torch.Tensor) -> torch.Tensor:
     """

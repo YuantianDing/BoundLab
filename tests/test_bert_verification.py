@@ -18,11 +18,12 @@ from torch import nn
 import boundlab.expr as expr
 from boundlab.expr._core import Expr
 import boundlab.prop as prop
+from boundlab.sparse import coo
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 
 warnings.filterwarnings("ignore")
-
+coo.DEBUG_MultiCOOTensor = True
 
 # ---- BERT components (DeepT small model) ------------------------------------
 

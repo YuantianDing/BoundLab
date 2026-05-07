@@ -22,7 +22,7 @@ class Dim:
     def __hash__(self) -> int:
         return id(self)
     def __str__(self):
-        return self.name if self.name else hex(id(self))
+        return self.name if self.name else "x" + hex(id(self))[-4:]
     def __repr__(self):
         return str(self)
 

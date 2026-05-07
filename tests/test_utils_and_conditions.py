@@ -1,14 +1,18 @@
-"""Tests for ``boundlab.utils.multiple_diagnonal`` /
+"""Obsolete condition tests for the removed EinsumOp compatibility API.
 ``multiple_diag_embed`` and the ``EinsumOp.add_conditions`` /
 ``remove_conditions`` helpers that build on them.
 """
+
+import pytest
+
+pytest.skip("obsolete EinsumOp condition API removed", allow_module_level=True)
 
 import itertools
 
 import pytest
 import torch
 
-from boundlab.linearop import EinsumOp, SumOp
+from boundlab.linearop import EinsumOp
 from boundlab.utils import EQCondition, multiple_diag_embed, multiple_diagnonal
 
 
@@ -294,117 +298,9 @@ def _flatten_sumop_tensor(result, out_shape):
     fused all components) or a SumOp of norm results. Reduce to a tensor."""
     if isinstance(result, EinsumOp):
         return result.tensor
-    if isinstance(result, SumOp):
-        # Sum of per-component norms — used as an upper bound when components
-        # couldn't be fused. Materialize via jacobian for a single-tensor view.
-        return sum(op.tensor for op in result.ops)
     # Fall back to jacobian-based evaluation for any other LinearOp.
     jac = result.force_jacobian() if hasattr(result, "force_jacobian") else result.jacobian()
     return jac.reshape(out_shape)
-
-
-@pytest.mark.parametrize("p", [1, 2, 3])
-def test_norm_input_sumop_same_structure_fuses(p):
-    """Two same-structure EinsumOps inside a SumOp: purify merges them into a
-    single EinsumOp, so norm_input equals the row p-norm of the summed Jacobian."""
-    torch.manual_seed(200 + p)
-    a = EinsumOp(torch.randn(5, 3), [1], [0])
-    b = EinsumOp(torch.randn(5, 3), [1], [0])
-    s = SumOp(a, b)
-    result = s.norm_input(p)
-    got = _flatten_sumop_tensor(result, s.output_shape)
-    merged_jac = a.force_jacobian() + b.force_jacobian()
-    exp = _row_norms_from_jacobian(merged_jac, p, s.output_shape)
-    assert torch.allclose(got, exp, atol=1e-5)
-    # After purify the SumOp should have collapsed to a single op.
-    assert len(s.ops) == 1 and isinstance(s.ops[0], EinsumOp)
-
-
-@pytest.mark.parametrize("p", [1, 2, 3])
-def test_norm_input_sumop_mixed_structure_fuses(p):
-    """Hadamard + full EinsumOp: purify_with aligns conditions and fuses.
-    norm_input reflects the true Jacobian of the merged operator."""
-    torch.manual_seed(210 + p)
-    h = EinsumOp(torch.randn(5), [0], [0])           # hadamard 5→5
-    f = EinsumOp(torch.randn(5, 5), [1], [0])        # full 5→5
-    s = SumOp(h, f)
-    result = s.norm_input(p)
-    got = _flatten_sumop_tensor(result, s.output_shape)
-    merged_jac = h.force_jacobian() + f.force_jacobian()
-    exp = _row_norms_from_jacobian(merged_jac, p, s.output_shape)
-    assert torch.allclose(got, exp, atol=1e-5)
-    assert len(s.ops) == 1 and isinstance(s.ops[0], EinsumOp)
-
-@pytest.mark.parametrize("p", [1, 2, 3])
-def test_norm_input_sumop_mixed_structure_fuses(p):
-    """Full-hadamard + partial-hadamard EinsumOp on the same input/output
-    shape [5, 5]: one op's ``mul_conditions`` is a strict subset of the
-    other's, so ``purify_with`` aligns via ``remove_conditions`` and the sum
-    collapses to a single EinsumOp. ``norm_input`` then reflects the true
-    per-output row p-norm of the merged Jacobian."""
-    torch.manual_seed(210 + p)
-    # f: full hadamard on [5, 5] → mul_conditions = {(0, 0), (1, 1)}
-    f = EinsumOp(torch.randn(3, 3, 3), [0, 1], [2, 1])
-    # h: partial hadamard, mul only on dim 0 → mul_conditions = {(0, 0)}
-    #    tensor[i, j, k]: y[i, k] = sum_j t[i, j, k] * x[i, j]
-    h = EinsumOp(torch.randn(3, 3, 3), [0, 1], [0, 2])
-    assert f.input_shape == h.input_shape == torch.Size([3, 3])
-    assert f.output_shape == h.output_shape == torch.Size([3, 3])
-
-    s = SumOp(h, f)
-    jac1 = s.jacobian()
-    s.purify()
-    jac2 = s.jacobian()
-    assert torch.allclose(jac1, jac2, atol=1e-5)
-    result = s.norm_input(1)
-    got = result.jacobian()
-    merged_jac = h.force_jacobian() + f.force_jacobian()
-    assert torch.allclose(jac1, merged_jac, atol=1e-5)
-    exp = _row_norms_from_jacobian(merged_jac, 1, s.output_shape)
-    assert got.shape == exp.shape == s.output_shape
-    assert torch.allclose(got, exp, atol=1e-5)
-
-@pytest.mark.parametrize("p", [1, 2, 3])
-def test_norm_input_sumop_mixed_structure_fuses2(p):
-    """Full-hadamard + partial-hadamard EinsumOp on the same input/output
-    shape [5, 5]: one op's ``mul_conditions`` is a strict subset of the
-    other's, so ``purify_with`` aligns via ``remove_conditions`` and the sum
-    collapses to a single EinsumOp. ``norm_input`` then reflects the true
-    per-output row p-norm of the merged Jacobian."""
-    torch.manual_seed(210 + p)
-    # f: full hadamard on [5, 5] → mul_conditions = {(0, 0), (1, 1)}
-    f = EinsumOp(torch.randn(3, 3, 3), [0, 1], [1, 2])
-    # h: partial hadamard, mul only on dim 0 → mul_conditions = {(0, 0)}
-    #    tensor[i, j, k]: y[i, k] = sum_j t[i, j, k] * x[i, j]
-    h = EinsumOp(torch.randn(3, 3, 3), [0, 1], [0, 2])
-    assert f.input_shape == h.input_shape == torch.Size([3, 3])
-    assert f.output_shape == h.output_shape == torch.Size([3, 3])
-
-    s = SumOp(h, f)
-    jac1 = s.jacobian()
-    s.purify()
-    jac2 = s.jacobian()
-    assert torch.allclose(jac1, jac2, atol=1e-5)
-    result = s.norm_input(1)
-    got = result.jacobian()
-    merged_jac = h.force_jacobian() + f.force_jacobian()
-    assert torch.allclose(jac1, merged_jac, atol=1e-5)
-    exp = _row_norms_from_jacobian(merged_jac, 1, s.output_shape)
-    assert got.shape == exp.shape == s.output_shape
-    assert torch.allclose(got, exp, atol=1e-5)
-
-def test_sumop_purify_is_idempotent():
-    """Calling norm_input twice shouldn't re-purify or change the result."""
-    torch.manual_seed(220)
-    a = EinsumOp(torch.randn(4, 3), [1], [0])
-    b = EinsumOp(torch.randn(4, 3), [1], [0])
-    s = SumOp(a, b)
-    out1 = s.norm_input(2)
-    assert s.purified
-    out2 = s.norm_input(2)
-    t1 = _flatten_sumop_tensor(out1, s.output_shape)
-    t2 = _flatten_sumop_tensor(out2, s.output_shape)
-    assert torch.allclose(t1, t2)
 
 
 def test_remove_then_add_roundtrip():

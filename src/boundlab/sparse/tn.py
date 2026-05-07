@@ -20,6 +20,10 @@ class Dense:
         for idx, dim in enumerate(self.dims):
             assert self.tensor.shape[idx] == dim.length, \
                 f"Tensor axis {idx} has length {self.tensor.shape[idx]}, but dim has length {dim.length}."
+        strides = self.tensor.stride()
+        if 0 in strides:
+            self.tensor = self.tensor[tuple(0 if stride == 0 else slice(None) for stride in strides)]
+            self.dims = [dim for dim, stride in zip(self.dims, strides) if stride != 0]
         assert all(self.tensor.stride(i) > 0 for i in range(self.tensor.ndim)), "Dense tensors must be contiguous in memory."
         # TODO: sort the dims and permute the tensor accordingly, so that the dims are always in sorted order.
         sorted_dims = list(sorted(self.dims))
@@ -124,8 +128,7 @@ class Dense:
         return Dense(tensor=tensor, dims=dims)
     
     def allclose(self, other: "Dense", eps: float = 1e-5) -> bool:
-        if set(self.dims) != set(other.dims):
-            return False
+        assert set(self.dims) == set(other.dims)
         other_aligned = other.align_from(self.tensor)
         return torch.allclose(self.tensor, other_aligned.tensor, atol=eps)
     
@@ -181,6 +184,24 @@ class Dense:
         new_dims = [dim_map.get(dim, dim) for dim in self.dims]
         return Dense(tensor=self.tensor, dims=new_dims)
     
+    def apply(self, func: Callable[[torch.Tensor], torch.Tensor]) -> "Dense":
+        return Dense(tensor=func(self.tensor), dims=self.dims)
+    
+    def tensordot(self, other: "Dense", dims: list[Dim]) -> "Dense":
+        # assert all(dim in self.dims and dim in other.dims for dim in dims), f"Cannot tensordot on dims {dims} that are not all in both tensors."
+        result_dims = sorted(set(self.dims + other.dims) - set(dims))
+        all_dims = sorted(set(self.dims + other.dims))
+        dim_names = {dim: i for i, dim in enumerate(all_dims)}
+        result_tensor = torch.einsum(
+            self.tensor,
+            [dim_names[dim] for dim in self.dims],
+            other.tensor,
+            [dim_names[dim] for dim in other.dims],
+            [dim_names[dim] for dim in result_dims],
+        )
+
+        return Dense(tensor=result_tensor, dims=result_dims)
+
 @dataclass
 class TN:
     factors: list[Dense]

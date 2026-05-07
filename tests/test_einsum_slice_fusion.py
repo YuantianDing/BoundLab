@@ -116,13 +116,11 @@ class TestGetSliceFusion:
 
     def test_mul_dim_partial_slice_swaps(self):
         """Non-trivial slice on a mul dim swaps past einsum."""
-        from boundlab.linearop._base import ComposedOp
         torch.manual_seed(6)
         t = torch.randn(3, 4)
         e = EinsumOp(t, [0, 1], [0])
         gs = GetSliceOp(e.output_shape, _full(e.output_shape, slice(1, 3)))
         fused = gs @ e
-        assert isinstance(fused, ComposedOp)
         x = torch.randn(3, 4)
         y_fused = fused.forward(x)
         y_ref = gs.forward(e.forward(x))
@@ -180,13 +178,11 @@ class TestSetSliceFusion:
 
     def test_mul_dim_partial_slice_swaps(self):
         """Slicing a mul-dim input axis swaps past einsum."""
-        from boundlab.linearop._base import ComposedOp
         torch.manual_seed(14)
         t = torch.randn(4, 3)
         e = EinsumOp(t, [0, 1], [0])
         ss = SetSliceOp(torch.Size([4, 3]), [[slice(1, 3)], [slice(0, 3)]])
         fused = e @ ss
-        assert isinstance(fused, ComposedOp)
         x = torch.randn(2, 3)
         y_fused = fused.forward(x)
         y_ref = e.forward(ss.forward(x))

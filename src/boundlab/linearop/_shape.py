@@ -1,140 +1,202 @@
-# """Miscellaneous shape LinearOp implementations.
+"""Miscellaneous shape LinearOp implementations."""
 
-# Contains ops not covered by the dedicated reshape/permute/expand modules:
-# RepeatOp, TileOp, FlipOp, RollOp, DiagOp.
+import torch
 
-# Re-exports reshape/permute/expand ops for backward compatibility.
-# """
-
-# import torch
-
-# from boundlab.linearop._base import LinearOp, LinearOpFlags
-
-# # Re-export for backward compatibility
-# from boundlab.linearop._reshape import (
-#     ReshapeOp, FlattenOp, UnflattenOp, SqueezeOp, UnsqueezeOp, _meta_output_shape,
-# )
-# from boundlab.linearop._permute import PermuteOp, TransposeOp
-# from boundlab.linearop._expand import ExpandOp
+from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._sparse import make_input_dims, make_output_dims
+from boundlab.linearop._reshape import ReshapeOp, FlattenOp, UnflattenOp, SqueezeOp, UnsqueezeOp, _meta_output_shape
+from boundlab.linearop._permute import PermuteOp, TransposeOp
+from boundlab.linearop._expand import ExpandOp
+from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
+from boundlab.sparse.dim import Dim
+from boundlab.sparse.table import TorchTable
+from boundlab.sparse.tn import TN
 
 
-# # ---------------------------------------------------------------------------
-# # Repeat / tile
-# # ---------------------------------------------------------------------------
+def _axis_op(input_dim, output_dim, mapping: torch.Tensor, ordering: float, name: str):
+    mapping = mapping.to(torch.long).contiguous()
+    if input_dim is not None and mapping.numel() == input_dim.length == output_dim.length and torch.equal(mapping, torch.arange(output_dim.length)):
+        return COOSparsify.md_eye(Dim(output_dim.length, ordering, name), [output_dim, input_dim])
 
-# class RepeatOp(LinearOp):
-#     """Tile-repeat the tensor (adjoint folds and sums repeated blocks)."""
-
-#     def __init__(self, input_shape: torch.Size, sizes: tuple[int, ...]):
-#         self.sizes = sizes
-#         n_pad = len(sizes) - len(input_shape)
-#         self._padded_input_shape = torch.Size([1] * n_pad + list(input_shape))
-#         output_shape = torch.Size(
-#             s * r for s, r in zip(self._padded_input_shape, sizes))
-#         super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING)
-
-#     def forward(self, x):
-#         return x.repeat(*self.sizes)
-
-#     def backward(self, grad):
-#         new_shape = []
-#         for r, s in zip(self.sizes, self._padded_input_shape):
-#             new_shape.extend([r, s])
-#         grad = grad.reshape(new_shape)
-#         sum_dims = list(range(0, len(new_shape), 2))
-#         grad = grad.sum(dim=sum_dims)
-#         return grad.reshape(self.input_shape)
-
-#     def __str__(self):
-#         return f"<repeat {list(self.sizes)}>"
+    edge = Dim(int(mapping.numel()), ordering, name)
+    columns = [output_dim]
+    data = [torch.arange(mapping.numel(), dtype=torch.long)]
+    if input_dim is not None:
+        columns.append(input_dim)
+        data.append(mapping)
+    return COOSparsify(edge, TorchTable(columns=columns, data=data, length=int(mapping.numel())))
 
 
-# class TileOp(RepeatOp):
-#     """Alias for repeat with dimension-padding handled like ``torch.tile``."""
-
-#     def __init__(self, input_shape: torch.Size, sizes: tuple[int, ...]):
-#         n_pad = len(input_shape) - len(sizes)
-#         if n_pad > 0:
-#             sizes = (1,) * n_pad + tuple(sizes)
-#         super().__init__(input_shape, sizes)
-
-#     def __str__(self):
-#         return f"<tile {list(self.sizes)}>"
+def _tensor_from_ops(input_dims, output_dims, ops):
+    tensor = MultiCOOTensor(TN(factors=[]), MultiCOOSparsify(ops))
+    return MultiCOOTensorSum([tensor]), input_dims, output_dims
 
 
-# # ---------------------------------------------------------------------------
-# # Element-reordering (self-adjoint or simple inverse)
-# # ---------------------------------------------------------------------------
+class RepeatOp(LinearOp):
+    def __init__(self, input_shape: torch.Size, sizes: tuple[int, ...]):
+        input_shape = torch.Size(input_shape)
+        self.sizes = tuple(sizes)
+        self._n_pad = len(self.sizes) - len(input_shape)
+        assert self._n_pad >= 0
+        self._padded_input_shape = torch.Size([1] * self._n_pad + list(input_shape))
+        output_shape = torch.Size(s * r for s, r in zip(self._padded_input_shape, self.sizes))
 
-# class FlipOp(LinearOp):
-#     """Reverse elements along *dims* (self-adjoint)."""
+        input_dims = make_input_dims(input_shape)
+        output_dims = make_output_dims(output_shape)
+        ops = []
+        for axis, output_dim in enumerate(output_dims):
+            if axis < self._n_pad:
+                mapping = torch.arange(output_shape[axis], dtype=torch.long)
+                ops.append(_axis_op(None, output_dim, mapping, 500.0 + axis, f"k{axis}"))
+                continue
+            input_axis = axis - self._n_pad
+            mapping = torch.arange(output_shape[axis], dtype=torch.long) % input_shape[input_axis]
+            ops.append(_axis_op(input_dims[input_axis], output_dim, mapping, 500.0 + axis, f"k{axis}"))
+        tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, ops)
+        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        super().__init__(
+            tensor,
+            input_dims,
+            output_dims,
+            flags=LinearOpFlags.IS_NON_NEGATIVE,
+            debug_jacobian=debug_jacobian,
+        )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
-#     def __init__(self, input_shape: torch.Size, dims):
-#         self.dims = dims
-#         super().__init__(input_shape, input_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
-
-#     def forward(self, x):
-#         return x.flip(self.dims)
-
-#     def backward(self, grad):
-#         return grad.flip(self.dims)
-
-#     def __str__(self):
-#         return f"<flip {self.dims}>"
-
-
-# class RollOp(LinearOp):
-#     """Circular-shift elements (adjoint is the inverse shift)."""
-
-#     def __init__(self, input_shape: torch.Size, shifts, dims):
-#         self.shifts = shifts
-#         self.dims = dims
-#         if isinstance(shifts, int):
-#             self._inv_shifts = -shifts
-#         else:
-#             self._inv_shifts = [-s for s in shifts]
-#         super().__init__(input_shape, input_shape, flags=LinearOpFlags.IS_NON_NEGATIVE)
-
-#     def forward(self, x):
-#         return x.roll(self.shifts, self.dims)
-
-#     def backward(self, grad):
-#         return grad.roll(self._inv_shifts, self.dims)
-
-#     def __str__(self):
-#         return f"<roll {self.shifts} {self.dims}>"
+    def __str__(self):
+        return f"<repeat {list(self.sizes)}>"
 
 
-# # ---------------------------------------------------------------------------
-# # Diagonal
-# # ---------------------------------------------------------------------------
+class TileOp(RepeatOp):
+    def __init__(self, input_shape: torch.Size, sizes: tuple[int, ...]):
+        self.tile_sizes = tuple(sizes)
+        n_pad = len(input_shape) - len(sizes)
+        if n_pad > 0:
+            sizes = (1,) * n_pad + tuple(sizes)
+        super().__init__(input_shape, sizes)
 
-# class DiagOp(LinearOp):
-#     """Extract or create a diagonal (1D↔2D)."""
+    def __str__(self):
+        return f"<tile {list(self.tile_sizes)}>"
 
-#     def __init__(self, input_shape: torch.Size, diagonal: int = 0):
-#         self.diagonal = diagonal
-#         self._input_ndim = len(input_shape)
-#         output_shape = _meta_output_shape(
-#             lambda x: x.diag(diagonal), input_shape)
-#         super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
 
-#     def forward(self, x):
-#         return x.diag(self.diagonal)
+class FlipOp(LinearOp):
+    def __init__(self, input_shape: torch.Size, dims):
+        input_shape = torch.Size(input_shape)
+        self.dims = tuple(dims) if not isinstance(dims, int) else (dims,)
 
-#     def backward(self, grad):
-#         if self._input_ndim == 1:
-#             return grad.diag(self.diagonal)
-#         else:
-#             result = torch.zeros(
-#                 self.input_shape, dtype=grad.dtype, device=grad.device)
-#             n = len(grad)
-#             idx = torch.arange(n, device=grad.device)
-#             if self.diagonal >= 0:
-#                 result[idx, idx + self.diagonal] = grad
-#             else:
-#                 result[idx - self.diagonal, idx] = grad
-#             return result
+        input_dims = make_input_dims(input_shape)
+        output_dims = make_output_dims(input_shape)
+        flip_dims = {d if d >= 0 else len(input_shape) + d for d in self.dims}
+        ops = []
+        for axis, (input_dim, output_dim) in enumerate(zip(input_dims, output_dims)):
+            mapping = torch.arange(input_shape[axis], dtype=torch.long)
+            if axis in flip_dims:
+                mapping = input_shape[axis] - 1 - mapping
+            ops.append(_axis_op(input_dim, output_dim, mapping, 500.0 + axis, f"k{axis}"))
+        tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, ops)
+        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        super().__init__(
+            tensor,
+            input_dims,
+            output_dims,
+            flags=LinearOpFlags.IS_NON_NEGATIVE,
+            debug_jacobian=debug_jacobian,
+        )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
-#     def __str__(self):
-#         return f"<diag {self.diagonal}>"
+    def __str__(self):
+        return f"<flip {self.dims}>"
+
+
+class RollOp(LinearOp):
+    def __init__(self, input_shape: torch.Size, shifts, dims):
+        input_shape = torch.Size(input_shape)
+        self.shifts = shifts
+        self.dims = dims
+        dims_tuple = (dims,) if isinstance(dims, int) else tuple(dims)
+        shifts_tuple = (shifts,) if isinstance(shifts, int) else tuple(shifts)
+        self._inv_shifts = -shifts if isinstance(shifts, int) else [-s for s in shifts]
+
+        shift_by_dim = {
+            dim if dim >= 0 else len(input_shape) + dim: shift
+            for shift, dim in zip(shifts_tuple, dims_tuple)
+        }
+        input_dims = make_input_dims(input_shape)
+        output_dims = make_output_dims(input_shape)
+        ops = []
+        for axis, (input_dim, output_dim) in enumerate(zip(input_dims, output_dims)):
+            mapping = torch.arange(input_shape[axis], dtype=torch.long)
+            if axis in shift_by_dim:
+                mapping = (mapping - shift_by_dim[axis]) % input_shape[axis]
+            ops.append(_axis_op(input_dim, output_dim, mapping, 500.0 + axis, f"k{axis}"))
+        tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, ops)
+        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        super().__init__(
+            tensor,
+            input_dims,
+            output_dims,
+            flags=LinearOpFlags.IS_NON_NEGATIVE,
+            debug_jacobian=debug_jacobian,
+        )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
+
+    def __str__(self):
+        return f"<roll {self.shifts} {self.dims}>"
+
+
+class DiagOp(LinearOp):
+    def __init__(self, input_shape: torch.Size, diagonal: int = 0):
+        input_shape = torch.Size(input_shape)
+        self.diagonal = diagonal
+        self._input_ndim = len(input_shape)
+        output_shape = _meta_output_shape(lambda x: x.diag(diagonal), input_shape)
+        if len(input_shape) == 1:
+            n = input_shape[0]
+            k = torch.arange(n, dtype=torch.long)
+            input_coords = k[:, None]
+            output_coords = torch.empty((n, 2), dtype=torch.long)
+            if diagonal >= 0:
+                output_coords[:, 0] = k
+                output_coords[:, 1] = k + diagonal
+            else:
+                output_coords[:, 0] = k - diagonal
+                output_coords[:, 1] = k
+        else:
+            n = output_shape[0]
+            k = torch.arange(n, dtype=torch.long)
+            output_coords = k[:, None]
+            input_coords = torch.empty((n, 2), dtype=torch.long)
+            if diagonal >= 0:
+                input_coords[:, 0] = k
+                input_coords[:, 1] = k + diagonal
+            else:
+                input_coords[:, 0] = k - diagonal
+                input_coords[:, 1] = k
+        input_dims = make_input_dims(input_shape)
+        output_dims = make_output_dims(output_shape)
+        if diagonal == 0 and all(dim.length == int(input_coords.shape[0]) for dim in input_dims + output_dims):
+            op = COOSparsify.md_eye(Dim(int(input_coords.shape[0]), 500.0, "k_diag"), output_dims + input_dims)
+        else:
+            edge = Dim(int(input_coords.shape[0]), 500.0, "k_diag")
+            data = [
+                *(output_coords[:, axis].contiguous() for axis in range(len(output_dims))),
+                *(input_coords[:, axis].contiguous() for axis in range(len(input_dims))),
+            ]
+            op = COOSparsify(edge, TorchTable(columns=output_dims + input_dims, data=data, length=int(input_coords.shape[0])))
+        tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, [op])
+        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        super().__init__(
+            tensor,
+            input_dims,
+            output_dims,
+            flags=LinearOpFlags.IS_NON_NEGATIVE,
+            debug_jacobian=debug_jacobian,
+        )
+        if DEBUG_LinearOp:
+            assert self.tensor.to_dense().allclose(self.debug_jacobian)
+
+    def __str__(self):
+        return f"<diag {self.diagonal}>"

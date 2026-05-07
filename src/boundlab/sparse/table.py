@@ -205,34 +205,34 @@ class TorchTable:
         for s in col_sets[1:]:
             shared &= s
 
-        all_shared_are_indices = len(shared) > 0 and all(
-            t.data[t.columns.index(c)] is None for t in tables for c in shared
-        )
-        if all_shared_are_indices:
-            min_length = min(t.length for t in tables)
-            new_columns: list[Dim] = []
-            new_data: list[Optional[Indices]] = []
-            seen: set[Dim] = set()
-            for t in tables:
-                for name, dat in zip(t.columns, t.data):
-                    if name in seen:
-                        continue
-                    seen.add(name)
-                    new_columns.append(name)
-                    if name in shared:
-                        new_data.append(None)
-                    elif dat is None:
-                        new_data.append(None)
-                    else:
-                        sliced = dat[:min_length]
-                        new_data.append(
-                            TorchTable._maybe_compress(sliced, min_length)
-                        )
-            result = TorchTable(new_columns, new_data, length=min_length)
-            # Sorted+unique only guaranteed when each table individually was;
-            # the index-column fast-path preserves sort+unique on shared cols.
-            result.is_unique = True
-            return result
+        # all_shared_are_indices = len(shared) > 0 and all(
+        #     t.data[t.columns.index(c)] is None for t in tables for c in shared
+        # )
+        # if all_shared_are_indices:
+        #     min_length = min(t.length for t in tables)
+        #     new_columns: list[Dim] = []
+        #     new_data: list[Optional[Indices]] = []
+        #     seen: set[Dim] = set()
+        #     for t in tables:
+        #         for name, dat in zip(t.columns, t.data):
+        #             if name in seen:
+        #                 continue
+        #             seen.add(name)
+        #             new_columns.append(name)
+        #             if name in shared:
+        #                 new_data.append(None)
+        #             elif dat is None:
+        #                 new_data.append(None)
+        #             else:
+        #                 sliced = dat[:min_length]
+        #                 new_data.append(
+        #                     TorchTable._maybe_compress(sliced, min_length)
+        #                 )
+        #     result = TorchTable(new_columns, new_data, length=min_length)
+        #     # Sorted+unique only guaranteed when each table individually was;
+        #     # the index-column fast-path preserves sort+unique on shared cols.
+        #     result.is_unique = True
+        #     return result
 
         # Slow path — remap columns to dense indices and call table_join_sorted.
         all_col_names = sorted(set().union(*col_sets))
@@ -246,7 +246,7 @@ class TorchTable:
         result_tensor = table_join_sorted(*args)
         new_length = int(result_tensor.shape[0])
         new_data = [
-            TorchTable._maybe_compress(result_tensor[:, i], new_length)
+            result_tensor[:, i]
             for i in range(len(all_col_names))
         ]
         return TorchTable(list(all_col_names), new_data, length=new_length)
