@@ -67,6 +67,10 @@ from ._indexing import GetIndicesOp, SetIndicesOp
 from ._indices import (
     GatherOp,
     ScatterOp,
+    NarrowOp,
+    SelectOp,
+    GetItemOp,
+    PadOp,
     narrow_indices,
     select_indices,
     pad_indices,
@@ -79,8 +83,6 @@ from ._indices import (
 __all__ = [
     # Base classes
     "LinearOp",
-    "ComposedOp",
-    "SumOp",
     "ScalarOp",
     "ZeroOp",
     # Einsum

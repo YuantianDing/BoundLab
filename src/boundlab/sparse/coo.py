@@ -10,6 +10,7 @@ from boundlab.sparse.table import TorchTable, Indices
 from boundlab.sparse.tn import TN, Dense, Dim
 IndicesOrNone = Union[Indices, None]
 
+
 DEBUG_MultiCOOTensor = False
 DEBUG_NO_MD_EYE_OPT = False
 class COOSparsify:
@@ -613,7 +614,7 @@ class MultiCOOTensor:
         )
     
     def __str__(self) -> str:
-        return f"({self.tn})({self.sparsify})"
+        return f"{self.tn} -> {self.sparsify}"
         
 
 @dataclass
@@ -624,6 +625,7 @@ class MultiCOOTensorSum:
     def __post_init__(self):
         if self.dims is None:
             self.dims = self.terms[0].dims
+        self.terms.sort(key=lambda term: term.real_numel(), reverse=True)
         self._assert_sorted()
     
     @property

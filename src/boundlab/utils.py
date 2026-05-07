@@ -253,6 +253,6 @@ def is_sorted(lst: list) -> bool:
     """Check if a list of integers is sorted in ascending order."""
     return all(x <= y for x, y in zip(lst, lst[1:]))
 
-def all_unique(lst: Iterable) -> bool:
+def all_unique(lst: list) -> bool:
     """Check if all elements in a list are unique."""
-    return len(set(lst)) == len(list(lst))
+    return len(set(lst)) == len(lst)

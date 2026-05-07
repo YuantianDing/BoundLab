@@ -9,11 +9,14 @@ class Dim:
         self.length = length
         self.ordering = ordering
         self.name = name
+
+    def _sort_key(self) -> tuple[float, int, str, int]:
+        return (self.ordering, self.length, self.name or "", id(self))
     
     def __le__(self, other: "Dim") -> bool:
-        return self.ordering <= other.ordering
+        return self._sort_key() <= other._sort_key()
     def __lt__(self, other: "Dim") -> bool:
-        return self.ordering < other.ordering
+        return self._sort_key() < other._sort_key()
     def __eq__(self, other: Any) -> bool:
         return self is other
     def __hash__(self) -> int:

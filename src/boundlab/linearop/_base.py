@@ -10,7 +10,7 @@ import warnings
 from boundlab.sparse import coo
 from boundlab.sparse.dim import Dim
 
-from boundlab.sparse.coo import MultiCOOTensor, MultiCOOTensorSum, MultiCOOTensorSum
+from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum, MultiCOOTensorSum
 from boundlab.sparse.tn import Dense
 
 class LinearOpFlags(enum.Flag):
@@ -40,8 +40,8 @@ class LinearOp:
             output_dims: The dimensions of the output tensor.
             flags: Flags indicating special properties of this LinearOp.
         """
-        self.input_dims = [dim.clone() for dim in input_dims]
-        self.output_dims = [dim.clone() for dim in output_dims]
+        self.input_dims = [dim.clone(name=f"i{idx}") for idx, dim in enumerate(input_dims)]
+        self.output_dims = [dim.clone(name=f"o{idx}") for idx, dim in enumerate(output_dims)]
         input_dims_map = {dim: self.input_dims[idx] for idx, dim in enumerate(input_dims)}
         output_dims_map = {dim: self.output_dims[idx] for idx, dim in enumerate(output_dims)}
         inner_dims = sorted(set(tensor.inner_dims) - set(input_dims) - set(output_dims))
@@ -55,7 +55,7 @@ class LinearOp:
         self.name = None
 
     def __str__(self):
-        return self.name if self.name else "{ " + str(self.tensor) + " }"
+        return self.name if self.name else "{" + str(self.tensor) + "}"
 
     def __call__(self, x):
         """Apply this LinearOp to an expression, returning a Linear."""
@@ -114,9 +114,9 @@ class LinearOp:
         """Compose this LinearOp with another (self ∘ other)."""
         assert self.input_shape == other.output_shape, f"Cannot compose LinearOps with incompatible shapes: {self.input_shape} and {other.output_shape}."
         other_tensor = other.tensor
-        other_tensor.replace_dims({a: b for a, b in zip(other.output_dims, self.input_dims)})
+        other_tensor = other_tensor.replace_dims({a: b for a, b in zip(other.output_dims, self.input_dims)})
         tensor = coo.tensordot(self.tensor, other_tensor, self.input_dims)
-        return LinearOp(tensor=tensor, input_dims=other.input_dims, output_dims=self.output_dims, flags=self.flags | other.flags)
+        return LinearOp(tensor=tensor, input_dims=other.input_dims, output_dims=self.output_dims, flags=self.flags & other.flags)
 
 
     def __add__(self, other: "LinearOp") -> "LinearOp":
@@ -148,7 +148,7 @@ class LinearOp:
     
     def abs(self, p: Union[int, float] = 1) -> "LinearOp":
         """Return a LinearOp representing the element-wise absolute value of this LinearOp."""
-        if self.flags & LinearOpFlags.IS_NON_NEGATIVE and p == 1:
+        if LinearOpFlags.IS_NON_NEGATIVE in self.flags and p == 1:
             return self
         else:
             if p == 1:
@@ -157,6 +157,10 @@ class LinearOp:
                 return LinearOp(tensor=self.tensor.apply_multiplicative(lambda x: x.pow(p)), input_dims=self.input_dims, output_dims=self.output_dims, flags=self.flags | LinearOpFlags.IS_NON_NEGATIVE)
             else:
                 return LinearOp(tensor=self.tensor.apply_multiplicative(lambda x: x.abs().pow(p)), input_dims=self.input_dims, output_dims=self.output_dims, flags=self.flags | LinearOpFlags.IS_NON_NEGATIVE)
+            
+    def apply_multiplicative(self, func) -> "LinearOp":
+        """Return a LinearOp representing the element-wise application of a function to this LinearOp."""
+        return LinearOp(tensor=self.tensor.apply_multiplicative(func), input_dims=self.input_dims, output_dims=self.output_dims, flags=self.flags)
 
     def sum_input(self) -> "LinearOp":
         """Return a LinearOp representing the sum over all input dimensions of this LinearOp."""
