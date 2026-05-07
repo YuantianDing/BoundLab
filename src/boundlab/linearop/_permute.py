@@ -2,72 +2,56 @@
 
 import torch
 
-from boundlab.linearop._base import LinearOp, LinearOpFlags
-from boundlab.utils import merge_name
+from boundlab.linearop._base import LinearOpFlags
+from boundlab.linearop._sparse import SparseLinearOp as LinearOp
+from boundlab.linearop._sparse import make_input_dims, make_output_dims
+from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
+from boundlab.sparse.dim import Dim
+from boundlab.sparse.tn import TN
 
 
 class PermuteOp(LinearOp):
-    """Permute dimensions of the input tensor."""
-
     def __init__(self, input_shape: torch.Size, dims: tuple[int, ...]):
+        input_shape = torch.Size(input_shape)
+        ndim = len(input_shape)
+        dims = tuple(dim + ndim if dim < 0 else dim for dim in dims)
+        assert len(dims) == ndim, f"Expected {ndim} permutation dims, got {len(dims)}."
+        assert set(dims) == set(range(ndim)), f"Invalid permutation dims {dims} for shape {input_shape}."
+
         self.dims = list(dims)
         self.inv_dims = [0] * len(dims)
         for i, d in enumerate(dims):
             self.inv_dims[d] = i
         output_shape = torch.Size(input_shape[d] for d in dims)
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
+        input_dims = make_input_dims(input_shape)
+        output_dims = make_output_dims(output_shape)
+        ops = []
+        for output_axis, input_axis in enumerate(dims):
+            inner = Dim(
+                length=int(input_shape[input_axis]),
+                ordering=500.0 + float(output_axis),
+                name=f"k{output_axis}",
+            )
+            ops.append(
+                COOSparsify.md_eye(
+                    inner,
+                    [output_dims[output_axis], input_dims[input_axis]],
+                )
+            )
 
-    def forward(self, x):
-        return x.permute(*self.dims)
-
-    def backward(self, grad):
-        return grad.permute(*self.inv_dims)
-
-    def vforward(self, x):
-        n = len(self.dims)
-        batch_ndim = x.dim() - n
-        perm = self.dims + [n + i for i in range(batch_ndim)]
-        return x.permute(*perm)
-
-    def vbackward(self, grad):
-        n = len(self.inv_dims)
-        batch_ndim = grad.dim() - n
-        perm = list(range(batch_ndim)) + [batch_ndim + d for d in self.inv_dims]
-        return grad.permute(*perm)
-
-    def __matmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, PermuteOp):
-            assert self.input_shape == other.output_shape
-            new_dims = [other.dims[self.dims[i]] for i in range(len(self.dims))]
-            return PermuteOp(other.input_shape, tuple(new_dims))
-        if isinstance(other, EinsumOp):
-            assert self.input_shape == other.output_shape
-            new_output_dims = [other.output_dims[self.dims[i]] for i in range(len(other.output_dims))]
-            result = EinsumOp(other.tensor, other.input_dims, new_output_dims, name=merge_name(self, "@", other))
-            assert result.input_shape == other.input_shape, f"PermuteOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
-            assert result.output_shape == self.output_shape, f"PermuteOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
-            return result
-        return NotImplemented
-
-    def __rmatmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, EinsumOp):
-            assert self.output_shape == other.input_shape
-            new_input_dims = [other.input_dims[self.inv_dims[i]] for i in range(len(other.input_dims))]
-            result = EinsumOp(other.tensor, new_input_dims, other.output_dims, name=merge_name(other, "@", self))
-            assert result.input_shape == self.input_shape, f"PermuteOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
-            assert result.output_shape == other.output_shape, f"PermuteOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
-            return result
-        return super().__rmatmul__(other)
+        tensor = MultiCOOTensor(TN(factors=[]), MultiCOOSparsify(ops))
+        super().__init__(
+            MultiCOOTensorSum([tensor]),
+            input_dims,
+            output_dims,
+            flags=LinearOpFlags.IS_NON_NEGATIVE,
+        )
 
     def __str__(self):
         return f"<permute {self.dims}>"
 
 
 class TransposeOp(PermuteOp):
-    """Swap two dimensions of the input tensor — special case of PermuteOp."""
-
     def __init__(self, input_shape: torch.Size, dim0: int, dim1: int):
         self.dim0 = dim0
         self.dim1 = dim1

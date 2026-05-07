@@ -76,69 +76,7 @@ class ReshapeOp(LinearOp):
                     f"ReshapeOp: cannot align {input_shape} -> {output_shape} (i={i}, j={j})"
                 break
 
-        super().__init__(input_shape, output_shape, flags=LinearOpFlags.IS_NON_NEGATIVE | LinearOpFlags.IS_PURE_EXPANDING | LinearOpFlags.IS_PURE_CONTRACTING)
-
-    def forward(self, x):
-        return x.reshape(self.target_shape)
-
-    def backward(self, grad):
-        return grad.reshape(self.input_shape)
-
-    def vforward(self, x):
-        extra = x.shape[len(self.input_shape):]
-        return x.reshape(self.target_shape + tuple(extra))
-
-    def vbackward(self, grad):
-        extra = grad.shape[:-len(self.output_shape)] if len(self.output_shape) > 0 else grad.shape
-        return grad.reshape(tuple(extra) + tuple(self.input_shape))
-
-    def __matmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, ReshapeOp):
-            # self @ other = self(other(x)): maps other.input_shape → self.output_shape
-            return ReshapeOp(other.input_shape, self.output_shape)
-        if isinstance(other, EinsumOp):
-            for in_s, in_e, out_s, out_e in self.reshape_groups:
-                if any(i in other.mul_dims for i in other.output_dims[in_s:in_e + 1]):
-                    return NotImplemented
-            op = other.permute_for_output()
-            assert all(i == p for i, p in enumerate(op.output_dims))
-
-            tensor = self.vforward(op.tensor)
-            def dims_map(d):
-                shift = len(self.output_shape) - len(self.input_shape)
-                return self.dims_map[d] if d < len(self.input_shape) else d + shift
-
-            output_dims = list(range(len(self.output_shape)))
-            input_dims = [dims_map(d) for d in op.input_dims]
-            result = EinsumOp(tensor, input_dims, output_dims, name=merge_name(self, "@", other))
-            assert result.input_shape == other.input_shape, f"ReshapeOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
-            assert result.output_shape == self.output_shape, f"ReshapeOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
-            return result
-        return NotImplemented
-
-    def __rmatmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, EinsumOp):
-            for in_s, in_e, out_s, out_e in self.reshape_groups:
-                if any(i in other.mul_dims for i in other.input_dims[out_s:out_e + 1]):
-                    return super().__rmatmul__(other)
-            op = other.permute_for_input()
-            n_non_input = op.tensor.dim() - len(op.input_dims)
-            assert all(i + n_non_input == p for i, p in enumerate(op.input_dims))
-
-            tensor = self.vbackward(op.tensor)
-            def dims_map_inv(d):
-                return self.dims_map_inv[d] if d >= 0 else d
-
-            input_dims = list(range(n_non_input, n_non_input + len(self.input_shape)))
-            output_dims = [dims_map_inv(d - n_non_input) + n_non_input for d in op.output_dims]
-            result = EinsumOp(tensor, input_dims, output_dims, name=merge_name(other, "@", self))
-            assert result.input_shape == self.input_shape, f"ReshapeOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
-            assert result.output_shape == other.output_shape, f"ReshapeOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
-            return result
-        return super().__rmatmul__(other)
-
+        # TODO
     def __str__(self):
         return f"<reshape {list(self.input_shape)} -> {list(self.target_shape)}>"
 
@@ -175,12 +113,6 @@ class UnflattenOp(ReshapeOp):
             lambda x: x.unflatten(dim, sizes), input_shape)
         super().__init__(input_shape, target_shape)
 
-    def forward(self, x):
-        return x.unflatten(self.dim, self.sizes)
-
-    def backward(self, grad):
-        return grad.flatten(self.dim, self.end_dim)
-
     def __str__(self):
         return f"<unflatten {self.dim} {list(self.sizes)}>"
 
@@ -203,52 +135,6 @@ class SqueezeOp(ReshapeOp):
             target_shape = torch.Size(s for s in input_shape if s != 1)
         super().__init__(input_shape, target_shape)
 
-    def forward(self, x):
-        return x.squeeze(self.dim) if self.dim is not None else x.squeeze()
-
-    def backward(self, grad):
-        if self._is_noop:
-            return grad
-        if self.dim is not None:
-            return grad.unsqueeze(self.dim)
-        for d in self._squeezed_dims:
-            grad = grad.unsqueeze(d)
-        return grad
-
-    def __matmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, EinsumOp):
-            assert self.input_shape == other.output_shape
-            if self.dim is not None:
-                squeezed = [] if self._is_noop else [self.dim]
-            else:
-                squeezed = list(self._squeezed_dims)
-            op = other
-            for pos in sorted(squeezed, reverse=True):
-                op = op.squeeze_output(pos)
-            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(self, "@", other))
-            assert result.input_shape == other.input_shape, f"SqueezeOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
-            assert result.output_shape == self.output_shape, f"SqueezeOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
-            return result
-        return NotImplemented
-
-    def __rmatmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, EinsumOp):
-            assert self.output_shape == other.input_shape
-            if self.dim is not None:
-                squeezed = [] if self._is_noop else [self.dim]
-            else:
-                squeezed = list(self._squeezed_dims)
-            op = other
-            for pos in sorted(squeezed):
-                op = op.unsqueeze_input(pos)
-            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(other, "@", self))
-            assert result.input_shape == self.input_shape, f"SqueezeOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
-            assert result.output_shape == other.output_shape, f"SqueezeOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
-            return result
-        return super().__rmatmul__(other)
-
     def __str__(self):
         return f"<squeeze {self.dim}>"
 
@@ -263,41 +149,6 @@ class UnsqueezeOp(ReshapeOp):
         self.dim = dim
         target_shape = _meta_output_shape(lambda x: x.unsqueeze(dim), input_shape)
         super().__init__(input_shape, target_shape)
-
-    def forward(self, x):
-        return x.unsqueeze(self.dim)
-
-    def backward(self, grad):
-        return grad.squeeze(self.dim)
-
-    def vforward(self, x):
-        return x.unsqueeze(self.dim)
-
-    def vbackward(self, grad):
-        batch_ndim = grad.dim() - len(self.output_shape)
-        return grad.squeeze(batch_ndim + self.dim)
-
-    def __matmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, EinsumOp):
-            assert self.input_shape == other.output_shape, f"{self}, {other}"
-            op = other.unsqueeze_output(self.dim)
-            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(self, "@", other))
-            assert result.input_shape == other.input_shape, f"UnsqueezeOp.__matmul__: input_shape {result.input_shape} != {other.input_shape}"
-            assert result.output_shape == self.output_shape, f"UnsqueezeOp.__matmul__: output_shape {result.output_shape} != {self.output_shape}"
-            return result
-        return NotImplemented
-
-    def __rmatmul__(self, other):
-        from ._einsum import EinsumOp
-        if isinstance(other, EinsumOp):
-            assert self.output_shape == other.input_shape
-            op = other.squeeze_input(self.dim)
-            result = EinsumOp(op.tensor, op.input_dims, op.output_dims, name=merge_name(other, "@", self))
-            assert result.input_shape == self.input_shape, f"UnsqueezeOp.__rmatmul__: input_shape {result.input_shape} != {self.input_shape}"
-            assert result.output_shape == other.output_shape, f"UnsqueezeOp.__rmatmul__: output_shape {result.output_shape} != {other.output_shape}"
-            return result
-        return super().__rmatmul__(other)
 
     def __str__(self):
         return f"<unsqueeze {list(self.input_shape)} {self.dim}>"

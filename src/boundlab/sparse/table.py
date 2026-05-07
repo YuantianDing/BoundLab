@@ -195,7 +195,7 @@ class TorchTable:
         """
         assert len(tables) > 0, "merge() requires at least one table."
         assert all(isinstance(t, TorchTable) for t in tables)
-        assert all(t.is_sorted and t.is_unique for t in tables), \
+        assert all(t.is_unique for t in tables), \
             "All tables must be sorted and unique before merging."
         if len(tables) == 1:
             return tables[0]
@@ -231,7 +231,6 @@ class TorchTable:
             result = TorchTable(new_columns, new_data, length=min_length)
             # Sorted+unique only guaranteed when each table individually was;
             # the index-column fast-path preserves sort+unique on shared cols.
-            result.is_sorted = True
             result.is_unique = True
             return result
 
@@ -302,6 +301,22 @@ class TorchTable:
             return projected, None
 
         return projected.sort_dedup()
-
+    
+    def replace_columns(self, dim_mapping: dict[Dim, Dim]) -> "TorchTable":
+        """In-place rename columns according to the provided mapping."""
+        new_columns = [dim_mapping.get(c, c) for c in self.columns]
+        assert len(set(new_columns)) == len(new_columns), "Renamed columns must be unique."
+        result = TorchTable(new_columns, self.data, length=self.length)
+        result.is_sorted = self.is_sorted
+        result.is_unique = self.is_unique
+        return result
+        
+    
+    def permute_(self, permutation: list[int]):
+        """In-place permute columns to match the given order."""
+        assert set(permutation) == set(range(len(self.columns))), "Permutation must be a rearrangement of all columns."
+        self.columns = [self.columns[i] for i in permutation]
+        self.data = [self.data[i] for i in permutation]
+        self.is_sorted = False
 
 __all__ = ["TorchTable", "Indices"]

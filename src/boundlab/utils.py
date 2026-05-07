@@ -14,7 +14,7 @@ Examples
 from torch._subclasses.fake_tensor import FakeTensorMode
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, TypeAlias, TypeVar as _TypeVar, Union
+from typing import TYPE_CHECKING, Callable, Iterable, TypeAlias, TypeVar as _TypeVar, Union
 
 if TYPE_CHECKING:
     from boundlab.expr import Expr
@@ -252,3 +252,7 @@ def inverse_permutation(perm: list[int]) -> list[int]:
 def is_sorted(lst: list) -> bool:
     """Check if a list of integers is sorted in ascending order."""
     return all(x <= y for x, y in zip(lst, lst[1:]))
+
+def all_unique(lst: Iterable) -> bool:
+    """Check if all elements in a list are unique."""
+    return len(set(lst)) == len(list(lst))

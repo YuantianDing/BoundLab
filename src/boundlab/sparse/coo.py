@@ -5,6 +5,7 @@ from typing import Callable, Optional, Union
 
 import torch
 
+from boundlab import utils
 from boundlab.sparse.table import TorchTable, Indices
 from boundlab.sparse.tn import TN, Dense, Dim
 IndicesOrNone = Union[Indices, None]
@@ -16,12 +17,15 @@ class COOSparsify:
     output_dims: list[Dim]
     torch_table: TorchTable
     symbolic_supersets: list["COOSparsify"]
+    identifier: Optional[int] = None
+    
     
     def __init__(
         self,
         input_dim: Dim,
         torch_table: TorchTable,
         symbolic_supersets: list["COOSparsify"] | None = None,
+        identifier: Optional[int] = None,
     ):
         self.input_dim = input_dim
         self.output_dims = list(torch_table.columns)
@@ -29,6 +33,7 @@ class COOSparsify:
         assert self.input_dim.length == self.torch_table.length
         self._infer_table_flags()
         self.symbolic_supersets = list(symbolic_supersets or [])
+        self.identifier = identifier
         self.__post_init__()
 
     def _infer_table_flags(self) -> None:
@@ -57,11 +62,8 @@ class COOSparsify:
         if self.output_dims != sorted_dims:
             positions = [self.output_dims.index(dim) for dim in sorted_dims]
             self.output_dims = sorted_dims
-            self.torch_table = TorchTable(
-                columns=[self.torch_table.columns[pos] for pos in positions],
-                data=[self.torch_table.data[pos] for pos in positions],
-                length=self.torch_table.length,
-            )
+            self.torch_table.permute_(positions)
+            
 
     def forward(self, x: Union[Dense, TN]) -> Union[Dense, TN]:
         # TODO: for TN, deal with each Dense factor separately.
@@ -204,14 +206,14 @@ class COOSparsify:
         )
     
     def is_symbolic_subset(self, other: "COOSparsify", suppress_error: bool = False) -> bool | None:
-        if self is other:
+        if self is other or self.identifier is not None and self.identifier == other.identifier:
             return True
-        if not DEBUG_NO_MD_EYE_OPT:
-            if other.is_md_eye() and self.is_md_eye() and set(self.output_dims) <= set(other.output_dims):
-                return True
-            
-            if other.is_md_eye() and len(other.output_dims) == 1:
-                return True
+        
+        if other.is_md_eye() and self.is_md_eye():
+            return set(self.output_dims) >= set(other.output_dims)
+        
+        if other.is_md_eye() and len(other.output_dims) == 1:
+            return other.output_dims[0] in self.output_dims
             
         if other in self.symbolic_supersets:
             return True
@@ -291,12 +293,27 @@ class COOSparsify:
     
     def __str__(self):
         if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
-            return f"MdEye({self.input_dim} -> {self.output_dims})"
-        return f"COO({self.input_dim} -> {self.output_dims})"
+            return f"{self.input_dim}{self.output_dims}"
+        return f"!{self.input_dim}{self.output_dims}"
+
+    def replace_dims(self, dim_mapping: dict[Dim, Dim]) -> "COOSparsify":
+        return COOSparsify(
+            input_dim=dim_mapping.get(self.input_dim, self.input_dim),
+            torch_table=self.torch_table.replace_columns(dim_mapping)
+        )
 
 @dataclass
 class MultiCOOSparsify:
     ops: list[COOSparsify]
+
+    def clone(self) -> "MultiCOOSparsify":
+        return MultiCOOSparsify(ops=[COOSparsify(
+            input_dim=op.input_dim,
+            torch_table=op.torch_table,
+            symbolic_supersets=op.symbolic_supersets,
+            identifier=op.identifier,
+        ) for op in self.ops])
+    
 
     def __post_init__(self):
         # TODO: assert all ops have disjoint output_dims
@@ -375,12 +392,32 @@ class MultiCOOSparsify:
 
     def __str__(self):
         return " & ".join(str(op) for op in self.ops)
+    
+    def zip_input_dims(self, other: "MultiCOOSparsify") -> list[tuple[Dim, Dim]]:
+        result = []
+        for op in self.ops:
+            for other_op in other.ops:
+                if op.is_symbolic_subset(other_op, suppress_error=True) or other_op.is_symbolic_subset(op, suppress_error=True):
+                    result.append((op.input_dim, other_op.input_dim))
+        return result
+
+    def replace_dims(self, dim_mapping: dict[Dim, Dim]) -> "MultiCOOSparsify":
+        return MultiCOOSparsify(ops=[op.replace_dims(dim_mapping) for op in self.ops])
 
 @dataclass
 class MultiCOOTensor:
     tn: TN
     sparsify: MultiCOOSparsify
     debug_dense: Optional[Dense] = None
+
+    def __post_init__(self):
+        assert utils.all_unique([d for op in self.sparsify.ops for d in op.output_dims]), "Output dims must be unique across all COOSparsify ops."
+        assert utils.all_unique([op.input_dim for op in self.sparsify.ops]), "Input dims must be unique across all COOSparsify ops."
+        assert set(self.tn.dims).issubset(set(op.input_dim for op in self.sparsify.ops))
+
+        for op in self.sparsify.ops:
+            if op.input_dim in op.output_dims:
+                assert op.torch_table.column_data(op.input_dim) is None
 
     def dense(self) -> torch.Tensor:
         return self.to_dense().tensor
@@ -391,6 +428,9 @@ class MultiCOOTensor:
             sparsify=self.sparsify,
             debug_dense=self.debug_dense.clone() if self.debug_dense is not None else None,
         )
+    
+    def no_extend_dims(self) -> bool:
+        return all(op.input_dim in self.tn.dims for op in self.sparsify.ops)
 
     def real_numel(self) -> int:
         return self.tn.real_numel()
@@ -415,6 +455,10 @@ class MultiCOOTensor:
         return sorted(dims)
     
     @property
+    def inner_dims(self) -> list[Dim]:
+        return self.tn.dims
+    
+    @property
     def shape(self) -> torch.Size:
         return torch.Size([dim.length for dim in self.dims])
     
@@ -429,19 +473,29 @@ class MultiCOOTensor:
         return MultiCOOTensor(tn=tn, sparsify=op)
 
     def __add__(self, other: "MultiCOOTensor") -> Optional["MultiCOOTensor"]:
-        if self.sparsify.is_symbolic_subset(other.sparsify, suppress_error=True):
+        assert self.dims == other.dims
+        subset = self.sparsify.is_symbolic_subset(other.sparsify, suppress_error=True)
+        superset = other.sparsify.is_symbolic_subset(self.sparsify, suppress_error=True)
+        if subset and superset:
+            dims = self.sparsify.zip_input_dims(other.sparsify)
+            tn2 = other.tn.replace_dims({o: s for s, o in dims })
+            return MultiCOOTensor(
+                tn=self.tn + tn2,
+                sparsify=self.sparsify,
+            )
+        elif subset and other.no_extend_dims():
             return MultiCOOTensor(
                 tn=self.expand_to(other.sparsify).tn + other.tn,
                 sparsify=other.sparsify
             )
-        elif other.sparsify.is_symbolic_subset(self.sparsify, suppress_error=True):
+        elif superset and self.no_extend_dims():
             return MultiCOOTensor(
                 tn=self.tn + other.expand_to(self.sparsify).tn,
                 sparsify=self.sparsify
             )
         else:
             return None
-    
+
     def __neg__(self) -> "MultiCOOTensor":
         return MultiCOOTensor(
             tn=-self.tn,
@@ -452,7 +506,12 @@ class MultiCOOTensor:
         neg_other = -other
         return self.__add__(neg_other)
 
-    def __mul__(self, other: "MultiCOOTensor") -> "MultiCOOTensor":
+    def __mul__(self, other: Union["MultiCOOTensor", float, int]) -> "MultiCOOTensor":
+        if isinstance(other, (int, float)):
+            return MultiCOOTensor(
+                tn=self.tn * other,
+                sparsify=self.sparsify
+            )
         op = self.sparsify.merge(other.sparsify)
         self_0 = self.shrink_to(op)
         other_0 = other.shrink_to(op)
@@ -505,13 +564,40 @@ class MultiCOOTensor:
             assert self.to_dense().sum(dims).allclose(result.to_dense())
         # TODO-test: test this function with `DEBUG_MultiCOOTensor` enabled. Generate random high dimensional MCTs with at least 8 connected factors and at least 6 different COOSparsify ops (each with at least 2 output_dims).
         return result
+    
+    @staticmethod
+    def from_dense(tensor: Dense) -> "MultiCOOTensor":
+        return MultiCOOTensor(
+            tn=TN(factors=[tensor]),
+            sparsify=MultiCOOSparsify(ops=[
+                COOSparsify.md_eye(input_dim=dim, output_dims=[dim])
+                for dim in tensor.dims
+            ]),
+            debug_dense=tensor if DEBUG_MultiCOOTensor else None,
+        )
+    def expand_view(self, dims: Union[MultiCOOSparsify, list[Dim]]) -> "MultiCOOTensor":
+        if isinstance(dims, MultiCOOSparsify):
+            assert self.sparsify.is_symbolic_subset(dims, suppress_error=True), "Can only expand to a MultiCOOSparsify that is a symbolic superset of the current sparsify."
+            tn = self.sparsify.inverse_supersets(dims).forward(self.tn)
+            return MultiCOOTensor(tn=tn, sparsify=dims)
 
-    def tensordot(self, other: "MultiCOOTensor", dims) -> "MultiCOOTensor":
-        if isinstance(dims, tuple) and len(dims) == 2:
-            left_axes, right_axes = dims
-            assert len(left_axes) == len(right_axes), "tensordot axes must have the same length."
-            dims = [self.dims[axis] for axis in left_axes]
-        return (self * other).sum(dims)
+        assert set(self.dims).issubset(set(dims)), "Can only expand to dims that are a superset of the current dims."
+        tn = self.tn.clone()
+        ops = list(self.sparsify.ops)
+        for dim in dims:
+            if dim not in self.dims:
+                ops.append(COOSparsify.md_eye(input_dim=dim, output_dims=[dim]))
+        return MultiCOOTensor(
+            tn=tn,
+            sparsify=MultiCOOSparsify(ops=ops)
+        )
+
+    def tensordot(self, other: Union["MultiCOOTensor", Dense] , dims) -> "MultiCOOTensor":
+        if isinstance(other, Dense):
+            other = MultiCOOTensor.from_dense(other)
+
+        expand_dims = list(set(self.dims) | set(other.dims))
+        return (self.expand_view(expand_dims) * other.expand_view(expand_dims)).sum(dims)
     
     def add_intersection_to(self, other: "MultiCOOTensor", neg: bool = False) -> "MultiCOOTensor":
         op = self.sparsify.merge(other.sparsify)
@@ -520,14 +606,36 @@ class MultiCOOTensor:
             tmp = -tmp
         return other + tmp
     
+    def replace_dims(self, dim_mapping: dict[Dim, Dim]) -> "MultiCOOTensor":
+        return MultiCOOTensor(
+            tn=self.tn.replace_dims(dim_mapping),
+            sparsify=self.sparsify.replace_dims(dim_mapping),
+        )
+    
+    def __str__(self) -> str:
+        return f"({self.tn})({self.sparsify})"
+        
 
 @dataclass
 class MultiCOOTensorSum:
     terms: list[MultiCOOTensor]
+    dims: list[Dim] = None
 
     def __post_init__(self):
+        if self.dims is None:
+            self.dims = self.terms[0].dims
         self._assert_sorted()
+    
+    @property
+    def inner_dims(self) -> list[Dim]:
+        return [dim for t in self.terms for dim in t.inner_dims]
+    
+    def replace_dims(self, dim_mapping: dict[Dim, Dim]):
+        return MultiCOOTensorSum([term.replace_dims(dim_mapping) for term in self.terms])
 
+    def to_dense(self) -> Dense:
+        return sum((term.to_dense() for term in self.terms[1:]), start=self.terms[0].to_dense())
+    
     def add_term(self, term: MultiCOOTensor):
         for t in range(len(self.terms)):
             if term.real_numel() > self.terms[t].real_numel():
@@ -548,6 +656,7 @@ class MultiCOOTensorSum:
         self._assert_sorted()
 
     def _assert_sorted(self):
+        assert all(t.dims == self.dims for t in self.terms), "All terms must have the same dims"
         assert all(
             t.real_numel() >= self.terms[i + 1].real_numel()
             for i, t in enumerate(self.terms[:-1])
@@ -567,7 +676,67 @@ class MultiCOOTensorSum:
                 new_t = t.add_intersection_to(new_t, neg=True)
             new_terms.append(new_t)
         return MultiCOOTensorSum(new_terms)
+    
+    def sum(self, dims: list[Dim]) -> "MultiCOOTensorSum":
+        new_terms = []
+        for term in self.terms:
+            new_terms.append(term.sum(dims))
+        new_terms.sort(key=lambda term: term.real_numel(), reverse=True)
+        return MultiCOOTensorSum(new_terms)
+    
+    def tensordot(self, other: Union["MultiCOOTensorSum", MultiCOOTensor, Dense], dims) -> "MultiCOOTensorSum":
+        if isinstance(other, MultiCOOTensorSum):
+            result: Optional[MultiCOOTensorSum] = None
+            for term in self.terms:
+                for other_term in other.terms:
+                    new_term = term.tensordot(other_term, dims)
+                    if result is None:
+                        result = MultiCOOTensorSum([new_term])
+                    else:
+                        result.add_term(new_term)
+            assert result is not None
+            return result
 
+        new_terms = []
+        for term in self.terms:
+            new_terms.append(term.tensordot(other, dims))
+        new_terms.sort(key=lambda term: term.real_numel(), reverse=True)
+        return MultiCOOTensorSum(new_terms)
+    
+    def __mul__(self, other: Union[float, int]) -> "MultiCOOTensorSum":
+        if isinstance(other, (int, float)):
+            return MultiCOOTensorSum([term * other for term in self.terms])
+    
+    def __rmul__(self, other: Union[float, int]) -> "MultiCOOTensorSum":
+        return self.__mul__(other)
+    
+    def __add__(self, other: "MultiCOOTensorSum") -> "MultiCOOTensorSum":
+        new_terms = self.terms.copy()
+        for term in other.terms:
+            for i, new_term in enumerate(new_terms):
+                if tensor := new_term.__add__(term):
+                    new_terms[i] = tensor
+                    break
+            else:
+                new_terms.append(term)
+        return MultiCOOTensorSum(new_terms)
+
+    def __neg__(self) -> "MultiCOOTensorSum":
+        return MultiCOOTensorSum([-term for term in self.terms])
+    
+    def __sub__(self, other: "MultiCOOTensorSum") -> "MultiCOOTensorSum":
+        return self + (-other)
+    
+    def __str__(self) -> str:
+        return " + ".join(str(term) for term in self.terms)
+
+def tensordot(x: Union[MultiCOOTensor, MultiCOOTensorSum], y: Union[MultiCOOTensor, MultiCOOTensorSum, Dense], dims) -> Union[MultiCOOTensorSum, MultiCOOTensor]:
+    if isinstance(x, MultiCOOTensor):
+        x = MultiCOOTensorSum([x])
+    if isinstance(y, MultiCOOTensor):
+        y = MultiCOOTensorSum([y])
+
+    return x.tensordot(y, dims)
 
 __all__ = [
     "COOSparsify",

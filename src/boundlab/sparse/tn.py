@@ -177,6 +177,10 @@ class Dense:
         result[index] = tensor
         return Dense(tensor=result, dims=other_dims + to_dims)
 
+    def replace_dims(self, dim_map: dict[Dim, Dim]) -> "Dense":
+        new_dims = [dim_map.get(dim, dim) for dim in self.dims]
+        return Dense(tensor=self.tensor, dims=new_dims)
+    
 @dataclass
 class TN:
     factors: list[Dense]
@@ -246,7 +250,7 @@ class TN:
         factors = []
         for f in self.factors:
             factors.append(f"{list(f.dims)})")
-        return f"<{' * '.join(factors)}>"
+        return f"{' * '.join(factors)}"
     
     def clone(self) -> "TN":
         return TN(factors=[f.clone() for f in self.factors])
@@ -375,6 +379,10 @@ class TN:
         dense = Dense(tensor=tensor, dims=related_dims)
         remaining_factors.append(dense.index_reduce_sum(dim, index, target_dim))
         return TN(factors=remaining_factors)
+    
+    def replace_dims(self, dim_map: dict[Dim, Dim]) -> "TN":
+        return TN(factors=[f.replace_dims(dim_map) for f in self.factors])
+    
 
 
 __all__ = ["Dense", "TN", "Dim"]

@@ -22,3 +22,6 @@ class Dim:
         return self.name if self.name else hex(id(self))
     def __repr__(self):
         return str(self)
+
+    def clone(self, name: str | None = None) -> "Dim":
+        return Dim(length=self.length, ordering=self.ordering, name=name if name is not None else self.name)

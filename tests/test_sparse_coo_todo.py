@@ -1,8 +1,9 @@
 import torch
 import pytest
 
+from boundlab import utils
 from boundlab.sparse import coo
-from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor
+from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
 from boundlab.sparse.table import TorchTable
 from boundlab.sparse.tn import Dense, Dim, TN
 
@@ -66,6 +67,9 @@ def _high_dimensional_mct(seed: int) -> MultiCOOTensor:
         COOSparsify(input_dim=input_dim, torch_table=_diag_table(*pair))
         for input_dim, pair in zip(input_dims, output_pairs)
     ]
+    print(MultiCOOSparsify(ops), [d for op in ops for d in op.output_dims], set([d for op in ops for d in op.output_dims]))
+    a = [d for op in ops for d in op.output_dims]
+    assert len(set(a)) == len(a)
     return MultiCOOTensor(
         tn=_connected_tn(input_dims, seed=seed),
         sparsify=MultiCOOSparsify(ops),
@@ -77,6 +81,34 @@ def _same_sparsify_mct(template: MultiCOOTensor, seed: int) -> MultiCOOTensor:
     return MultiCOOTensor(
         tn=_connected_tn(input_dims, seed=seed),
         sparsify=template.sparsify,
+    )
+
+
+def _pair_table(row: Dim, col: Dim, pairs: list[tuple[int, int]]) -> TorchTable:
+    return _mark_unique_sorted(
+        TorchTable(
+            columns=[row, col],
+            data=[
+                torch.tensor([pair[0] for pair in pairs]),
+                torch.tensor([pair[1] for pair in pairs]),
+            ],
+            length=len(pairs),
+        )
+    )
+
+
+def _pair_mct(
+    row: Dim,
+    col: Dim,
+    pairs: list[tuple[int, int]],
+    values: torch.Tensor,
+    term_idx: int,
+) -> MultiCOOTensor:
+    input_dim = Dim(len(pairs), -10.0 + term_idx, f"mctsum_k{term_idx}")
+    op = COOSparsify(input_dim=input_dim, torch_table=_pair_table(row, col, pairs))
+    return MultiCOOTensor(
+        tn=TN.from_dense(Dense(values, [input_dim])),
+        sparsify=MultiCOOSparsify([op]),
     )
 
 
@@ -209,6 +241,58 @@ def test_multicootensor_sum_partial_reduction_coalesces_duplicate_rows():
     result = tensor.sum([col])
     expected = tensor.to_dense().sum([col])
 
+    _dense_allclose(result.to_dense(), expected)
+
+
+def test_multicootensor_sum_add_coalesces_compatible_terms():
+    row = Dim(3, 1.0, "mctsum_add_row")
+    col = Dim(3, 2.0, "mctsum_add_col")
+    pairs = [(0, 0), (1, 1), (2, 2)]
+    lhs = _pair_mct(row, col, pairs, torch.tensor([1.0, -2.0, 3.0]), term_idx=0)
+    rhs = MultiCOOTensor(
+        tn=TN.from_dense(
+            Dense(
+                torch.tensor([4.0, 5.0, -6.0]),
+                [lhs.sparsify.ops[0].input_dim],
+            )
+        ),
+        sparsify=lhs.sparsify,
+    )
+
+    result = MultiCOOTensorSum([lhs]) + MultiCOOTensorSum([rhs])
+
+    assert len(result.terms) == 1
+    _dense_allclose(result.to_dense(), lhs.to_dense() + rhs.to_dense())
+
+
+def test_multicootensor_sum_apply_multiplicative_handles_six_overlapping_terms():
+    row = Dim(4, 1.0, "mctsum_square_row")
+    col = Dim(4, 2.0, "mctsum_square_col")
+    pairs_by_term = [
+        [(0, 0), (0, 1), (1, 1), (2, 3), (3, 0)],
+        [(0, 0), (1, 1), (1, 2), (2, 3), (3, 1)],
+        [(0, 1), (1, 1), (2, 0), (2, 3), (3, 2)],
+        [(0, 2), (1, 1), (2, 0), (2, 3), (3, 3)],
+        [(0, 0), (0, 3), (1, 1), (2, 1), (2, 3)],
+        [(0, 1), (1, 0), (1, 1), (2, 3), (3, 0)],
+    ]
+    terms = [
+        _pair_mct(
+            row,
+            col,
+            pairs,
+            torch.tensor([1.0, -2.0, 0.5, 3.0, -1.5]) + term_idx,
+            term_idx=term_idx,
+        )
+        for term_idx, pairs in enumerate(pairs_by_term)
+    ]
+    tensor_sum = MultiCOOTensorSum(terms)
+    dense_sum = tensor_sum.to_dense()
+
+    result = tensor_sum.apply_multiplicative(lambda tensor: tensor.square())
+    expected = Dense(dense_sum.tensor.square(), dense_sum.dims)
+
+    assert len(tensor_sum.terms) == 6
     _dense_allclose(result.to_dense(), expected)
 
 
@@ -596,5 +680,3 @@ def test_random_graphs_value(seed: int, monkeypatch):
     assert len(result.sparsify.ops) == 1
     assert result.to_dense().tensor.sum() > 0 
     assert result.to_dense().tensor.sum() < 100
-
-
