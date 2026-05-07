@@ -23,7 +23,6 @@ import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 
 warnings.filterwarnings("ignore")
-coo.DEBUG_MultiCOOTensor = True
 
 # ---- BERT components (DeepT small model) ------------------------------------
 

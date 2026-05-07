@@ -17,8 +17,11 @@ class LinearOpFlags(enum.Flag):
     """Flags for LinearOps that can be used for optimization and simplification."""
     NONE = 0
     IS_NON_NEGATIVE = enum.auto()  # Output is guaranteed to be non-negative for non-negative input
+import os
+DEBUG_LINEAR_OP = os.environ.get("DEBUG_LINEAR_OP", "0") == "1"
+if DEBUG_LINEAR_OP:
+    print("DEBUG_LINEAR_OP is enabled. This may cause significant slowdown. Only enable this if you are debugging LinearOps.")
 
-DEBUG_LinearOp = True
 class LinearOp:
     r"""A base class for linear operators that can be applied to boundlab expressions.
 
@@ -47,7 +50,7 @@ class LinearOp:
         input_dims_map = {dim: self.input_dims[idx] for idx, dim in enumerate(input_dims)}
         output_dims_map = {dim: self.output_dims[idx] for idx, dim in enumerate(output_dims)}
         inner_dims = sorted(set(tensor.inner_dims) - set(input_dims) - set(output_dims))
-        self.inner_dims = [dim.clone() for dim in inner_dims]
+        self.inner_dims = [dim.clone(name=f"k{idx}") for idx, dim in enumerate(inner_dims)]
         inner_dims_map = {dim: self.inner_dims[idx] for idx, dim in enumerate(inner_dims)}
 
         self.tensor = tensor.replace_dims({**input_dims_map, **output_dims_map, **inner_dims_map})
@@ -55,7 +58,11 @@ class LinearOp:
         self.output_shape = torch.Size([dim.length for dim in output_dims])
         self.flags = flags
         self.name = None
-        self.debug_jacobian = Dense(debug_jacobian, self.output_dims + self.input_dims) if debug_jacobian is not None else None
+        if DEBUG_LINEAR_OP:
+            assert debug_jacobian is not None
+            self.debug_jacobian = Dense(debug_jacobian, self.output_dims + self.input_dims)
+        else:
+            self.debug_jacobian = None
 
     def __str__(self):
         return self.name if self.name else "{" + str(self.tensor) + "}"
@@ -76,7 +83,7 @@ class LinearOp:
         assert x.shape == self.input_shape, f"Expected input shape {self.input_shape}, got {x.shape}."
         x_dense = Dense(x, self.input_dims)
         dense = self.tensor.tensordot(x_dense, self.input_dims).to_dense()
-        if DEBUG_LinearOp and self.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP:
             assert self.debug_jacobian.tensordot(x_dense, self.input_dims).allclose(dense)
         return dense.expand(self.output_dims)
 
@@ -85,7 +92,7 @@ class LinearOp:
         assert grad_output.shape == self.output_shape, f"Expected gradient output shape {self.output_shape}, got {grad_output.shape}."
         grad_output_dense = Dense(grad_output, self.output_dims)
         dense = self.tensor.tensordot(grad_output_dense, self.output_dims).to_dense()
-        if DEBUG_LinearOp and self.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP:
             assert self.debug_jacobian.tensordot(grad_output_dense, self.output_dims).allclose(dense)
         return dense.expand(self.input_dims)
 
@@ -98,7 +105,7 @@ class LinearOp:
         ]
         x_dense = Dense(x, self.input_dims + additional_dims)
         dense = self.tensor.tensordot(x_dense, self.input_dims).to_dense()
-        if DEBUG_LinearOp and self.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP :
             assert self.debug_jacobian.tensordot(x_dense, self.input_dims).allclose(dense)
         return dense.expand(self.output_dims + additional_dims)
 
@@ -118,20 +125,27 @@ class LinearOp:
         ]
         grad_output_dense = Dense(grad_output, additional_dims + self.output_dims)
         dense = self.tensor.tensordot(grad_output_dense, self.output_dims).to_dense()
-        if DEBUG_LinearOp and self.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP:
             assert self.debug_jacobian.tensordot(grad_output_dense, self.output_dims).allclose(dense)
         return dense.expand(additional_dims + self.input_dims)
 
     def __mul__(self, other: float) -> "LinearOp":
         """Scale this LinearOp by a scalar factor."""
         if isinstance(other, (int, float)):
-            return LinearOp(tensor=self.tensor * other, input_dims=self.input_dims, output_dims=self.output_dims, flags=self.flags)
+            debug_jacobian = self.debug_jacobian.expand(self.output_dims + self.input_dims) * other if self.debug_jacobian is not None else None
+            return LinearOp(
+                tensor=self.tensor * other,
+                input_dims=self.input_dims,
+                output_dims=self.output_dims,
+                flags=self.flags,
+                debug_jacobian=debug_jacobian,
+            )
         return NotImplemented
 
     def __rmul__(self, other: float) -> "LinearOp":
         """Scale this LinearOp by a scalar factor."""
         if isinstance(other, (int, float)):
-            return LinearOp(tensor=self.tensor * other, input_dims=self.input_dims, output_dims=self.output_dims, flags=self.flags)
+            return self.__mul__(other)
         return NotImplemented
 
 
@@ -143,7 +157,7 @@ class LinearOp:
         other_tensor = other_tensor.replace_dims(output_dim_map)
         tensor = coo.tensordot(self.tensor, other_tensor, self.input_dims)
         debug_jacobian = None
-        if self.debug_jacobian is not None and other.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP:
             other_debug_jacobian = other.debug_jacobian.replace_dims(output_dim_map)
             jac = self.debug_jacobian.tensordot(other_debug_jacobian, self.input_dims)
             assert jac.allclose(tensor.to_dense())
@@ -158,19 +172,20 @@ class LinearOp:
         output_dim_map = {a: b for a, b in zip(other.output_dims, self.output_dims)}
         other_tensor = other.tensor
         other_tensor = other_tensor.replace_dims(input_dim_map | output_dim_map)
+        self_tensor = self.tensor
         if isinstance(other_tensor, MultiCOOTensor):
             other_tensor = MultiCOOTensorSum([other_tensor])
         if isinstance(self.tensor, MultiCOOTensor):
             self_tensor = MultiCOOTensorSum([self.tensor])
 
         debug_jacobian = None
-        if self.debug_jacobian is not None and other.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP:
             other_debug_jacobian = other.debug_jacobian.replace_dims(input_dim_map | output_dim_map)
             jac = self.debug_jacobian + other_debug_jacobian
-            assert jac.allclose((self.tensor + other_tensor).to_dense())
+            assert jac.allclose((self_tensor + other_tensor).to_dense())
             debug_jacobian = jac.expand(self.output_dims + self.input_dims)
 
-        return LinearOp(tensor=self.tensor + other_tensor, input_dims=self.input_dims, output_dims=self.output_dims, flags=self.flags & other.flags, debug_jacobian=debug_jacobian)
+        return LinearOp(tensor=self_tensor + other_tensor, input_dims=self.input_dims, output_dims=self.output_dims, flags=self.flags & other.flags, debug_jacobian=debug_jacobian)
 
     
     def jacobian(self) -> torch.Tensor:
@@ -184,7 +199,7 @@ class LinearOp:
         """
         # warnings.warn(f"LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.", stacklevel=2)
         dense = self.tensor.to_dense()
-        if DEBUG_LinearOp and self.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP and self.debug_jacobian is not None:
             assert self.debug_jacobian.allclose(dense)
         return dense.expand(self.output_dims + self.input_dims)
     
@@ -211,7 +226,7 @@ class LinearOp:
         """Return a LinearOp representing the sum over all input dimensions of this LinearOp."""
         summed_tensor = self.tensor.sum(dims=self.input_dims)
         debug_jacobian = self.debug_jacobian.sum(self.input_dims).expand(self.output_dims) if self.debug_jacobian is not None else None
-        if DEBUG_LinearOp and self.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP and self.debug_jacobian is not None:
             assert self.debug_jacobian.sum(self.input_dims).allclose(summed_tensor.to_dense()), f"{self} {summed_tensor} {self.debug_jacobian.sum(self.input_dims)} {summed_tensor.to_dense()}"
         return LinearOp(tensor=summed_tensor, input_dims=[], output_dims=self.output_dims, flags=self.flags, debug_jacobian=debug_jacobian)
     
@@ -219,17 +234,53 @@ class LinearOp:
         """Return a LinearOp representing the sum over all output dimensions of this LinearOp."""
         summed_tensor = self.tensor.sum(dims=self.output_dims)
         debug_jacobian = self.debug_jacobian.sum(self.output_dims).expand(self.input_dims) if self.debug_jacobian is not None else None
-        if DEBUG_LinearOp and self.debug_jacobian is not None:
+        if DEBUG_LINEAR_OP and self.debug_jacobian is not None:
             assert self.debug_jacobian.sum(self.output_dims).allclose(summed_tensor.to_dense()), f"{self} {summed_tensor} {self.debug_jacobian.sum(self.output_dims)} {summed_tensor.to_dense()}"
         return LinearOp(tensor=summed_tensor, input_dims=self.input_dims, output_dims=[], flags=self.flags, debug_jacobian=debug_jacobian)
 
     def norm_input(self, p=1) -> "LinearOp":
         """Return a LinearOp that computes the norm over the input dimensions, if supported."""
+        tensor = self.tensor
+        if isinstance(self.tensor, MultiCOOTensorSum) and len(self.tensor.terms) == 1:
+            tensor = self.tensor.terms[0]
+        if isinstance(tensor, MultiCOOTensor):
+            result = tensor.norm(p=p, dims=self.input_dims)
+            debug_jacobian = None
+            if DEBUG_LINEAR_OP:
+                jac = self.debug_jacobian.norm(p=p, dims=self.input_dims)
+                assert jac.allclose(result.to_dense()), f"{self} {result} {jac} {result.to_dense()}"
+                debug_jacobian = jac.expand(self.output_dims)
+            return LinearOp(
+                tensor=result,
+                input_dims=[],
+                output_dims=self.output_dims,
+                flags=self.flags | LinearOpFlags.IS_NON_NEGATIVE,
+                debug_jacobian=debug_jacobian,
+            )
         inv = 1 if p == 1 else 1/p
         return self.abs(p).sum_input().abs(p=inv)
     
     def norm_output(self, p=1) -> "LinearOp":
         """Return a LinearOp that computes the norm over the output dimensions, if supported."""
+        tensor = self.tensor
+        if isinstance(self.tensor, MultiCOOTensorSum) and len(self.tensor.terms) == 1:
+            tensor = self.tensor.terms[0]
+        if isinstance(tensor, MultiCOOTensor):
+            result = tensor.norm(p=p, dims=self.output_dims)
+
+            debug_jacobian = None
+            if DEBUG_LINEAR_OP:
+                jac = self.debug_jacobian.norm(p=p, dims=self.output_dims)
+                assert jac.allclose(result.to_dense())
+                debug_jacobian = jac.expand(self.input_dims)
+            
+            return LinearOp(
+                tensor=result,
+                input_dims=self.input_dims,
+                output_dims=[],
+                flags=self.flags | LinearOpFlags.IS_NON_NEGATIVE,
+                debug_jacobian=debug_jacobian,
+            )
         inv = 1 if p == 1 else 1/p
         return self.abs(p).sum_output().abs(p=inv)
     

@@ -112,10 +112,10 @@ def list_index_unique(tensor1: torch.Tensor, tensor2: torch.Tensor) -> torch.Ten
     #         shape=(tensor2.shape[0],),
     #     )
     # else:
+    assert tensor1.dim() == 2 and tensor2.dim() == 2, "Input tensors must be 2D"
+    assert tensor1.shape[1] == tensor2.shape[1], "Input tensors must have the same number of columns"
     N = tensor1.shape[0]
     M = tensor2.shape[0]
-    tensor1 = tensor1.reshape(N, -1)
-    tensor2 = tensor2.reshape(M, -1)
     eq = (tensor1.unsqueeze(0) == tensor2.unsqueeze(1)).all(dim=2)  # [M, N]
     idx = torch.nonzero(eq, as_tuple=True)[1]
     assert idx.shape[0] == M, "Each row of tensor2 should appear exactly once in tensor1"
@@ -126,11 +126,10 @@ def list_is_subset(t1: torch.Tensor, t2: torch.Tensor) -> bool:
     """
     Check if t1 is a subset of t2. Each row of t1 should appear at least once in t2.
     """
-    
+    assert t1.dim() == 2 and t2.dim() == 2, "Input tensors must be 2D"
+    assert t1.shape[1] == t2.shape[1], "Input tensors must have the same number of columns"
     N = t2.shape[0]
     M = t1.shape[0]
-    t2 = t2.reshape(N, -1)
-    t1 = t1.reshape(M, -1)
     return (t2.unsqueeze(0) == t1.unsqueeze(1)).all(dim=2).any(dim=1).all().item()
 
 

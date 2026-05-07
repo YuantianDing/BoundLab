@@ -115,7 +115,7 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     w = bounds.input_weights[0]
     mu = bounds.bias
     beta = bounds.error_coeffs.coeff
-    result = finite_mask * (w * sum_exp + mu + beta * LpEpsilon(sum_exp.shape))
+    result = finite_mask.to(torch.float32) * (w * sum_exp + mu + beta * LpEpsilon(sum_exp.shape))
     return result
 
 

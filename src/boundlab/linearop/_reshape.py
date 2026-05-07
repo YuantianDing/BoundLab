@@ -2,7 +2,8 @@
 
 import torch
 
-from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._base import DEBUG_LINEAR_OP, LinearOp, LinearOpFlags
+from boundlab.linearop._debug import jacobian_from_function
 from boundlab.linearop._sparse import make_input_dims, make_output_dims, unravel
 from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
 from boundlab.sparse.dim import Dim
@@ -24,6 +25,12 @@ def _prod(shape: torch.Size) -> int:
 def _coords(shape: torch.Size) -> torch.Tensor:
     flat = torch.arange(_prod(shape), dtype=torch.long)
     return unravel(flat, shape)
+
+
+def _reshape_unit_axes(input_shape: torch.Size, output_shape: torch.Size) -> tuple[list[int], list[int]]:
+    squeezed_input_axes = [axis for axis, size in enumerate(input_shape) if size == 1]
+    unsqueezed_output_axes = [axis for axis, size in enumerate(output_shape) if size == 1]
+    return squeezed_input_axes, unsqueezed_output_axes
 
 
 def _groups(input_shape: torch.Size, output_shape: torch.Size):
@@ -50,14 +57,17 @@ def _groups(input_shape: torch.Size, output_shape: torch.Size):
 def _reshape_tensor(input_shape: torch.Size, output_shape: torch.Size):
     input_dims = make_input_dims(input_shape)
     output_dims = make_output_dims(output_shape)
+    squeezed_input_axes, unsqueezed_output_axes = _reshape_unit_axes(input_shape, output_shape)
+    input_core_axes = [axis for axis in range(len(input_shape)) if axis not in squeezed_input_axes]
+    output_core_axes = [axis for axis in range(len(output_shape)) if axis not in unsqueezed_output_axes]
+    input_core_shape = torch.Size(input_shape[axis] for axis in input_core_axes)
+    output_core_shape = torch.Size(output_shape[axis] for axis in output_core_axes)
     ops = []
-    for group_idx, (input_axes, output_axes) in enumerate(_groups(input_shape, output_shape)):
+    for group_idx, (input_group, output_group) in enumerate(_groups(input_core_shape, output_core_shape)):
+        input_axes = [input_core_axes[axis] for axis in input_group]
+        output_axes = [output_core_axes[axis] for axis in output_group]
         in_dims = [input_dims[axis] for axis in input_axes]
         out_dims = [output_dims[axis] for axis in output_axes]
-        if len(input_axes) == 0 and _prod(torch.Size(output_shape[axis] for axis in output_axes)) == 1:
-            continue
-        if len(output_axes) == 0 and _prod(torch.Size(input_shape[axis] for axis in input_axes)) == 1:
-            continue
         if len(input_axes) == len(output_axes) == 1:
             inner = Dim(int(input_shape[input_axes[0]]), 500.0 + group_idx, f"k{group_idx}")
             ops.append(COOSparsify.md_eye(inner, out_dims + in_dims))
@@ -76,11 +86,34 @@ def _reshape_tensor(input_shape: torch.Size, output_shape: torch.Size):
         ops.append(
             COOSparsify(
                 edge,
-                TorchTable(columns=out_dims + in_dims, data=data, length=length),
+                TorchTable(
+                    columns=out_dims + in_dims, data=data, length=length,
+                    is_unique=True,
+                ),
             )
         )
+    unit_group_idx = len(ops)
+    for axis in unsqueezed_output_axes:
+        unit_group_idx += 1
+        assert output_dims[axis].length == 1
+        ops.append(
+            COOSparsify.md_eye(output_dims[axis], [output_dims[axis]])
+        )
+    for axis in squeezed_input_axes:
+        edge = Dim(1, 500.0 + unit_group_idx, f"k{unit_group_idx}")
+        unit_group_idx += 1
+        ops.append(
+            COOSparsify.md_eye(input_dims[axis], [input_dims[axis]])
+        )
+    # if len(ops) == 0:
+    #     edge = Dim(1, 500.0, "k0")
+    #     ops.append(COOSparsify(edge, TorchTable(columns=[], data=[], length=1)))
     tensor = MultiCOOTensor(TN(factors=[]), MultiCOOSparsify(ops))
     return MultiCOOTensorSum([tensor]), input_dims, output_dims
+
+
+def _reshape_zero_stride_axes(input_shape: torch.Size, output_shape: torch.Size) -> tuple[int, ...]:
+    return ()
 
 
 class ReshapeOp(LinearOp):
@@ -90,7 +123,12 @@ class ReshapeOp(LinearOp):
             output_shape = _meta_output_shape(lambda x: x.reshape(*output_shape), input_shape)
         self.target_shape = torch.Size(output_shape)
         tensor, input_dims, output_dims = _reshape_tensor(input_shape, self.target_shape)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(
+            input_shape,
+            self.target_shape,
+            lambda x: x.reshape(self.target_shape),
+            zero_stride_axes=_reshape_zero_stride_axes(input_shape, self.target_shape),
+        ) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -98,7 +136,7 @@ class ReshapeOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):

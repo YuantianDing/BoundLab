@@ -9,16 +9,19 @@ from boundlab import utils
 from boundlab.sparse.table import TorchTable, Indices
 from boundlab.sparse.tn import TN, Dense, Dim
 IndicesOrNone = Union[Indices, None]
+import os
 
-
-DEBUG_MultiCOOTensor = False
-DEBUG_NO_MD_EYE_OPT = False
+DEBUG_MULTI_COO_TENSOR = os.environ.get("DEBUG_MULTI_COO_TENSOR", "0") == "1"
+if DEBUG_MULTI_COO_TENSOR:
+    print("DEBUG_MULTI_COO_TENSOR is enabled. This may cause significant slowdown. Only enable this if you are debugging MultiCOOTensor.")
+DEBUG_NO_MD_EYE_OPT = os.environ.get("DEBUG_NO_MD_EYE_OPT", "0") == "1"
 class COOSparsify:
     input_dim: Dim
     output_dims: list[Dim]
     torch_table: TorchTable
     symbolic_supersets: list["COOSparsify"]
     identifier: Optional[int] = None
+    is_md_eye: bool = False
     
     
     def __init__(
@@ -27,34 +30,35 @@ class COOSparsify:
         torch_table: TorchTable,
         symbolic_supersets: list["COOSparsify"] | None = None,
         identifier: Optional[int] = None,
+        is_unique: bool = True,
     ):
         self.input_dim = input_dim
         self.output_dims = list(torch_table.columns)
         self.torch_table = torch_table
         assert self.input_dim.length == self.torch_table.length
-        self._infer_table_flags()
+        if is_unique:
+            assert self.torch_table.is_unique
+        assert all(v is None or v.shape[0] != 1 for k, v in torch_table.items())
         self.symbolic_supersets = list(symbolic_supersets or [])
         self.identifier = identifier
         self.__post_init__()
         assert all(set(superset.output_dims).issubset(set(self.output_dims)) for superset in self.symbolic_supersets)
+        if self._is_md_eye():
+            self.is_md_eye = True
 
     def _infer_table_flags(self) -> None:
-        if self.torch_table.is_sorted and self.torch_table.is_unique:
+        if self.torch_table.is_unique:
             return
         mat = self.torch_table.materialize()
         if mat.shape[0] <= 1:
             self.torch_table.is_sorted = True
-            self.torch_table.is_unique = True
             return
         if mat.shape[1] == 0:
             self.torch_table.is_sorted = True
-            self.torch_table.is_unique = mat.shape[0] <= 1
             return
 
         sorted_table, _ = self.torch_table.sort_dedup()
-        if sorted_table.length == self.torch_table.length:
-            self.torch_table.is_unique = True
-            self.torch_table.is_sorted = torch.equal(mat, sorted_table.materialize())
+        assert sorted_table.length != self.torch_table.length
 
     def __post_init__(self):
         assert self.input_dim.length == self.torch_table.length
@@ -79,7 +83,7 @@ class COOSparsify:
             return x
         if self.input_dim not in x.dims:
             return x
-        if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
+        if self.is_md_eye:
             return x.diagonal_embed(self.input_dim, self.output_dims)
 
         other_dims = [dim for dim in x.dims if dim is not self.input_dim]
@@ -112,7 +116,7 @@ class COOSparsify:
             return y
         if len(self.output_dims) == 1 and self.output_dims[0] == self.input_dim:
             return y
-        if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
+        if self.is_md_eye and not DEBUG_NO_MD_EYE_OPT:
             return y.diagonal(present_output_dims, self.input_dim)
 
         other_dims = [dim for dim in y.dims if dim not in present_output_dims]
@@ -147,11 +151,8 @@ class COOSparsify:
     
     @staticmethod
     def merge(*args: "COOSparsify") -> "COOSparsify":
-        if (
-            all(op.is_md_eye() for op in args)
-            and COOSparsify.is_all_connect(*args)
-            and not DEBUG_NO_MD_EYE_OPT
-        ):
+        assert COOSparsify.is_all_connect(*args)
+        if all(op.is_md_eye for op in args):
             all_dims = list(sorted(set(d for op in args for d in op.output_dims)))
             input_dim = Dim(
                 length=args[0].input_dim.length,
@@ -203,7 +204,7 @@ class COOSparsify:
             ),
         )
 
-    def is_md_eye(self) -> bool:
+    def _is_md_eye(self) -> bool:
         return (
             all(data is None for data in self.torch_table.data)
             and self.torch_table.length == self.input_dim.length
@@ -215,10 +216,10 @@ class COOSparsify:
         if self is other or self.identifier is not None and self.identifier == other.identifier:
             return True
         
-        if other.is_md_eye() and self.is_md_eye():
+        if other.is_md_eye and self.is_md_eye:
             return set(self.output_dims) >= set(other.output_dims)
         
-        if other.is_md_eye() and len(other.output_dims) == 1:
+        if other.is_md_eye and len(other.output_dims) == 1:
             return other.output_dims[0] in self.output_dims
             
         if other in self.symbolic_supersets:
@@ -233,8 +234,9 @@ class COOSparsify:
             raise RuntimeError(f"Cannot symbolically determine symbolic superset relationship between these two COOSparsify based on their output_dims. Please explicitly add one as a symbolic superset {self} {other}. {[str(a) for a in self.symbolic_supersets]}")
 
     def inverse_supersets(self, *superset_op: "COOSparsify") -> "COOSparsify":
-        if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
-            assert all(op.is_md_eye() for op in superset_op), "All superset_ops must be MD eye tables if this COOSparsify is an MD eye table."
+        if self.is_md_eye and not DEBUG_NO_MD_EYE_OPT:
+            assert all(op.is_md_eye for op in superset_op), "All superset_ops must be MD eye tables if this COOSparsify is an MD eye table."
+            
             return COOSparsify.md_eye(
                 input_dim=self.input_dim,
                 output_dims=list(sorted(set(op.input_dim for op in superset_op))),
@@ -265,11 +267,12 @@ class COOSparsify:
                 data=[data_by_dim[dim] for dim in output_dims],
                 length=self.input_dim.length,
             ),
+            is_unique=False,
         )
 
 
     def filter_dims(self, dims: list[Dim]) -> tuple["COOSparsify", IndicesOrNone]:
-        if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
+        if self.is_md_eye and not DEBUG_NO_MD_EYE_OPT:
             new_output_dims = [dim for dim in self.output_dims if dim in dims]
             data = [None] * len(new_output_dims)
             new_op = COOSparsify(
@@ -290,14 +293,14 @@ class COOSparsify:
             length=new_table.length,
             ordering=self.input_dim.ordering,
             name=self.input_dim.name,
-        )
+        ) if indices is not None else self.input_dim
         return COOSparsify(
             input_dim=new_input_dim,
             torch_table=new_table,
         ), indices
     
     def __str__(self):
-        if self.is_md_eye() and not DEBUG_NO_MD_EYE_OPT:
+        if self.is_md_eye and not DEBUG_NO_MD_EYE_OPT:
             return f"{self.input_dim}{self.output_dims}"
         return f"!{self.input_dim}{self.output_dims}"
 
@@ -380,7 +383,7 @@ class MultiCOOSparsify:
     def inverse_supersets(self, superset_op: "MultiCOOSparsify") -> "MultiCOOSparsify":
         # TODO: for each op in ops, find all superset_ops in superset_op that are symbolic supersets of it,
         # call `op.inverse_supersets` on those superset_ops to get the new op and the indices,
-        # and return a new MultiCOOSparsify with all the new ops.
+        # and return a new MultiCOOSparsify with all the new opsa.
         new_ops = []
         for op in self.ops:
             supersets = [
@@ -424,6 +427,10 @@ class MultiCOOTensor:
     debug_dense: Optional[Dense] = None
 
     def __post_init__(self):
+        self.dims: list[Dim] = []
+        for op in self.sparsify.ops:
+            self.dims.extend(op.output_dims)
+        self.dims = sorted(self.dims)
         assert utils.all_unique([d for op in self.sparsify.ops for d in op.output_dims]), "Output dims must be unique across all COOSparsify ops."
         assert utils.all_unique([op.input_dim for op in self.sparsify.ops]), "Input dims must be unique across all COOSparsify ops."
         assert set(self.tn.dims).issubset(set(op.input_dim for op in self.sparsify.ops))
@@ -459,13 +466,6 @@ class MultiCOOTensor:
                     )
                 )
         return self.sparsify.forward(tn).to_dense()
-    
-    @property
-    def dims(self) -> list[Dim]:
-        dims: list[Dim] = []
-        for op in self.sparsify.ops:
-            dims.extend(op.output_dims)
-        return sorted(dims)
     
     @property
     def inner_dims(self) -> list[Dim]:
@@ -532,12 +532,12 @@ class MultiCOOTensor:
             tn=self_0.tn * other_0.tn,
             sparsify=op
         )
-        if DEBUG_MultiCOOTensor:
+        if DEBUG_MULTI_COO_TENSOR:
             a = self.to_dense() * other.to_dense()
             b = result.to_dense()
             if torch.isfinite(a.tensor).all() and torch.isfinite(b.tensor).all():
                 assert a.allclose(b), f"{self} {other} {result}"
-        # TODO-test: test this function with `DEBUG_MultiCOOTensor` enabled. Generate random high dimensional MCTs with at least 8 connected factors and at least 6 different COOSparsify ops (each with at least 2 output_dims).
+        # TODO-test: test this function with `DEBUG_MULTI_COO_TENSOR` enabled. Generate random high dimensional MCTs with at least 8 connected factors and at least 6 different COOSparsify ops (each with at least 2 output_dims).
         return result
     
     def apply_multiplicative(self, f: Callable[[torch.Tensor], torch.Tensor]) -> "MultiCOOTensor":
@@ -550,6 +550,7 @@ class MultiCOOTensor:
         # TODO: 
         # For all partial covered `COOSparsify`, call `filter_dims` to get `indices`, call `index_reduce_sum` with `indices`.
         # After that, call `self.tn.sum` on the remaining dims that are not fully reduced by the previous step.
+        assert all(d in self.dims for d in dims), "Can only sum over dims that are present in the MultiCOOTensor."
         dims_to_reduce = set(dims)
         tn = self.tn
         new_ops = []
@@ -576,12 +577,51 @@ class MultiCOOTensor:
             sparsify=MultiCOOSparsify(ops=new_ops),
         )
 
-        if DEBUG_MultiCOOTensor:
+        if DEBUG_MULTI_COO_TENSOR:
             a = self.to_dense().sum(dims)
             b = result.to_dense()
             if torch.isfinite(a.tensor).all() and torch.isfinite(b.tensor).all():
                 assert a.allclose(b), f"{self} {dims} {result}"
-        # TODO-test: test this function with `DEBUG_MultiCOOTensor` enabled. Generate random high dimensional MCTs with at least 8 connected factors and at least 6 different COOSparsify ops (each with at least 2 output_dims).
+        # TODO-test: test this function with `DEBUG_MULTI_COO_TENSOR` enabled. Generate random high dimensional MCTs with at least 8 connected factors and at least 6 different COOSparsify ops (each with at least 2 output_dims).
+        return result
+    
+    def norm(self, dims: list[Dim], p=1) -> "MultiCOOTensor":
+        dims_to_reduce = set(dims)
+        tn = self.tn
+        new_ops = []
+        tn_norm_dims = []
+
+        for op in self.sparsify.ops:
+            reduced_outputs = [dim for dim in op.output_dims if dim in dims_to_reduce]
+            if len(reduced_outputs) == 0:
+                new_ops.append(op)
+                continue
+
+            kept_outputs = [dim for dim in op.output_dims if dim not in dims_to_reduce]
+            if len(kept_outputs) == 0:
+                tn_norm_dims.append(op.input_dim)
+                continue
+
+            new_op, index = op.filter_dims(kept_outputs)
+            if index is not None:
+                if p == 1:
+                    return self.apply_multiplicative(lambda x: x.abs()).sum(dims)
+                else:
+                    return self.apply_multiplicative(lambda x: x.abs().pow(p)).sum(dims) \
+                        .apply_multiplicative(lambda x: x.pow(1/p))
+            new_ops.append(new_op)
+        
+        result = MultiCOOTensor(
+            tn=tn.norm(tn_norm_dims, p=p),
+            sparsify=MultiCOOSparsify(ops=new_ops),
+        )
+
+        if DEBUG_MULTI_COO_TENSOR:
+            a = self.to_dense().norm(dims, p=p)
+            b = result.to_dense()
+            if torch.isfinite(a.tensor).all() and torch.isfinite(b.tensor).all():
+                assert a.allclose(b), f"{self} {dims} {result}"
+        
         return result
     
     @staticmethod
@@ -592,16 +632,11 @@ class MultiCOOTensor:
                 COOSparsify.md_eye(input_dim=dim, output_dims=[dim])
                 for dim in tensor.dims
             ]),
-            debug_dense=tensor if DEBUG_MultiCOOTensor else None,
+            debug_dense=tensor if DEBUG_MULTI_COO_TENSOR else None,
         )
-    def expand_view(self, dims: Union[MultiCOOSparsify, list[Dim]]) -> "MultiCOOTensor":
-        if isinstance(dims, MultiCOOSparsify):
-            assert self.sparsify.is_symbolic_subset(dims, suppress_error=True), "Can only expand to a MultiCOOSparsify that is a symbolic superset of the current sparsify."
-            tn = self.sparsify.inverse_supersets(dims).forward(self.tn)
-            return MultiCOOTensor(tn=tn, sparsify=dims)
-
+    def expand_view(self, dims: list[Dim]) -> "MultiCOOTensor":
         assert set(self.dims).issubset(set(dims)), "Can only expand to dims that are a superset of the current dims."
-        tn = self.tn.clone()
+        tn = self.tn
         ops = list(self.sparsify.ops)
         for dim in dims:
             if dim not in self.dims:
@@ -688,10 +723,12 @@ class MultiCOOTensorSum:
     def apply_multiplicative(
         self, fn: Callable[[torch.Tensor], torch.Tensor]
     ) -> "MultiCOOTensorSum":
+        if len(self.terms) == 1:
+            return MultiCOOTensorSum([self.terms[0].apply_multiplicative(fn)])
         old_terms = self.terms
         new_terms: list[MultiCOOTensor] = []
         for i, t1 in enumerate(old_terms):
-            new_t = t1.clone()
+            new_t = t1
             for t2 in old_terms[:i]:
                 new_t = t2.add_intersection_to(new_t)
             assert new_t is not None

@@ -2,7 +2,8 @@
 
 import torch
 
-from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._base import DEBUG_LINEAR_OP, LinearOp, LinearOpFlags
+from boundlab.linearop._debug import jacobian_from_function
 from boundlab.linearop._sparse import all_coords, make_input_dims, make_output_dims
 from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
 from boundlab.sparse.dim import Dim
@@ -44,6 +45,30 @@ def _indices_tensor(input_shape: torch.Size, output_shape: torch.Size, dim: int,
     return MultiCOOTensorSum([tensor]), input_dims, output_dims
 
 
+def _get_indices_debug(x: torch.Tensor, dim: int, indices: torch.Tensor, output_shape: torch.Size) -> torch.Tensor:
+    return x.index_select(dim, indices.reshape(-1).to(x.device)).reshape(output_shape)
+
+
+def _set_indices_debug(x: torch.Tensor, output_shape: torch.Size, dim: int, indices: torch.Tensor, added_shape: torch.Size) -> torch.Tensor:
+    input_coords = all_coords(torch.Size(x.shape)).to(x.device)
+    output_coords = input_coords.clone()
+    flat_indices = indices.reshape(-1).to(x.device)
+    added_coords = all_coords(added_shape).to(x.device)
+    added_ravel = torch.zeros(added_coords.shape[0], dtype=torch.long, device=x.device)
+    for axis, size in enumerate(added_shape):
+        added_ravel = added_ravel * int(size) + added_coords[:, axis]
+    input_added_coords = input_coords[:, dim:dim + len(added_shape)]
+    input_ravel = torch.zeros(input_coords.shape[0], dtype=torch.long, device=x.device)
+    for axis, size in enumerate(added_shape):
+        input_ravel = input_ravel * int(size) + input_added_coords[:, axis]
+    output_coords[:, dim] = flat_indices[input_ravel]
+    if len(added_shape) > 1:
+        output_coords = torch.cat([output_coords[:, :dim + 1], output_coords[:, dim + len(added_shape):]], dim=1)
+    result = torch.zeros(output_shape, dtype=x.dtype, device=x.device)
+    result.index_put_(tuple(output_coords[:, axis] for axis in range(output_coords.shape[1])), x.reshape(-1), accumulate=True)
+    return result
+
+
 class GetIndicesOp(LinearOp):
     def __init__(self, input_shape: torch.Size, dim: int, indices: torch.Tensor, added_shape: torch.Size):
         input_shape = torch.Size(input_shape)
@@ -54,7 +79,7 @@ class GetIndicesOp(LinearOp):
         output_shape = torch.Size(list(input_shape[:dim]) + list(self.added_shape) + list(input_shape[dim + 1:]))
         n_added = len(self.added_shape)
         tensor, input_dims, output_dims = _indices_tensor(input_shape, output_shape, dim, self.indices, self.added_shape, set_mode=False)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: _get_indices_debug(x, dim, self.indices, output_shape)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -62,7 +87,7 @@ class GetIndicesOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __matmul__(self, other):
@@ -84,7 +109,7 @@ class SetIndicesOp(LinearOp):
         assert self.indices.shape == self.added_shape
         input_shape = torch.Size(list(output_shape[:dim]) + list(self.added_shape) + list(output_shape[dim + 1:]))
         tensor, input_dims, output_dims = _indices_tensor(input_shape, output_shape, dim, self.indices, self.added_shape, set_mode=True)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: _set_indices_debug(x, output_shape, dim, self.indices, self.added_shape)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -92,7 +117,7 @@ class SetIndicesOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):

@@ -26,5 +26,9 @@ class Dim:
     def __repr__(self):
         return str(self)
 
-    def clone(self, name: str | None = None) -> "Dim":
-        return Dim(length=self.length, ordering=self.ordering, name=name if name is not None else self.name)
+    def clone(self, name: str | None = None, suffix: str | None = None) -> "Dim":
+        if name is None:
+            name = self.name
+        if name is not None and suffix is not None:
+            name += suffix
+        return Dim(length=self.length, ordering=self.ordering, name=name)

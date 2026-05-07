@@ -33,6 +33,65 @@ def test_reshapeop_constructs_sparse_matrix():
     assert torch.allclose(op.jacobian(), expected_jacobian)
 
 
+def test_reshapeop_inserts_unit_axes():
+    op = ReshapeOp(torch.Size([2, 3]), (1, 2, 1, 3, 1))
+    x = torch.arange(6.0).reshape(2, 3)
+    grad = torch.arange(6.0).reshape(1, 2, 1, 3, 1) - 2.0
+
+    _assert_sparse_linearop(
+        op,
+        x,
+        grad,
+        lambda t: t.reshape(1, 2, 1, 3, 1),
+        grad.reshape(2, 3),
+    )
+    assert len(op.tensor.terms[0].sparsify.ops) == 5
+
+
+def test_reshapeop_removes_unit_axes():
+    op = ReshapeOp(torch.Size([1, 2, 1, 3, 1]), (2, 3))
+    x = torch.arange(6.0).reshape(1, 2, 1, 3, 1)
+    grad = torch.arange(6.0).reshape(2, 3) / 3.0
+
+    _assert_sparse_linearop(
+        op,
+        x,
+        grad,
+        lambda t: t.reshape(2, 3),
+        grad.reshape(1, 2, 1, 3, 1),
+    )
+    assert len(op.tensor.terms[0].sparsify.ops) == 5
+
+
+def test_reshapeop_mixes_unit_axes_with_core_reshape():
+    op = ReshapeOp(torch.Size([1, 2, 3, 1, 4]), (1, 6, 1, 4, 1))
+    x = torch.arange(24.0).reshape(1, 2, 3, 1, 4)
+    grad = torch.arange(24.0).reshape(1, 6, 1, 4, 1) / 5.0
+
+    _assert_sparse_linearop(
+        op,
+        x,
+        grad,
+        lambda t: t.reshape(1, 6, 1, 4, 1),
+        grad.reshape(1, 2, 3, 1, 4),
+    )
+
+
+def test_reshapeop_all_unit_axes():
+    op = ReshapeOp(torch.Size([1, 1]), (1, 1, 1))
+    x = torch.ones(1, 1)
+    grad = torch.full((1, 1, 1), 7.0)
+
+    _assert_sparse_linearop(
+        op,
+        x,
+        grad,
+        lambda t: t.reshape(1, 1, 1),
+        grad.reshape(1, 1),
+    )
+    assert torch.allclose(op.jacobian(), torch.ones(1, 1, 1, 1, 1))
+
+
 def test_permuteop_constructs_sparse_matrix():
     op = PermuteOp(torch.Size([2, 3, 4]), (2, 0, 1))
     x = torch.arange(24.0).reshape(2, 3, 4)
@@ -41,7 +100,7 @@ def test_permuteop_constructs_sparse_matrix():
 
     assert isinstance(op.tensor, MultiCOOTensorSum)
     assert len(op.tensor.terms) == 1
-    assert all(sparsify.is_md_eye() for sparsify in op.tensor.terms[0].sparsify.ops)
+    assert all(sparsify.is_md_eye for sparsify in op.tensor.terms[0].sparsify.ops)
     assert torch.allclose(op.forward(x), x.permute(2, 0, 1))
     assert torch.allclose(op.backward(grad), grad.permute(1, 2, 0))
     assert torch.allclose(op.jacobian(), expected_jacobian)

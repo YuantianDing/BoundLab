@@ -54,26 +54,26 @@ def bilinear_matmul(A: Expr, B: Expr) -> Expr:
     >>> C.shape
     torch.Size([2, 4])
     """
-    return square_matmul(A, B)
-    # assert len(A.shape) >= 2 and len(B.shape) >= 2, \
-    #     f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
-    # assert A.shape[-1] == B.shape[-2], \
-    #     f"Inner dims must match: {A.shape} @ {B.shape}"
+    # return square_matmul(A, B)
+    assert len(A.shape) >= 2 and len(B.shape) >= 2, \
+        f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
+    assert A.shape[-1] == B.shape[-2], \
+        f"Inner dims must match: {A.shape} @ {B.shape}"
 
-    # Ac, As = A.split_const()  # Ac: constant part, As: epsilon part
-    # Bc, Bs = B.split_const()  # Bc: constant part, Bs: epsilon part
+    Ac, As = A.split_const()  # Ac: constant part, As: epsilon part
+    Bc, Bs = B.split_const()  # Bc: constant part, Bs: epsilon part
 
-    # result = Ac @ Bs + As @ Bc + Ac @ Bc
+    result = Ac @ Bs + As @ Bc + Ac @ Bc
 
-    # # Error bound: |E| ≤ hw(A) * hw(B) where hw = half-width
-    # assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
+    # Error bound: |E| ≤ hw(A) * hw(B) where hw = half-width
+    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
     
-    # error_bound = As.ub() @ Bs.ub()
+    error_bound = As.ub() @ Bs.ub()
 
 
-    # new_eps = LpEpsilon(error_bound.shape)
-    # result = result + error_bound * new_eps
-    # return result
+    new_eps = LpEpsilon(error_bound.shape)
+    result = result + error_bound * new_eps
+    return result
 
 
 def bilinear_elementwise(A: Expr, B: Expr) -> Expr:

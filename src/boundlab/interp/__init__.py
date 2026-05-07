@@ -736,8 +736,8 @@ class Interpreter(Generic[E]):
                 result = handler(*args, **kwargs)
                 
 
-                if verbose:
-                    print(f"-> {to_repr(result)}")
+                # if verbose:
+                #     print(f"-> {to_repr(result)}")
 
                 assert not isinstance(result, tuple), f"Handler for {node.op_type} returned a tuple, but only single outputs are supported. Got: {result}"
 

@@ -2,7 +2,8 @@
 
 import torch
 
-from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._base import DEBUG_LINEAR_OP, LinearOp, LinearOpFlags
+from boundlab.linearop._debug import jacobian_from_function
 from boundlab.linearop._sparse import make_input_dims, make_output_dims
 from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
 from boundlab.sparse.dim import Dim
@@ -26,40 +27,50 @@ def _output_size(dim_slices: list[slice]) -> int:
     return sum(s.stop - s.start for s in dim_slices)
 
 
-def _slice_indices(dim_slices: list[slice]) -> torch.Tensor:
-    if not dim_slices:
-        return torch.empty(0, dtype=torch.long)
-    return torch.cat([torch.arange(s.start, s.stop, dtype=torch.long) for s in dim_slices])
-
-
 def _is_full(dim_slices: list[slice], dim_size: int) -> bool:
     return len(dim_slices) == 1 and dim_slices[0].start == 0 and dim_slices[0].stop == dim_size
 
 
-def _slice_tensor(input_shape: torch.Size, output_shape: torch.Size, indices: list[torch.Tensor], set_mode: bool):
+def _slice_tensor(input_shape: torch.Size, output_shape: torch.Size, all_slices: list[list[slice]], set_mode: bool):
     input_dims = make_input_dims(input_shape)
     output_dims = make_output_dims(output_shape)
     ops = []
-    for axis, idx in enumerate(indices):
+    for axis, slices in enumerate(all_slices):
         in_dim = input_dims[axis]
         out_dim = output_dims[axis]
-        if idx.numel() == input_shape[axis] == output_shape[axis] and torch.equal(idx, torch.arange(input_shape[axis])):
-            inner = Dim(int(input_shape[axis]), 500.0 + axis, f"k{axis}")
-            ops.append(COOSparsify.md_eye(inner, [out_dim, in_dim]))
-            continue
-
-        edge = Dim(int(idx.numel()), 500.0 + axis, f"k{axis}")
-        input_pos = torch.arange(idx.numel(), dtype=torch.long)
-        output_pos = idx.to(torch.long).contiguous()
         if not set_mode:
-            input_pos, output_pos = output_pos, input_pos
+            if _is_full(slices, input_shape[axis]):
+                assert input_shape[axis] == output_shape[axis], f"Full slice on axis {axis} requires input and output sizes to match, got {input_shape[axis]} and {output_shape[axis]}"
+                inner = Dim(int(input_shape[axis]), 500.0 + axis, f"k{axis}")
+                ops.append(COOSparsify.md_eye(inner, [out_dim, in_dim]))
+                continue
+
+            edge = Dim(output_shape[axis], 500.0 + axis, f"k{axis}")
+            input_pos = torch.cat([torch.arange(s.start, s.stop, dtype=torch.long) for s in slices], dim=0)
+            assert input_pos.shape[0] == out_dim.length, f"Number of output indices must match output size on axis {axis}, got {input_pos.numel()} and {output_shape[axis]}"
+            length = out_dim.length
+            output_pos = None
+        else:
+            if _is_full(slices, output_shape[axis]):
+                assert input_shape[axis] == output_shape[axis], f"Full slice on axis {axis} requires input and output sizes to match, got {input_shape[axis]} and {output_shape[axis]}"
+                inner = Dim(int(input_shape[axis]), 500.0 + axis, f"k{axis}")
+                ops.append(COOSparsify.md_eye(inner, [in_dim, out_dim]))
+                continue
+
+            edge = Dim(input_shape[axis], 500.0 + axis, f"k{axis}")
+            output_pos = torch.cat([torch.arange(s.start, s.stop, dtype=torch.long) for s in slices], dim=0)
+            assert output_pos.shape[0] == in_dim.length, f"Number of input indices must match input size on axis {axis}, got {output_pos.numel()} and {input_shape[axis]}"
+            length = in_dim.length
+            input_pos = None
         ops.append(
             COOSparsify(
                 edge,
                 TorchTable(
                     columns=[out_dim, in_dim],
                     data=[output_pos, input_pos],
-                    length=int(idx.numel()),
+                    length=length,
+                    is_unique=True,
+                    is_sorted=True,
                 ),
             )
         )
@@ -67,16 +78,28 @@ def _slice_tensor(input_shape: torch.Size, output_shape: torch.Size, indices: li
     return MultiCOOTensorSum([tensor]), input_dims, output_dims
 
 
+def _get_slice_debug(x: torch.Tensor, indices: list[torch.Tensor]) -> torch.Tensor:
+    for axis, idx in enumerate(indices):
+        x = x.index_select(axis, idx.to(x.device))
+    return x
+
+
+def _set_slice_debug(x: torch.Tensor, output_shape: torch.Size, indices: list[torch.Tensor]) -> torch.Tensor:
+    result = torch.zeros(output_shape, dtype=x.dtype, device=x.device)
+    mesh = torch.meshgrid(*(idx.to(x.device) for idx in indices), indexing="ij")
+    result[mesh] = x
+    return result
+
+
 class GetSliceOp(LinearOp):
     def __init__(self, input_shape: torch.Size, slices: list[list[slice]]):
         input_shape = torch.Size(input_shape)
         assert len(input_shape) == len(slices)
         self.slices = _normalize_slices(slices, input_shape)
-        self._indices = [_slice_indices(s) for s in self.slices]
         output_shape = torch.Size(_output_size(s) for s in self.slices)
 
-        tensor, input_dims, output_dims = _slice_tensor(input_shape, output_shape, self._indices, set_mode=False)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        tensor, input_dims, output_dims = _slice_tensor(input_shape, output_shape, self.slices, set_mode=False)
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: _get_slice_debug(x, self._indices)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -84,7 +107,7 @@ class GetSliceOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __matmul__(self, other):
@@ -109,10 +132,9 @@ class SetSliceOp(LinearOp):
         output_shape = torch.Size(output_shape)
         assert len(output_shape) == len(slices)
         self.slices = _normalize_slices(slices, output_shape)
-        self._indices = [_slice_indices(s) for s in self.slices]
         input_shape = torch.Size(_output_size(s) for s in self.slices)
-        tensor, input_dims, output_dims = _slice_tensor(input_shape, output_shape, self._indices, set_mode=True)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        tensor, input_dims, output_dims = _slice_tensor(input_shape, output_shape, self.slices, set_mode=True)
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: _set_slice_debug(x, output_shape, self._indices)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -120,7 +142,7 @@ class SetSliceOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __matmul__(self, other):

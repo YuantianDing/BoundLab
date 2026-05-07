@@ -2,8 +2,9 @@
 
 import torch
 
-from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._base import DEBUG_LINEAR_OP, LinearOp, LinearOpFlags
 from boundlab.linearop._compat import ScalarOp
+from boundlab.linearop._debug import jacobian_from_function
 from boundlab.linearop._sparse import make_input_dims, make_output_dims
 from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor, MultiCOOTensorSum
 from boundlab.sparse.dim import Dim
@@ -13,31 +14,20 @@ from boundlab.sparse.tn import TN
 
 def _expand_tensor(input_shape: torch.Size, output_shape: torch.Size):
     n_new = len(output_shape) - len(input_shape)
-    padded_input_shape = torch.Size([1] * n_new + list(input_shape))
     input_dims = make_input_dims(input_shape)
     output_dims = make_output_dims(output_shape)
     ops = []
 
     for axis, output_dim in enumerate(output_dims):
         input_dim = None if axis < n_new else input_dims[axis - n_new]
-        input_size = padded_input_shape[axis]
-        output_size = output_shape[axis]
-        assert input_size == 1 or input_size == output_size, (
-            f"ExpandOp: dim {axis} has input size {input_size} and output size {output_size}."
-        )
-
-        if input_dim is not None and input_size == output_size:
-            inner = Dim(int(output_size), 500.0 + axis, f"k{axis}")
-            ops.append(COOSparsify.md_eye(inner, [output_dim, input_dim]))
-            continue
-
-        edge = Dim(int(output_size), 500.0 + axis, f"k{axis}")
-        columns = [output_dim]
-        data = [torch.arange(output_size, dtype=torch.long)]
-        if input_dim is not None:
-            columns.append(input_dim)
-            data.append(torch.zeros(output_size, dtype=torch.long))
-        ops.append(COOSparsify(edge, TorchTable(columns=columns, data=data, length=int(output_size))))
+        if input_dim and input_dim.length > 1:
+            assert input_dim.length == output_dim.length, f"Cannot expand dimension {axis} of size {input_dim.length} to size {output_dim.length}"
+            ops.append(COOSparsify.md_eye(input_dim.clone(suffix=output_dim.name), [input_dim, output_dim]))
+        elif input_dim and input_dim.length == 1:
+            ops.append(COOSparsify.md_eye(input_dim.clone(suffix="I"), [input_dim]))
+            ops.append(COOSparsify.md_eye(output_dim.clone(suffix="I"), [output_dim]))
+        else:
+            ops.append(COOSparsify.md_eye(output_dim.clone(suffix="I"), [output_dim]))
 
     tensor = MultiCOOTensor(TN(factors=[]), MultiCOOSparsify(ops))
     return MultiCOOTensorSum([tensor]), input_dims, output_dims
@@ -60,7 +50,7 @@ class ExpandOp(LinearOp):
         output_shape = torch.Size(output_shape)
         self._padded_input_shape = torch.Size([1] * (len(output_shape) - len(input_shape)) + list(input_shape))
         tensor, input_dims, output_dims = _expand_tensor(input_shape, output_shape)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: x.expand(output_shape)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -68,6 +58,6 @@ class ExpandOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
         self.name = f"<expand {list(input_shape)} -> {list(output_shape)}>"

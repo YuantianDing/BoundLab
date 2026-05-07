@@ -2,7 +2,8 @@
 
 import torch
 
-from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._base import DEBUG_LINEAR_OP, LinearOp, LinearOpFlags
+from boundlab.linearop._debug import jacobian_from_function
 from boundlab.sparse.coo import COOSparsify, MultiCOOSparsify, MultiCOOTensor
 from boundlab.sparse.dim import Dim
 from boundlab.sparse.tn import Dense, TN
@@ -12,7 +13,7 @@ class EinsumOp(LinearOp):
     r"""Linear operator defined by an Einstein summation with a fixed tensor."""
 
     def __init__(self, tensor: torch.Tensor, input_dims: list[int], output_dims: list[int], name=None):
-        self.coeff = tensor.contiguous()
+        self.coeff = tensor
         self.einsum_input_axes = list(input_dims)
         self.einsum_output_axes = list(output_dims)
         self.dot_dims = [i for i in input_dims if i not in output_dims]
@@ -37,7 +38,17 @@ class EinsumOp(LinearOp):
             ops.append(COOSparsify.md_eye(dim, dims))
         dense = Dense(self.coeff, tensor_dims)
         sparse_tensor = MultiCOOTensor(TN.from_dense(dense), MultiCOOSparsify(ops))
-        debug_jacobian = sparse_tensor.to_dense().expand(lin_output_dims + lin_input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(
+            input_shape,
+            output_shape,
+            lambda x: torch.einsum(
+                self.coeff,
+                list(range(self.coeff.ndim)),
+                x,
+                self.einsum_input_axes,
+                self.einsum_output_axes,
+            ),
+        ) if DEBUG_LINEAR_OP else None
 
         super().__init__(
             sparse_tensor,
@@ -46,7 +57,8 @@ class EinsumOp(LinearOp):
             flags=LinearOpFlags.NONE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
+            print(self.tensor.to_dense(), self.debug_jacobian)
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):

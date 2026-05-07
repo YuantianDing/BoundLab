@@ -2,7 +2,8 @@
 
 import torch
 
-from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._base import DEBUG_LINEAR_OP, LinearOp, LinearOpFlags
+from boundlab.linearop._debug import jacobian_from_function
 from boundlab.linearop._reshape import SqueezeOp
 from boundlab.linearop._sparse import all_coords, tensor_from_edges, tensor_from_output_map
 from boundlab.linearop._slicing import GetSliceOp, SetSliceOp
@@ -22,7 +23,7 @@ class GatherOp(LinearOp):
             return inp
 
         tensor, input_dims, output_dims = tensor_from_output_map(input_shape, output_shape, input_from_output)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: torch.gather(x, dim, self.index)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -30,7 +31,7 @@ class GatherOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):
@@ -48,7 +49,7 @@ class ScatterOp(LinearOp):
         output_coords = input_coords.clone()
         output_coords[:, dim] = self.index.reshape(-1)[_ravel_like(input_coords, input_shape)]
         tensor, input_dims, output_dims = tensor_from_edges(input_shape, output_shape, input_coords, output_coords)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: torch.zeros(output_shape, dtype=x.dtype, device=x.device).scatter_add(dim, self.index, x)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -56,7 +57,7 @@ class ScatterOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):

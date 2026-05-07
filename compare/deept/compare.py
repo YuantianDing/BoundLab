@@ -1,7 +1,7 @@
-"""Compare BoundLab vs DeepT on a 12-layer SST transformer (LayerNorm removed).
+"""Compare BoundLab vs DeepT on a 3-layer SST transformer (LayerNorm removed).
 
-This script loads weights from DeepT's ``sst_bert_small_12/ckpt-3`` checkpoint,
-constructs a 12-layer transformer with attention + FFN blocks (no LayerNorm), and
+This script loads weights from DeepT's ``sst_bert_small_3/ckpt-3`` checkpoint,
+constructs a 3-layer transformer with attention + FFN blocks (no LayerNorm), and
 compares output bounds under an L∞ perturbation on one token embedding.
 
 Run:
@@ -11,7 +11,6 @@ Run:
 from __future__ import annotations
 
 import math
-import time
 from argparse import Namespace
 from pathlib import Path
 
@@ -23,12 +22,13 @@ import boundlab.expr as expr
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 from pyinstrument import Profiler
+from pyinstrument.renderers import HTMLRenderer
 from Zonotope import Zonotope as DeepTZonotope  # type: ignore
 from Zonotope import make_zonotope_new_weights_same_args  # type: ignore
 
 
 HERE = Path(__file__).resolve().parent
-CKPT_DIR = HERE / "DeepT" / "Robustness-Verification-for-Transformers" / "sst_bert_small_12" / "ckpt-3"
+CKPT_DIR = HERE / "DeepT" / "Robustness-Verification-for-Transformers" / "sst_bert_small_3" / "ckpt-3"
 CKPT_PATH = CKPT_DIR / "pytorch_model.bin"
 VOCAB_PATH = CKPT_DIR / "vocab.txt"
 
@@ -188,32 +188,45 @@ def deept_bounds(model: SstSmallNoLayerNorm, center: torch.Tensor, perturbed_idx
     return ub.squeeze(), lb.squeeze()
 
 
+def _profile(label: str, output_path: Path, fn):
+    profiler = Profiler()
+    profiler.start()
+    result = fn()
+    profiler.stop()
+
+    output_path.write_text(
+        HTMLRenderer(show_all=False).render(profiler.last_session),
+        encoding="utf-8",
+    )
+    print(f"pyinstrument HTML ({label}): {output_path}")
+    return result, profiler.last_session.duration
+
+
 def main() -> None:
     state = torch.load(CKPT_PATH, map_location="cpu")
     vocab = _load_vocab(VOCAB_PATH)
 
-    model = SstSmallNoLayerNorm(state, num_layers=12, num_heads=1).eval()
+    model = SstSmallNoLayerNorm(state, num_layers=3, num_heads=1).eval()
     tokens = ["[CLS]", "a", "very", "good", "movie", "[SEP]"]
     center, perturbed_idx = build_input_from_embeddings(state, vocab, tokens)
     eps = 0.01
     ir = onnx_export(model, (center,))
 
-    t0 = time.perf_counter()
-    profiler = Profiler()
-    profiler.start()
-    bl_ub, bl_lb, op_types = boundlab_bounds(ir, center, perturbed_idx, eps)
-    profiler.stop()
-    bl_time = profiler.last_session.duration
-    profiler.open_in_browser()
-    bl_time = time.perf_counter() - t0
+    (bl_ub, bl_lb, op_types), bl_time = _profile(
+        "BoundLab",
+        HERE / "pyinstrument_boundlab.html",
+        lambda: boundlab_bounds(ir, center, perturbed_idx, eps),
+    )
     max_bl_width = torch.max(bl_ub - bl_lb).item()
 
-    t0 = time.perf_counter()
-    dt_ub, dt_lb = deept_bounds(model, center, perturbed_idx, eps)
-    dt_time = time.perf_counter() - t0
+    (dt_ub, dt_lb), dt_time = _profile(
+        "DeepT",
+        HERE / "pyinstrument_deept.html",
+        lambda: deept_bounds(model, center, perturbed_idx, eps),
+    )
     max_dt_width = torch.max(dt_ub - dt_lb).item()
 
-    print("Model: sst_bert_small_12 (12-layer, LayerNorm removed)")
+    print("Model: sst-bert-small-3 (3-layer, LayerNorm removed)")
     print(f"Sentence tokens: {tokens}")
     print(f"Perturbed token index: {perturbed_idx} ({tokens[perturbed_idx]})")
     print(f"Epsilon (L_inf): {eps}")

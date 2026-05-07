@@ -2,7 +2,7 @@ import itertools
 
 import torch
 
-from boundlab.sparse.tn import Dense, Dim
+from boundlab.sparse.tn import Dense, Dim, TN
 
 
 def test_dense_diagonal_one_dim_renames_dim():
@@ -130,6 +130,64 @@ def test_dense_diagonal_embed_and_diagonal_with_spectator_dim_roundtrip():
         assert scattered.tensor[b, r, c].item() == expected
     assert viewed.dims == [batch, recovered]
     assert torch.equal(viewed.tensor, tensor)
+
+
+def test_dense_norm_reduces_requested_dims_and_honors_p():
+    row = Dim(2, 0.0, "row")
+    col = Dim(3, 1.0, "col")
+    tensor = torch.tensor([[1.0, -2.0, 2.0], [-3.0, 4.0, -12.0]])
+    dense = Dense(tensor, [row, col])
+
+    l1 = dense.norm([col], p=1)
+    l2 = dense.norm([col], p=2)
+
+    assert l1.dims == [row]
+    assert l2.dims == [row]
+    assert torch.equal(l1.tensor, tensor.abs().sum(dim=1))
+    assert torch.allclose(l2.tensor, torch.linalg.vector_norm(tensor, ord=2, dim=1))
+
+
+def test_dense_norm_scales_dims_not_present_in_tensor():
+    row = Dim(2, 0.0, "row")
+    missing = Dim(4, 1.0, "missing")
+    dense = Dense(torch.tensor([3.0, -5.0]), [row])
+
+    l1 = dense.norm([missing], p=1)
+    l2 = dense.norm([missing], p=2)
+
+    assert l1.dims == [row]
+    assert l2.dims == [row]
+    assert torch.equal(l1.tensor, dense.tensor.abs() * missing.length)
+    assert torch.equal(l2.tensor, dense.tensor.abs() * missing.length ** 0.5)
+
+
+def test_tn_norm_matches_dense_norm_for_connected_factors():
+    row = Dim(2, 0.0, "row")
+    shared = Dim(3, 1.0, "shared")
+    col = Dim(2, 2.0, "col")
+    left = Dense(torch.tensor([[1.0, -2.0, 3.0], [-4.0, 5.0, -6.0]]), [row, shared])
+    right = Dense(torch.tensor([[2.0, -1.0], [-3.0, 4.0], [5.0, -2.0]]), [shared, col])
+    scale = Dense(torch.tensor([0.5, -2.0]), [col])
+    tn = TN([left, right, scale])
+    dense = tn.to_dense()
+
+    l1 = tn.norm([shared], p=1).to_dense()
+    l2 = tn.norm([shared], p=2).to_dense()
+
+    assert l1.allclose(dense.norm([shared], p=1))
+    assert l2.allclose(dense.norm([shared], p=2))
+
+
+def test_tn_norm_scales_dims_not_present_in_tensor():
+    row = Dim(2, 0.0, "row")
+    missing = Dim(4, 1.0, "missing")
+    tn = TN.from_dense(Dense(torch.tensor([3.0, -5.0]), [row]))
+
+    l1 = tn.norm([missing], p=1).to_dense()
+    l2 = tn.norm([missing], p=2).to_dense()
+
+    assert l1.allclose(tn.to_dense().norm([missing], p=1))
+    assert l2.allclose(tn.to_dense().norm([missing], p=2))
 
 
 def test_dense_diagonal_rejects_invalid_dims():

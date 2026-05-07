@@ -21,29 +21,33 @@ class TorchTable:
         columns: list[Dim],
         data: list[Optional[Indices]],
         length: Optional[int] = None,
+        is_sorted: bool = False,
+        is_unique: bool = False,
     ):
         assert len(columns) == len(data), "Must provide data for each column."
         assert len(set(columns)) == len(columns), "Column names must be unique."
         self.columns: list[Dim] = list(columns)
-        self.data: list[Optional[Indices]] = list(data)
+        self.data: list[Optional[Indices]] = data
         set_len = set(int(d.shape[0]) for d in self.data if d is not None)
         if length is not None:
             set_len.add(length)
         assert len(set_len) == 1, "All columns must have the same length as each other and the provided length."
         self.length: int = set_len.pop()
 
-        for dat in self.data:
+        for i, dat in enumerate(self.data):
             if dat is not None:
                 assert dat.dim() == 1, "Column data must be 1D."
-                if self.length is None:
-                    self.length = int(dat.shape[0])
-                else:
-                    assert int(dat.shape[0]) == self.length, \
+                assert int(dat.shape[0]) == self.length, \
                         "All columns must have the same length."
+            elif data is None:
+                assert self.columns[i].length == self.length, f"Index column length must match table length, but column {self.columns[i]} has length {self.columns[i].length} and table has length {self.length}."
         assert self.length is not None, \
             "Must provide at least one column of data or specify length."
-        self.is_sorted = False
-        self.is_unique = False
+        self.is_sorted = is_sorted
+        self.is_unique = is_unique
+        if all(dat is None for dat in self.data):
+            self.is_sorted = True
+            self.is_unique = True
     
     def items(self):
         """Iterator over (column_name, column_data) pairs."""
@@ -200,42 +204,11 @@ class TorchTable:
         if len(tables) == 1:
             return tables[0]
 
-        col_sets = [set(t.columns) for t in tables]
-        shared: set[Dim] = set(col_sets[0])
-        for s in col_sets[1:]:
-            shared &= s
-
-        # all_shared_are_indices = len(shared) > 0 and all(
-        #     t.data[t.columns.index(c)] is None for t in tables for c in shared
-        # )
-        # if all_shared_are_indices:
-        #     min_length = min(t.length for t in tables)
-        #     new_columns: list[Dim] = []
-        #     new_data: list[Optional[Indices]] = []
-        #     seen: set[Dim] = set()
-        #     for t in tables:
-        #         for name, dat in zip(t.columns, t.data):
-        #             if name in seen:
-        #                 continue
-        #             seen.add(name)
-        #             new_columns.append(name)
-        #             if name in shared:
-        #                 new_data.append(None)
-        #             elif dat is None:
-        #                 new_data.append(None)
-        #             else:
-        #                 sliced = dat[:min_length]
-        #                 new_data.append(
-        #                     TorchTable._maybe_compress(sliced, min_length)
-        #                 )
-        #     result = TorchTable(new_columns, new_data, length=min_length)
-        #     # Sorted+unique only guaranteed when each table individually was;
-        #     # the index-column fast-path preserves sort+unique on shared cols.
-        #     result.is_unique = True
-        #     return result
+        print("Merge Pattern: ", ", ".join(f"{t.length} " + " ".join(f"{'' if v is None else '!'}{k}.{k.length}"for k, v in t.items()) for t in tables))
+        
 
         # Slow path — remap columns to dense indices and call table_join_sorted.
-        all_col_names = sorted(set().union(*col_sets))
+        all_col_names = sorted(set(k for t in tables for k, _ in t.items()))
         name_to_idx = {name: i for i, name in enumerate(all_col_names)}
         args: list = []
         for t in tables:
@@ -249,7 +222,7 @@ class TorchTable:
             result_tensor[:, i]
             for i in range(len(all_col_names))
         ]
-        return TorchTable(list(all_col_names), new_data, length=new_length)
+        return TorchTable(list(all_col_names), new_data, length=new_length, is_unique=True)
 
     def __and__(self, other: "TorchTable") -> "TorchTable":
         return TorchTable.merge([self, other])

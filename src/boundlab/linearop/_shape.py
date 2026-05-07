@@ -2,7 +2,8 @@
 
 import torch
 
-from boundlab.linearop._base import DEBUG_LinearOp, LinearOp, LinearOpFlags
+from boundlab.linearop._base import DEBUG_LINEAR_OP, LinearOp, LinearOpFlags
+from boundlab.linearop._debug import jacobian_from_function
 from boundlab.linearop._sparse import make_input_dims, make_output_dims
 from boundlab.linearop._reshape import ReshapeOp, FlattenOp, UnflattenOp, SqueezeOp, UnsqueezeOp, _meta_output_shape
 from boundlab.linearop._permute import PermuteOp, TransposeOp
@@ -53,7 +54,7 @@ class RepeatOp(LinearOp):
             mapping = torch.arange(output_shape[axis], dtype=torch.long) % input_shape[input_axis]
             ops.append(_axis_op(input_dims[input_axis], output_dim, mapping, 500.0 + axis, f"k{axis}"))
         tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, ops)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: x.repeat(self.sizes)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -61,7 +62,7 @@ class RepeatOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):
@@ -95,7 +96,7 @@ class FlipOp(LinearOp):
                 mapping = input_shape[axis] - 1 - mapping
             ops.append(_axis_op(input_dim, output_dim, mapping, 500.0 + axis, f"k{axis}"))
         tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, ops)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, input_shape, lambda x: torch.flip(x, tuple(flip_dims))) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -103,7 +104,7 @@ class FlipOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):
@@ -132,7 +133,7 @@ class RollOp(LinearOp):
                 mapping = (mapping - shift_by_dim[axis]) % input_shape[axis]
             ops.append(_axis_op(input_dim, output_dim, mapping, 500.0 + axis, f"k{axis}"))
         tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, ops)
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, input_shape, lambda x: torch.roll(x, shifts_tuple, dims_tuple)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -140,7 +141,7 @@ class RollOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):
@@ -187,7 +188,7 @@ class DiagOp(LinearOp):
             ]
             op = COOSparsify(edge, TorchTable(columns=output_dims + input_dims, data=data, length=int(input_coords.shape[0])))
         tensor, input_dims, output_dims = _tensor_from_ops(input_dims, output_dims, [op])
-        debug_jacobian = tensor.to_dense().expand(output_dims + input_dims) if DEBUG_LinearOp else None
+        debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: x.diag(diagonal)) if DEBUG_LINEAR_OP else None
         super().__init__(
             tensor,
             input_dims,
@@ -195,7 +196,7 @@ class DiagOp(LinearOp):
             flags=LinearOpFlags.IS_NON_NEGATIVE,
             debug_jacobian=debug_jacobian,
         )
-        if DEBUG_LinearOp:
+        if DEBUG_LINEAR_OP:
             assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):

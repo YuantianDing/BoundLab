@@ -1,5 +1,7 @@
 
 from dataclasses import dataclass
+from functools import reduce
+import operator
 from typing import Any, Callable, Union
 
 import torch
@@ -15,22 +17,23 @@ class Dense:
     dims: list[Dim]
 
     def __post_init__(self):
-        assert self.tensor.ndim == len(self.dims)
+        assert self.tensor.ndim == len(self.dims), f"Tensor has {self.tensor.ndim} dimensions, but {len(self.dims)} dims were provided."
         assert len(set(self.dims)) == len(self.dims), "Dense tensors cannot repeat dims."
         for idx, dim in enumerate(self.dims):
             assert self.tensor.shape[idx] == dim.length, \
                 f"Tensor axis {idx} has length {self.tensor.shape[idx]}, but dim has length {dim.length}."
-        strides = self.tensor.stride()
-        if 0 in strides:
-            self.tensor = self.tensor[tuple(0 if stride == 0 else slice(None) for stride in strides)]
-            self.dims = [dim for dim, stride in zip(self.dims, strides) if stride != 0]
-        assert all(self.tensor.stride(i) > 0 for i in range(self.tensor.ndim)), "Dense tensors must be contiguous in memory."
+        drops = [self.tensor.shape[i] == 1 or self.tensor.stride(i) == 0 and self.tensor.shape[i] > 0 for i in range(self.tensor.ndim)]
+        if True in drops:
+            self.tensor = self.tensor[tuple(slice(None) if not drop else 0 for drop in drops)]
+            self.dims = [dim for dim, drop in zip(self.dims, drops) if not drop]
+
         # TODO: sort the dims and permute the tensor accordingly, so that the dims are always in sorted order.
         sorted_dims = list(sorted(self.dims))
         if self.dims != sorted_dims:
             perm = [self.dims.index(dim) for dim in sorted_dims]
             self.tensor = self.tensor.permute(perm)
             self.dims = sorted_dims
+        assert self.tensor.dim() == len(self.dims)
 
     @staticmethod
     def new_from(tensor: Union[torch.Tensor, "Dense", int, float]) -> "Dense":
@@ -68,69 +71,70 @@ class Dense:
         index: Indices,
         target_dim: Dim,
     ) -> "Dense":
-        if dim not in self.dims:
-            return self.clone()
-
+        assert dim in self.dims
         idx = self.dims.index(dim)
         shape = list(self.tensor.shape)
         shape[idx] = target_dim.length
+        assert len(shape) == len(self.dims)
         result = torch.zeros(shape, dtype=self.tensor.dtype, device=self.tensor.device)
         result.index_add_(idx, index, self.tensor)
         dims = list(self.dims)
         dims[idx] = target_dim
+        assert result.ndim == len(self.dims)
         return Dense(tensor=result, dims=dims)
 
-    def align_from(self, tensor: Union[torch.Tensor, "Dense", int, float]) -> "Dense":
-        if isinstance(tensor, (int, float)):
-            tensor = torch.tensor(tensor)
-        if isinstance(tensor, Dense):
-            tensor = tensor.tensor
-        assert tensor.ndim == len(self.dims)
-        return Dense(tensor=tensor, dims=self.dims)
+    @staticmethod
+    def from_number(tensor: Union[int, float]) -> "Dense":
+        return Dense(tensor=torch.tensor(tensor), dims=[])
     
-    def __add__(self, other: Union["Dense", int, float, torch.Tensor]) -> "Dense":
+    def __add__(self, other: Union["Dense", int, float]) -> "Dense":
         if not isinstance(other, Dense):
-            other = self.align_from(other)
+            other = Dense.from_number(other)
         dims = list(sorted(set(self.dims) | set(other.dims)))
         return Dense(tensor=self.expand(dims) + other.expand(dims), dims=dims)
     
-    def __mul__(self, other: Union["Dense", int, float, torch.Tensor]) -> "Dense":
+    def __mul__(self, other: Union["Dense", int, float]) -> "Dense":
+        if isinstance(other, int) and other == 1:
+            return self
         if not isinstance(other, Dense):
-            other = self.align_from(other)
+            other = Dense.from_number(other)
         dims = list(sorted(set(self.dims) | set(other.dims)))
         return Dense(tensor=self.expand(dims) * other.expand(dims), dims=dims)
     
-    def __sub__(self, other: Union["Dense", int, float, torch.Tensor]) -> "Dense":
+    def __sub__(self, other: Union["Dense", int, float]) -> "Dense":
         if not isinstance(other, Dense):
-            other = self.align_from(other)
+            other = Dense.from_number(other)
         dims = list(sorted(set(self.dims) | set(other.dims)))
         return Dense(tensor=self.expand(dims) - other.expand(dims), dims=dims)
     
-    def __rsub__(self, other: Union[int, float, torch.Tensor]) -> "Dense":
+    def __rsub__(self, other: Union["Dense", int, float]) -> "Dense":
         if not isinstance(other, Dense):
-            other = self.align_from(other)
+            other = Dense.from_number(other)
         dims = list(sorted(set(self.dims) | set(other.dims)))
         return Dense(tensor=other.expand(dims) - self.expand(dims), dims=dims)
     
-    def __truediv__(self, other: Union["Dense", int, float, torch.Tensor]) -> "Dense":
+    def __truediv__(self, other: Union["Dense", int, float]) -> "Dense":
         if not isinstance(other, Dense):
-            other = self.align_from(other)
+            other = Dense.from_number(other)
         dims = list(sorted(set(self.dims) | set(other.dims)))
         return Dense(tensor=self.expand(dims) / other.expand(dims), dims=dims)
-
     
     def __neg__(self) -> "Dense":
         return Dense(tensor=-self.tensor, dims=self.dims)
     
     def sum(self, dims: list[Dim]) -> "Dense":
-        tensor = self.tensor.sum(dim=[self.dims.index(dim) for dim in dims if dim in self.dims])
+        product_of_dims = reduce(operator.mul, [d.length for d in dims if d not in self.dims], 1)
+        dims_idx = [self.dims.index(dim) for dim in dims if dim in self.dims]
+        if len(dims_idx) > 0:
+            tensor = self.tensor.sum(dim=dims_idx, keepdim=False)
+        else:
+            tensor = self.tensor
         dims = [dim for dim in self.dims if dim not in dims]
-        return Dense(tensor=tensor, dims=dims)
+        return Dense(tensor=tensor * product_of_dims, dims=dims)
     
-    def allclose(self, other: "Dense", eps: float = 1e-5) -> bool:
+    def allclose(self, other: "Dense", eps: float = 1e-5, equal_nan=True) -> bool:
         assert set(self.dims) == set(other.dims)
-        other_aligned = other.align_from(self.tensor)
-        return torch.allclose(self.tensor, other_aligned.tensor, atol=eps)
+        return torch.allclose(self.tensor, other.tensor, atol=eps, equal_nan=equal_nan)
     
     def diagonal(self, from_dims: list[Dim], to_dim: Dim) -> "Dense":
         assert all(dim in self.dims for dim in from_dims), f"Cannot take diagonal on dims {from_dims} that are not all in {self.dims}."
@@ -186,6 +190,19 @@ class Dense:
     
     def apply(self, func: Callable[[torch.Tensor], torch.Tensor]) -> "Dense":
         return Dense(tensor=func(self.tensor), dims=self.dims)
+
+    def norm(self, dims: list[Dim], p: Union[int, float] = 1) -> "Dense":
+        product_of_dims = reduce(operator.mul, [d.length for d in dims if d not in self.dims], 1)
+        if p != 1:
+            product_of_dims = product_of_dims ** (1 / p)
+        dims_idx = [self.dims.index(dim) for dim in dims if dim in self.dims]
+        if len(dims_idx) > 0:
+            tensor = torch.linalg.vector_norm(self.tensor, ord=p, dim=tuple(dims_idx))
+        else:
+            tensor = self.tensor.abs()
+        remaining_dims = [dim for dim in self.dims if dim not in dims]
+        return Dense(tensor=tensor * product_of_dims, dims=remaining_dims)
+
     
     def tensordot(self, other: "Dense", dims: list[Dim]) -> "Dense":
         # assert all(dim in self.dims and dim in other.dims for dim in dims), f"Cannot tensordot on dims {dims} that are not all in both tensors."
@@ -201,7 +218,27 @@ class Dense:
         )
 
         return Dense(tensor=result_tensor, dims=result_dims)
+    
+    def __str__(self):
+        values = []
+        values.append(f"mean={self.tensor.mean().item():.2g}")
+        values.append(f"std={self.tensor.std().item():.2g}")
+        values.append(f"min={self.tensor.min().item():.2g}")
+        values.append(f"max={self.tensor.max().item():.2g}")
+        for i in range(len(self.dims) << 1):
+            tup = tuple(-1 if (i & (1 << j)) > 0 else 0 for j in range(len(self.dims)))
+            a = "".join("1" if (i & (1 << j)) > 0 else "0" for j in range(len(self.dims)))
+            values.append(f"{a}={self.tensor[tup].item():.2g}")
+        values = ", ".join(values)
 
+        return f"{self.dims}({values})"
+
+    def isfinite(self) -> bool:
+        return Dense(torch.isfinite(self.tensor), dims=self.dims)
+    
+    def all(self) -> bool:
+        return self.tensor.all().item()
+    
 @dataclass
 class TN:
     factors: list[Dense]
@@ -282,47 +319,37 @@ class TN:
         else:
             self.factors[0].tensor *= scalar
 
-    def _align_tn(self, other: Union["TN", torch.Tensor]) -> "TN":
-        if isinstance(other, torch.Tensor):
-            assert other.shape == self.shape, \
-                f"Cannot align tensor with shape {other.shape} to TN with shape {self.shape}."
-            return TN.from_dense(Dense(tensor=other, dims=list(self.dims)))
-        if self.dims == other.dims:
-            return other
-
-        assert self.shape == other.shape, \
-            f"Cannot align TNs with different shapes: {self.shape} vs {other.shape}."
-        dim_map = {dim: self.dims[idx] for idx, dim in enumerate(other.dims)}
-        return TN(factors=[
-            Dense(tensor=f.tensor, dims=[dim_map[dim] for dim in f.dims])
-            for f in other.factors
-        ])
-
-    def __mul__(self, other: Union["TN", float, int, torch.Tensor]) -> "TN":
+    def __mul__(self, other: Union["TN", Dense, float, int]) -> "TN":
+        if isinstance(other, Dense):
+            other = TN.from_dense(other)
         if isinstance(other, (float, int)):
             res = self.clone()
             res._scale(other)
             return res
         else:
-            if isinstance(other, torch.Tensor):
-                other = self._align_tn(other)
             return TN(factors=self.factors + other.factors)
     
-    def __rmul__(self, other: Union[float, int, torch.Tensor]) -> "TN":
+    def __rmul__(self, other: Union[float, int]) -> "TN":
         return self.__mul__(other)
     
-    def __add__(self, other: Union["TN", float, int, torch.Tensor]) -> "TN":
+    def __add__(self, other: Union["TN", Dense, float, int]) -> "TN":
+        if isinstance(other, Dense):
+            other = TN.from_dense(other)
         dense = self.to_dense() + (other.to_dense() if isinstance(other, TN) else other)
         return TN.from_dense(dense)
     
-    def __radd__(self, other: Union[float, int, torch.Tensor]) -> "TN":
+    def __radd__(self, other: Union[Dense, float, int]) -> "TN":
         return self.__add__(other)
     
-    def __sub__(self, other: Union["TN", float, int, torch.Tensor]) -> "TN":
+    def __sub__(self, other: Union["TN", Dense, float, int]) -> "TN":
+        if isinstance(other, Dense):
+            other = TN.from_dense(other)
         dense = self.to_dense() - (other.to_dense() if isinstance(other, TN) else other)
         return TN.from_dense(dense)
     
-    def __rsub__(self, other: Union[float, int, torch.Tensor]) -> "TN":
+    def __rsub__(self, other: Union["TN", Dense, float, int]) -> "TN":
+        if isinstance(other, Dense):
+            other = TN.from_dense(other)
         dense = (other.to_dense() if isinstance(other, TN) else other) - self.to_dense()
         return TN.from_dense(dense)
     
@@ -332,29 +359,32 @@ class TN:
     def reciprocal(self) -> "TN":
         return TN(factors=[Dense(tensor=torch.reciprocal(f.tensor), dims=f.dims) for f in self.factors])
     
-    def __truediv__(self, other: Union["TN", float, int, torch.Tensor]) -> "TN":
+    def __truediv__(self, other: Union["TN", Dense, float, int]) -> "TN":
+        if isinstance(other, Dense):
+            other = TN.from_dense(other)
         if isinstance(other, (float, int)):
             return self * (1 / other)
         else:
-            other = self._align_tn(other)
             assert self.shape == other.shape, f"Cannot divide TNs with different shapes: {self.shape} vs {other.shape}."
             return self * other.reciprocal()
         
-    def __rtruediv__(self, other: Union["TN", float, int, torch.Tensor]) -> "TN":
+    def __rtruediv__(self, other: Union["TN", Dense, float, int]) -> "TN":
+        if isinstance(other, Dense):
+            other = TN.from_dense(other)
         if isinstance(other, (float, int)):
             return (1 / other) * self.reciprocal()
         else:
-            other = self._align_tn(other)
             assert self.shape == other.shape, f"Cannot divide TNs with different shapes: {self.shape} vs {other.shape}."
             return other * self.reciprocal()
 
     def sum(self, dims: list[Dim]) -> "TN":
         # TODO: contract the related tensor using torch.einsum
         # remove the contracted dims from the factors, and update the shape accordingly.
+        unrelated_dims = set(dims) - set(self.dims)
+        unrelated_dims_product = reduce(operator.mul, [d.length for d in unrelated_dims], 1)
         reduce_dims = set(dims) & set(self.dims)
         if len(reduce_dims) == 0:
-            return self.clone()
-
+            return self * unrelated_dims_product
         remaining_factors: list[Dense] = []
         related = []
         for factor in self.factors:
@@ -372,6 +402,20 @@ class TN:
         tensor = torch.einsum(*args, [dim_names[dim] for dim in output_dims])
         remaining_factors.append(Dense(tensor=tensor, dims=output_dims))
 
+        return TN(factors=remaining_factors) * unrelated_dims_product
+    
+    def norm(self, dims: list[Dim], p: Union[int, float] = 1) -> "TN":
+        remaining_factors: list[Dense] = []
+        related: Dense = 1
+        for factor in self.factors:
+            if any(dim in dims for dim in factor.dims):
+                related = factor * related
+            else:
+                remaining_factors.append(factor.apply(torch.abs))
+        if isinstance(related, int) and related == 1:
+            related = Dense(tensor=torch.tensor(1.0), dims=[])
+
+        remaining_factors.append(related.norm(dims=dims, p=p))
         return TN(factors=remaining_factors)
         
 
@@ -380,6 +424,12 @@ class TN:
     
     def index_reduce_sum(self, dim: Dim, index: Indices, target_dim: Dim) -> "TN":
         # TODO: materialize all factors that have `dim` into Dense, apply the index_reduce_sum to it, and return a new TN with that new factor.
+        if dim not in self.dims:
+            ones = torch.ones([dim.length])
+            result = torch.zeros_like(ones)
+            result.index_add_(0, index, ones)
+            return self * Dense(tensor=result, dims=[target_dim])
+
         related = []
         remaining_factors = []
         for factor in self.factors:
@@ -387,9 +437,6 @@ class TN:
                 related.append(factor)
             else:
                 remaining_factors.append(factor.clone())
-
-        if len(related) == 0:
-            return self.clone()
 
         related_dims = list(sorted(set(dim for factor in related for dim in factor.dims)))
         dim_names = {dim: i for i, dim in enumerate(related_dims)}

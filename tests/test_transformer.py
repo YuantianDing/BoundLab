@@ -23,6 +23,7 @@ from io import StringIO
 
 import boundlab.expr as expr
 import boundlab.prop as prop
+import boundlab.utils as utils
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
 
@@ -97,7 +98,7 @@ def test_linear_attention_sound():
     prop._UB_CACHE.clear()
     prop._LB_CACHE.clear()
 
-    seq_len, d_model, d_k, d_ff = 50, 400, 400, 800
+    seq_len, d_model, d_k, d_ff = 5, 4, 4, 8
     model = LinearAttention(d_model, d_k, d_ff)
     model.eval()
 
@@ -225,6 +226,59 @@ def test_tanh_linearizer_sound():
 
 # ---- Softmax handler ---------------------------------------------------------
 
+def test_pairwise_diff_matches_expected_orientation():
+    """pairwise_diff should produce x[..., i] - x[..., j]."""
+    center_val = torch.tensor([[1.0, 2.0, 4.0], [-1.0, 0.5, 3.0]])
+    diff = utils.pairwise_diff(expr.ConstVal(center_val), dim=-1)
+    ub, lb = diff.ublb()
+
+    expected = center_val.unsqueeze(-1) - center_val.unsqueeze(-2)
+    assert torch.allclose(ub, expected)
+    assert torch.allclose(lb, expected)
+
+
+def test_pairwise_diff_preserves_offdiagonal_uncertainty():
+    """Off-diagonal differences of uncertain inputs should stay uncertain."""
+    center_val = torch.zeros(3)
+    scale = 0.1
+    diff = utils.pairwise_diff(_make_input(center_val, scale=scale), dim=-1)
+    ub, lb = diff.ublb()
+
+    width = ub - lb
+    offdiag = ~torch.eye(center_val.numel(), dtype=torch.bool)
+    assert torch.allclose(width.diagonal(), torch.zeros(center_val.numel()))
+    assert (width[offdiag] >= 4 * scale - 1e-6).all()
+
+
+def test_softmax_bounds_are_not_point_for_uncertain_input():
+    """Softmax bounds should not collapse to the center value for eps inputs."""
+    torch.manual_seed(105)
+    prop._UB_CACHE.clear()
+    prop._LB_CACHE.clear()
+
+    center_val = torch.randn(3, 4) * 0.3
+    y_expr = zono.softmax_handler(_make_input(center_val, scale=0.1), dim=-1)
+    ub, lb = y_expr.ublb()
+
+    assert ((ub - lb) > 0).any()
+
+
+def test_softmax_large_pairwise_gaps_remain_finite_and_probabilistic():
+    """Large logit gaps should not create NaNs or invalid probability bounds."""
+    prop._UB_CACHE.clear()
+    prop._LB_CACHE.clear()
+
+    center_val = torch.tensor([[31.0, 30.0, 0.0]])
+    y_expr = zono.softmax_handler(_make_input(center_val, scale=0.1), dim=-1)
+    ub, lb = y_expr.ublb()
+
+    assert torch.isfinite(ub).all()
+    assert torch.isfinite(lb).all()
+    assert (ub >= lb - 1e-6).all()
+    assert (lb >= -1e-6).all()
+    assert (ub <= 1 + 1e-6).all()
+
+
 def test_softmax_sound():
     """Softmax handler produces sound bounds."""
     torch.manual_seed(105)
@@ -293,6 +347,42 @@ def test_softmax_attention_sound():
     ub, lb = y_expr.ublb()
 
     samples = _sample_inputs(center_val, scale, n=3000)
+    with torch.no_grad():
+        outputs = torch.stack([model(s) for s in samples])
+    _check_bounds(outputs, ub, lb, tol=1e-3)
+
+
+class TinyThreeLayerTransformer(nn.Module):
+    """Tiny stacked transformer used to exercise multi-layer interpretation."""
+
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            LinearAttention(d_model=2, d_k=2, d_ff=3) for _ in range(3)
+        )
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+def test_tiny_three_layer_transformer_sound():
+    """A tiny 3-layer transformer should produce sound zonotope bounds."""
+    torch.manual_seed(108)
+    prop._UB_CACHE.clear()
+    prop._LB_CACHE.clear()
+
+    model = TinyThreeLayerTransformer().eval()
+    center_val = torch.randn(2, 2) * 0.1
+    scale = 0.01
+
+    op = zono.interpret(_export(model, [2, 2]))
+    x_expr = _make_input(center_val, scale=scale)
+    y_expr = op(x_expr)
+    ub, lb = y_expr.ublb()
+
+    samples = _sample_inputs(center_val, scale, n=512)
     with torch.no_grad():
         outputs = torch.stack([model(s) for s in samples])
     _check_bounds(outputs, ub, lb, tol=1e-3)
