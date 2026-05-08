@@ -47,19 +47,17 @@ def exp_linearizer(ub: torch.Tensor, lb: torch.Tensor) -> ZonoBounds:
     exp_lb = torch.exp(lb)
     exp_ub = torch.exp(ub)
     slope = (exp_ub - exp_lb) / (ub - lb)
-    slope = torch.where(torch.isfinite(slope), slope, torch.exp((ub + lb) / 2))
-    # assert torch.isfinite(slope).all(), f"Expected finite slope point for exp linearizer {slope.max().item()} {ub.max().item()} {lb.max().item()}"
+    good_slope = torch.isfinite(slope) & (slope >= 1e-5) & (slope <= 1e10)
+    slope = torch.where(good_slope, slope, torch.exp((ub + lb) / 2))
     
-    slope_point = torch.log(slope)
-    # assert torch.isfinite(slope_point).all(), f"Expected finite slope point for exp linearizer {slope_point.max().item()}"
+    slope_point = torch.where(good_slope, torch.log(slope), (ub + lb) / 2)
+
     U = torch.max(exp_ub - slope * ub, exp_lb - slope * lb)
+    U = torch.nan_to_num(U, nan=1e30, posinf=1e30)
     L = slope * (1 - slope_point)
-    # assert torch.isfinite(U).all() and torch.isfinite(L).all(), "Expected finite envelopes for exp linearizer"
 
     beta = (U - L) / 2
     mu = (U + L) / 2
-
-    # mu = torch.where(large_cases, torch.inf, mu)
 
     error_op = EinsumOp.from_hardmard(beta, len(ub.shape))
     return ZonoBounds(bias=mu, error_coeffs=error_op, input_weights=[slope])

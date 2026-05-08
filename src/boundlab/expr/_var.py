@@ -73,7 +73,7 @@ class LpEpsilon(Expr):
         return (result if direction == "<=" else -result, [])
         
 
-    def to_string(self) -> str:
+    def to_string(self, indent: int=0) -> str:
         if self.name:
             return f"<𝜀 {self.reason} {list(self.shape)}>#{self.name}"
         return f"<𝜀 {self.reason} {list(self.shape)}>#{self.id:X}"

@@ -124,15 +124,22 @@ class AffineSum(Expr):
             bias = weights.forward(self.constant)
         return (bias, [weights @ op for op in self.children_dict.values()])
 
-    def to_string(self, *children_str: str) -> str:
+    def to_string(self, *children_str: str, indent:int = 0) -> str:
         parts = [f"{op}{cs}" for op, cs in zip(self.children_dict.values(), children_str)]
+        indent_str = "\n" + (" " * indent) + "+ "
+        text = indent_str.join(parts)
         if self.constant is not None:
-            parts.append(f"<Const>")
-        return " + ".join(parts)
+            text += f" + <Const>"
+        return text
     
     def simplify_ops_(self):
         self.children_dict = {child: op for child, op in self.children_dict.items()}
         super().simplify_ops_()
+    
+    @property
+    def ops(self) -> list[LinearOp]:
+        """Return the list of (op, child) pairs in this AffineSum."""
+        return [op for child, op in self.children_dict.items()]
 
     def split_const(self) -> tuple[Expr | Literal[0], Expr | Literal[0]]:
         """Decompose this AffineSum into a constant part and a zero-constant AffineSum."""
@@ -175,7 +182,7 @@ class ConstVal(AffineSum):
         self.value = self.constant
         self.name = name
 
-    def to_string(self) -> str:
+    def to_string(self, *children_str: str, indent: int=0) -> str:
         if self.name is not None:
             return f"#const {self.name}"
         return f"#const <{self.id:X}>"

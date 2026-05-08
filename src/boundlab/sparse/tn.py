@@ -15,6 +15,7 @@ from boundlab.sparse.dim import Dim
 class Dense:
     tensor: torch.Tensor
     dims: list[Dim]
+    keep_1_dims: bool = False
 
     def __post_init__(self):
         assert self.tensor.ndim == len(self.dims), f"Tensor has {self.tensor.ndim} dimensions, but {len(self.dims)} dims were provided."
@@ -22,7 +23,7 @@ class Dense:
         for idx, dim in enumerate(self.dims):
             assert self.tensor.shape[idx] == dim.length, \
                 f"Tensor axis {idx} has length {self.tensor.shape[idx]}, but dim has length {dim.length}."
-        drops = [self.tensor.shape[i] == 1 or self.tensor.stride(i) == 0 and self.tensor.shape[i] > 0 for i in range(self.tensor.ndim)]
+        drops = [self.tensor.shape[i] == 1 and not self.keep_1_dims or self.tensor.stride(i) == 0 and self.tensor.shape[i] > 0 for i in range(self.tensor.ndim)]
         if True in drops:
             self.tensor = self.tensor[tuple(slice(None) if not drop else 0 for drop in drops)]
             self.dims = [dim for dim, drop in zip(self.dims, drops) if not drop]
@@ -43,6 +44,11 @@ class Dense:
             tensor = tensor.tensor
         dims = [Dim(length=s, ordering=i) for i, s in enumerate(tensor.shape)]
         return Dense(tensor=tensor, dims=dims)
+
+    def align_dims(self, other: "Dense") -> "Dense":
+        assert len(self.dims) == len(other.dims), f"Cannot align Dense with dims {self.dims} to Dense with dims {other.dims} because they have different sets of dims."
+        assert set(self.dims).isdisjoint(set(other.dims)), f"Cannot align Dense with dims {self.dims} to Dense with dims {other.dims} because they have different sets of dims."
+        return Dense(tensor=other.tensor, dims=list(self.dims))
 
     def expand(self, dims: list[Dim]) -> torch.Tensor:
         assert set(self.dims).issubset(set(dims)), f"Cannot expand factor with dims {self.dims} to dims {dims}."
@@ -123,7 +129,7 @@ class Dense:
         return Dense(tensor=-self.tensor, dims=self.dims)
     
     def sum(self, dims: list[Dim]) -> "Dense":
-        product_of_dims = reduce(operator.mul, [d.length for d in dims if d not in self.dims], 1)
+        product_of_dims = reduce(operator.mul, [d.length for d in dims if d not in self.dims], 1.0)
         dims_idx = [self.dims.index(dim) for dim in dims if dim in self.dims]
         if len(dims_idx) > 0:
             tensor = self.tensor.sum(dim=dims_idx, keepdim=False)
@@ -132,7 +138,9 @@ class Dense:
         dims = [dim for dim in self.dims if dim not in dims]
         return Dense(tensor=tensor * product_of_dims, dims=dims)
     
-    def allclose(self, other: "Dense", eps: float = 1e-5, equal_nan=True) -> bool:
+    def allclose(self, other: "Dense", eps: float = 1e-5, equal_nan=True, align_dims: bool = True) -> bool:
+        if align_dims and set(self.dims) != set(other.dims):
+            other = self.align_dims(other)
         assert set(self.dims) == set(other.dims)
         return torch.allclose(self.tensor, other.tensor, atol=eps, equal_nan=equal_nan)
     
@@ -192,7 +200,7 @@ class Dense:
         return Dense(tensor=func(self.tensor), dims=self.dims)
 
     def norm(self, dims: list[Dim], p: Union[int, float] = 1) -> "Dense":
-        product_of_dims = reduce(operator.mul, [d.length for d in dims if d not in self.dims], 1)
+        product_of_dims = reduce(operator.mul, [d.length for d in dims if d not in self.dims], 1.0)
         if p != 1:
             product_of_dims = product_of_dims ** (1 / p)
         dims_idx = [self.dims.index(dim) for dim in dims if dim in self.dims]
@@ -225,13 +233,13 @@ class Dense:
         values.append(f"std={self.tensor.std().item():.2g}")
         values.append(f"min={self.tensor.min().item():.2g}")
         values.append(f"max={self.tensor.max().item():.2g}")
-        for i in range(len(self.dims) << 1):
+        for i in range(1 << len(self.dims)):
             tup = tuple(-1 if (i & (1 << j)) > 0 else 0 for j in range(len(self.dims)))
             a = "".join("1" if (i & (1 << j)) > 0 else "0" for j in range(len(self.dims)))
             values.append(f"{a}={self.tensor[tup].item():.2g}")
         values = ", ".join(values)
 
-        return f"{self.dims}({values})"
+        return f"[{', '.join([f'{d}.{d.length}' for d in self.dims])}]({values})"
 
     def isfinite(self) -> bool:
         return Dense(torch.isfinite(self.tensor), dims=self.dims)
@@ -246,8 +254,14 @@ class TN:
     @property
     def shape(self) -> torch.Size:
         return torch.Size([dim.length for dim in self.dims])
+    
+    def _check_dtype(self):
+        assert all(f.tensor.dtype == torch.float32 for f in self.factors), "Currently only float32 TNs are supported."
 
     def __post_init__(self):
+        self.dtype = torch.float32 if len(self.factors) == 0 else self.factors[0].tensor.dtype
+        assert all(f.tensor.dtype == self.dtype for f in self.factors), "All factors in a TN must have the same dtype."
+        assert self.dtype == torch.float32, "Currently only float32 TNs are supported."
         # TODO: If a factor's dims are subset of another factor's dims, merge them. Using `expand` to expand the smaller factor to the larger factor's dims, and then multiply the tensors together. This will reduce the number of factors and make subsequent operations more efficient.`
         factors = list(self.factors)
         changed = True
@@ -272,6 +286,7 @@ class TN:
                     break
         self.factors = factors
         self.factors.sort(key=lambda f: f.dims)
+        
         self.dims = list(sorted(set(dim for f in self.factors for dim in f.dims)))
 
     @staticmethod
@@ -292,6 +307,9 @@ class TN:
         tensor = torch.einsum(*args, [dim_names[dim] for dim in self.dims])
         return Dense(tensor=tensor, dims=list(self.dims))
     
+    def _assert(self):
+        assert self.dims == list(sorted(set(dim for f in self.factors for dim in f.dims))), "TN dims should be the sorted unique dims from all factors."
+
     def dim(self) -> int:
         return len(self.shape)
     
@@ -317,7 +335,7 @@ class TN:
         if len(self.factors) == 0:
             self.factors.append(Dense(tensor=torch.tensor(scalar), dims=[]))
         else:
-            self.factors[0].tensor *= scalar
+            self.factors[0].tensor *= float(scalar)
 
     def __mul__(self, other: Union["TN", Dense, float, int]) -> "TN":
         if isinstance(other, Dense):
@@ -381,7 +399,7 @@ class TN:
         # TODO: contract the related tensor using torch.einsum
         # remove the contracted dims from the factors, and update the shape accordingly.
         unrelated_dims = set(dims) - set(self.dims)
-        unrelated_dims_product = reduce(operator.mul, [d.length for d in unrelated_dims], 1)
+        unrelated_dims_product = reduce(operator.mul, [d.length for d in unrelated_dims], 1.0)
         reduce_dims = set(dims) & set(self.dims)
         if len(reduce_dims) == 0:
             return self * unrelated_dims_product
@@ -403,6 +421,7 @@ class TN:
         remaining_factors.append(Dense(tensor=tensor, dims=output_dims))
 
         return TN(factors=remaining_factors) * unrelated_dims_product
+        
     
     def norm(self, dims: list[Dim], p: Union[int, float] = 1) -> "TN":
         remaining_factors: list[Dense] = []

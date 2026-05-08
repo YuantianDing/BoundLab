@@ -22,7 +22,9 @@ import pstats
 from io import StringIO
 
 import boundlab.expr as expr
+from boundlab.expr._core import Expr
 import boundlab.prop as prop
+from boundlab.sparse.coo import MultiCOOTensorSum
 import boundlab.utils as utils
 import boundlab.zono as zono
 from boundlab.interp.onnx import onnx_export
@@ -223,6 +225,15 @@ def test_tanh_linearizer_sound():
     outputs = torch.tanh(samples)
     _check_bounds(outputs, ub, lb)
 
+def test_pairwise_diff0():
+    """pairwise_diff should produce x[..., i] - x[..., j]."""
+    diff = utils.pairwise_diff0(expr.LpEpsilon((3,4,5)), dim=-1)
+    jac1 = diff.ops[0].jacobian()
+
+    diff = utils.pairwise_diff(expr.LpEpsilon((3,4,5)), dim=-1)
+    jac2 = diff.ops[0].jacobian()
+
+    assert torch.allclose(jac1, jac2)
 
 # ---- Softmax handler ---------------------------------------------------------
 
@@ -241,14 +252,33 @@ def test_pairwise_diff_preserves_offdiagonal_uncertainty():
     """Off-diagonal differences of uncertain inputs should stay uncertain."""
     center_val = torch.zeros(3)
     scale = 0.1
-    diff = utils.pairwise_diff(_make_input(center_val, scale=scale), dim=-1)
-    ub, lb = diff.ublb()
+    x = _make_input(center_val, scale=scale)
+    N = x.shape[-1]
+    l = x.unsqueeze(-2).expand_on(-2, N)
+    r = x.unsqueeze(-1).expand_on(-1, N)
+    op = (l - r).ops[0]
+    print(op.tensor.apply_multiplicative(lambda t: t.abs()).to_dense().tensor)
+    print(op.abs().tensor.to_dense().tensor)
+
+    ub, lb = (l - r).ublb()
 
     width = ub - lb
+    print(width)
     offdiag = ~torch.eye(center_val.numel(), dtype=torch.bool)
     assert torch.allclose(width.diagonal(), torch.zeros(center_val.numel()))
     assert (width[offdiag] >= 4 * scale - 1e-6).all()
 
+
+
+def test_pairwise_diff_matches_expected_orientation():
+    """pairwise_diff should produce x[..., i] - x[..., j]."""
+    center_val = torch.tensor([[1.0, 2.0, 4.0], [-1.0, 0.5, 3.0]])
+    diff = utils.pairwise_diff(expr.ConstVal(center_val), dim=-1)
+    ub, lb = diff.ublb()
+
+    expected = center_val.unsqueeze(-1) - center_val.unsqueeze(-2)
+    assert torch.allclose(ub, expected)
+    assert torch.allclose(lb, expected)
 
 def test_softmax_bounds_are_not_point_for_uncertain_input():
     """Softmax bounds should not collapse to the center value for eps inputs."""

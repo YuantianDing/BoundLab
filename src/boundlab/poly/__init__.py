@@ -122,7 +122,7 @@ class PolyBoundGate(Expr):
 
         return bias, [new_op]
 
-    def to_string(self, child_str: str) -> str:
+    def to_string(self, child_str: str, indent: int=0) -> str:
         return f"PolyBoundGate({child_str})"
 
 

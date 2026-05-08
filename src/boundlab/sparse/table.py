@@ -204,7 +204,7 @@ class TorchTable:
         if len(tables) == 1:
             return tables[0]
 
-        print("Merge Pattern: ", ", ".join(f"{t.length} " + " ".join(f"{'' if v is None else '!'}{k}.{k.length}"for k, v in t.items()) for t in tables))
+        # print("Merge Pattern: ", ", ".join(f"{t.length} " + " ".join(f"{'' if v is None else '!'}{k}.{k.length}"for k, v in t.items()) for t in tables))
         
 
         # Slow path — remap columns to dense indices and call table_join_sorted.

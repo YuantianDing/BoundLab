@@ -95,7 +95,7 @@ class Expr:
         """
         raise NotImplementedError(f"The :code:`backward` method is not implemented for {self.__class__.__name__}.")
 
-    def to_string(self, *children_str: str) -> str:
+    def to_string(self, *children_str: str, indent: int=0) -> str:
         """Return string representation with child strings substituted."""
         return f"{self.__class__.__name__}({', '.join(children_str)})"
 
@@ -576,16 +576,16 @@ def expr_pretty_print(expr: Expr, indent: int = 0) -> str:
 
     expr_to_str = {}
 
-    def get_expr_str(e: Expr) -> str:
+    def get_expr_str(e: Expr, indent: int=0) -> str:
         if e in expr_to_str:
             return expr_to_str[e]
         children_strs = []
         for child in e.children:
             if can_fuse(child):
-                children_strs.append(get_expr_str(child))
+                children_strs.append(get_expr_str(child, indent=indent))
             else:
                 children_strs.append(f'%{visited.index(child)}')
-        result = e.to_string(*children_strs)
+        result = e.to_string(*children_strs, indent=indent)
         expr_to_str[e] = result
         return result
 
@@ -593,6 +593,6 @@ def expr_pretty_print(expr: Expr, indent: int = 0) -> str:
     for i, e in enumerate(visited):
         if can_fuse(e):
             continue
-        get_expr_str(e)
+        get_expr_str(e, indent=indent + 4)
         output.append((" " * indent) + f"%{i} = {expr_to_str[e]}")
     return "\n".join(output)

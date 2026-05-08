@@ -15,6 +15,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import onnx_ir
+import onnxruntime
 import torch
 import torch.nn as nn
 
@@ -149,12 +150,14 @@ def boundlab_bounds(exported: onnx_ir.Model, center: torch.Tensor, perturbed_idx
         raise RuntimeError(f"Unsupported ONNX ops for zono.interpret: {unsupported}")
 
     op = zono.interpret(exported, verbose=True)
-    noise = expr.LpEpsilon(list(center.shape), p="inf")
     mask = torch.zeros_like(center)
     mask[perturbed_idx] = 1.0
+    noise = expr.LpEpsilon(list(center.shape), p="inf")
     x = center + eps * (noise * mask)
     y = op(x)
     ub, lb = y.ublb()
+        
+    # ub, lb = Mod()(center)
     return ub, lb, op_types
 
 
@@ -166,7 +169,7 @@ def deept_bounds(model: SstSmallNoLayerNorm, center: torch.Tensor, perturbed_idx
         q = z.dense(model.query[i]).add_attention_heads_dim(model.num_heads)
         k = z.dense(model.key[i]).add_attention_heads_dim(model.num_heads)
         scores = q.dot_product(k).multiply(1.0 / math.sqrt(model.hidden))
-        probs = scores.softmax(no_constraints=True).add_equality_constraint_on_softmax()
+        probs = scores.softmax(no_constraints=True)
 
         v = z.dense(model.value[i]).add_attention_heads_dim(model.num_heads)
         context = probs.dot_product(v.t()).remove_attention_heads_dim()
@@ -202,6 +205,14 @@ def _profile(label: str, output_path: Path, fn):
     return result, profiler.last_session.duration
 
 
+def _run_onnxruntime(ir: onnx_ir.Model, center: torch.Tensor, output_path: Path) -> torch.Tensor:
+    onnx_ir.save(ir, output_path)
+    session = onnxruntime.InferenceSession(str(output_path), providers=["CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
+    outputs = session.run(None, {input_name: center.detach().cpu().numpy()})
+    return torch.from_numpy(outputs[0])
+
+
 def main() -> None:
     state = torch.load(CKPT_PATH, map_location="cpu")
     vocab = _load_vocab(VOCAB_PATH)
@@ -211,6 +222,7 @@ def main() -> None:
     center, perturbed_idx = build_input_from_embeddings(state, vocab, tokens)
     eps = 0.01
     ir = onnx_export(model, (center,))
+    # ort_out = _run_onnxruntime(ir, center, HERE / "onnxruntime_export.onnx")
 
     (bl_ub, bl_lb, op_types), bl_time = _profile(
         "BoundLab",
@@ -230,6 +242,7 @@ def main() -> None:
     print(f"Sentence tokens: {tokens}")
     print(f"Perturbed token index: {perturbed_idx} ({tokens[perturbed_idx]})")
     print(f"Epsilon (L_inf): {eps}")
+    # print(f"ONNXRuntime output shape: {tuple(ort_out.shape)}")
     print(f"ONNX ops ({len(op_types)}): {', '.join(op_types)}")
     print()
     print(f"BoundLab width: {max_bl_width:.6f}")

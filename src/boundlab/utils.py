@@ -231,6 +231,27 @@ def pairwise_diff(x: Expr, dim: int = -1) -> Expr:
         dim += len(x.shape)
     N = x.shape[dim]
     from boundlab.linearop import EinsumOp
+    if dim < 0:
+        dim += len(x.shape)
+    N = x.shape[dim]
+    l = x.unsqueeze(dim).expand_on(dim, N)
+    r = x.unsqueeze(dim+1).expand_on(dim + 1, N)
+    return r - l
+
+
+
+def pairwise_diff0(x: Expr, dim: int = -1) -> Expr:
+    """Build ``d[..., i, j, ...] = x[..., i, ...] - x[..., j, ...]`` as a
+    single :class:`EinsumOp` applied to *x*.
+
+    Using one LinearOp (rather than two broadcasted terms combined via
+    subtraction) avoids the ``SumOp`` merging two structurally similar
+    :class:`ExpandOp` s that would otherwise cancel the noise contribution.
+    """
+    if dim < 0:
+        dim += len(x.shape)
+    N = x.shape[dim]
+    from boundlab.linearop import EinsumOp
 
     output_shape = torch.Size([*x.shape[: dim + 1], N, *x.shape[dim + 1 :]])
     output_axes = list(range(len(output_shape)))
@@ -248,6 +269,7 @@ def pairwise_diff(x: Expr, dim: int = -1) -> Expr:
     pair_shape[input_axis_for_dim] = N
     coeff = pair_coeff.reshape(pair_shape).expand(*output_shape, N).contiguous()
     return EinsumOp(coeff, input_dims=input_axes, output_dims=output_axes)(x)
+
 
 def remove_diagonal(tensor: Union[torch.Tensor, Expr], dim1: int=0, dim2: int=1) -> Union[torch.Tensor, Expr]:
     """Remove the diagonal along the specified dims, returning a tensor with one fewer dimension."""

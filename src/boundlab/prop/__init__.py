@@ -20,14 +20,13 @@ import typing
 
 import torch
 
-import boundlab.expr
 from boundlab.linearop import ScalarOp
 from boundlab.linearop import ZeroOp
-
 __all__ = [
     "ub",
     "lb",
     "ublb",
+    "eqprop",
     "center",
     "bound_width",
     "max_bound_width",
@@ -310,6 +309,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     """
     e.simplify_ops_()
     from boundlab.linearop import EinsumOp
+    from boundlab.expr import ExprFlags
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 
     if e.id in _UB_CACHE and e.id in _LB_CACHE:
@@ -387,7 +387,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
 
         if child_weights is None:
             if (not is_split
-                    and current.flags & boundlab.expr.ExprFlags.SYMMETRIC_TO_0 != 0
+                    and current.flags & ExprFlags.SYMMETRIC_TO_0 != 0
                     and len(current.children) == 0):
                 # Leaf symmetric node: compute one-sided bound and reuse via ±
                 result = current.backward(weight, direction="<=")
@@ -563,3 +563,6 @@ def bound_width_reasons_breakdown(e: "Expr") -> dict[str, torch.Tensor]:
                                  current.children, child_weights)
 
     return breakdown
+
+
+from .eqprop import eqprop

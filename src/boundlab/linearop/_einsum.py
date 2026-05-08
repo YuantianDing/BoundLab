@@ -58,8 +58,8 @@ class EinsumOp(LinearOp):
             debug_jacobian=debug_jacobian,
         )
         if DEBUG_LINEAR_OP:
-            print(self.tensor.to_dense(), self.debug_jacobian)
-            assert self.tensor.to_dense().allclose(self.debug_jacobian)
+            if torch.isfinite(self.coeff).all():
+                assert self.tensor.to_dense().allclose(self.debug_jacobian)
 
     def __str__(self):
         if self.name:

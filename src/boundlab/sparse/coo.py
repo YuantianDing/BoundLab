@@ -36,8 +36,14 @@ class COOSparsify:
         self.output_dims = list(torch_table.columns)
         self.torch_table = torch_table
         assert self.input_dim.length == self.torch_table.length
+        
         if is_unique:
             assert self.torch_table.is_unique
+        else:
+            sorted_table, _ = self.torch_table.sort_dedup()
+            assert sorted_table.length == self.torch_table.length
+            self.torch_table.is_unique = True
+
         assert all(v is None or v.shape[0] != 1 for k, v in torch_table.items())
         self.symbolic_supersets = list(symbolic_supersets or [])
         self.identifier = identifier
@@ -77,11 +83,18 @@ class COOSparsify:
         # if the input_dim is present, apply the sparsification 
         #    initialize a new Dense with the output_dims and without intput_dim
         #    then `new_tensor[...torch_table...] = original_tensor`
-        if isinstance(x, TN):
-            return TN(factors=[self.forward(factor) for factor in x.factors])
-        if len(self.output_dims) == 1 and self.output_dims[0] == self.input_dim:
-            return x
         if self.input_dim not in x.dims:
+            dense: Dense = self.forward(Dense(
+                tensor=torch.ones(self.input_dim.length),
+                dims=[self.input_dim],
+                keep_1_dims=True
+            ))
+            return x * dense
+        if isinstance(x, TN):
+            result = TN(factors=[self.forward(factor) if self.input_dim in factor.dims else factor for factor in x.factors])
+            # assert self.input_dim not in result.dims, "After forward, the input_dim of the op should not be in the output dims of the tensor."
+            return result
+        if len(self.output_dims) == 1 and self.output_dims[0] == self.input_dim:
             return x
         if self.is_md_eye:
             return x.diagonal_embed(self.input_dim, self.output_dims)
@@ -103,6 +116,7 @@ class COOSparsify:
         return Dense(tensor=result, dims=other_dims + self.output_dims)
 
     def backward(self, y: Union[Dense, TN]) -> Union[Dense, TN]:
+        assert self.torch_table.is_unique, "backward() requires the torch_table to be unique."
         # TODO: for TN, deal with each Dense factor separately.
         # for Dense, if none of output_dims are present, do not change anything;
         # if any output_dim is present, 
@@ -175,10 +189,7 @@ class COOSparsify:
         # assert len(set(op.input_dim for op in args)) == len(args), "COOSparsify.merge assumes input_dims are different."
         tables = []
         for op in args:
-            table = op.torch_table
-            if not (table.is_sorted and table.is_unique):
-                table, _ = table.sort_dedup()
-            tables.append(table)
+            tables.append(op.torch_table)
         merged_table = TorchTable.merge(tables)
 
         output_dims = list(merged_table.columns)
@@ -456,16 +467,7 @@ class MultiCOOTensor:
         return self.tn.real_numel()
 
     def to_dense(self) -> Dense:
-        tn = self.tn.clone()
-        for op in self.sparsify.ops:
-            if op.input_dim not in tn.dims:
-                tn.factors.append(
-                    Dense(
-                        tensor=torch.ones(op.input_dim.length),
-                        dims=[op.input_dim],
-                    )
-                )
-        return self.sparsify.forward(tn).to_dense()
+        return self.sparsify.forward(self.tn).to_dense()
     
     @property
     def inner_dims(self) -> list[Dim]:
@@ -478,6 +480,7 @@ class MultiCOOTensor:
     def expand_to(self, op: MultiCOOSparsify) -> "MultiCOOTensor":
         assert self.sparsify.is_symbolic_subset(op), "Can only expand to a MultiCOOSparsify that is a symbolic superset of the current sparsify."
         tn = self.sparsify.inverse_supersets(op).forward(self.tn)
+        # print("Expanding from ", self, " to ", tn, op, repr(tn.factors))
         return MultiCOOTensor(tn=tn, sparsify=op)
 
     def shrink_to(self, op: MultiCOOSparsify) -> "MultiCOOTensor":
@@ -486,7 +489,7 @@ class MultiCOOTensor:
         return MultiCOOTensor(tn=tn, sparsify=op)
 
     def __add__(self, other: "MultiCOOTensor") -> Optional["MultiCOOTensor"]:
-        assert self.dims == other.dims
+        assert self.dims == other.dims, f"Can only add MultiCOOTensors with the same output dims. Got {self.dims} and {other.dims}."
         subset = self.sparsify.is_symbolic_subset(other.sparsify, suppress_error=True)
         superset = other.sparsify.is_symbolic_subset(self.sparsify, suppress_error=True)
         if subset and superset:
@@ -571,9 +574,9 @@ class MultiCOOTensor:
             if index is not None:
                 tn = tn.index_reduce_sum(op.input_dim, index, new_op.input_dim)
             new_ops.append(new_op)
-
+        tn = tn.sum(tn_sum_dims)
         result = MultiCOOTensor(
-            tn=tn.sum(tn_sum_dims),
+            tn=tn,
             sparsify=MultiCOOSparsify(ops=new_ops),
         )
 
@@ -656,6 +659,10 @@ class MultiCOOTensor:
     def add_intersection_to(self, other: "MultiCOOTensor", neg: bool = False) -> "MultiCOOTensor":
         op = self.sparsify.merge(other.sparsify)
         tmp = self.shrink_to(op)
+        # print("add", tmp.tn.factors[0].tensor, tmp.to_dense().tensor)
+        # print("add", tmp.expand_to(other.sparsify).tn.factors[0].tensor, tmp.expand_to(other.sparsify).to_dense().tensor)
+        # print("add", other.to_dense().tensor)
+
         if neg:
             tmp = -tmp
         return MultiCOOTensor(
@@ -664,6 +671,8 @@ class MultiCOOTensor:
         )
     
     def replace_dims(self, dim_mapping: dict[Dim, Dim]) -> "MultiCOOTensor":
+        if len(self.tn.factors) > 0:
+            assert self.tn.factors[0].tensor.dtype == torch.float32
         return MultiCOOTensor(
             tn=self.tn.replace_dims(dim_mapping),
             sparsify=self.sparsify.replace_dims(dim_mapping),
@@ -730,11 +739,16 @@ class MultiCOOTensorSum:
         for i, t1 in enumerate(old_terms):
             new_t = t1
             for t2 in old_terms[:i]:
+                # print("intersection of ", new_t.to_dense().tensor, " and ", t2.to_dense().tensor)
                 new_t = t2.add_intersection_to(new_t)
+                # print("result is ", new_t.to_dense().tensor)
             assert new_t is not None
             new_t = new_t.apply_multiplicative(fn)
+            # print("after applying multiplicative fn, ", new_t.to_dense().tensor)
             for t in new_terms:
+                # print("intersection of ", new_t.to_dense().tensor, " and ", t.to_dense().tensor)
                 new_t = t.add_intersection_to(new_t, neg=True)
+                # print("result is ", new_t.to_dense().tensor)
                 assert new_t is not None
             new_terms.append(new_t)
         return MultiCOOTensorSum(new_terms)

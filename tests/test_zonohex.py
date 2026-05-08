@@ -21,6 +21,7 @@ import pytest
 from torch import nn
 
 import boundlab.expr as expr
+import boundlab.prop as prop
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zonohex import interpret as hex_interpret, ZonoHexGate, expr3_to_expr2
 from boundlab.interp.onnx import onnx_export
@@ -62,6 +63,19 @@ def _check_pair_sound(out: DiffExpr2, model, s1, s2, tol: float = 1e-4):
     lb_d = lb_x - ub_y
     assert (d <= ub_d + tol).all(), (d - ub_d).max().item()
     assert (d >= lb_d - tol).all(), (lb_d - d).max().item()
+
+
+def _assert_eqprop_matches_ublb(e: expr.Expr, atol: float = 1e-6):
+    prop._UB_CACHE.clear()
+    prop._LB_CACHE.clear()
+    ub, lb = e.ublb()
+
+    prop._UB_CACHE.clear()
+    prop._LB_CACHE.clear()
+    ub_eq, lb_eq = prop.eqprop(e).ublb()
+
+    assert torch.allclose(ub_eq, ub, atol=atol, rtol=0)
+    assert torch.allclose(lb_eq, lb, atol=atol, rtol=0)
 
 
 # =====================================================================
@@ -167,6 +181,19 @@ def test_equal_inputs_tight_diff():
     # Diff interval [lb_x - ub_y, ub_x - lb_y] must contain 0.
     assert (lb_x - ub_y <= 1e-5).all()
     assert (ub_x - lb_y >= -1e-5).all()
+
+
+def test_eqprop_matches_ublb_on_zonohex_outputs():
+    torch.manual_seed(5)
+    model = nn.Sequential(nn.Linear(4, 6), nn.ReLU(), nn.Linear(6, 3))
+    op = hex_interpret(onnx_export(model, [4]))
+
+    c1, c2 = torch.randn(4), torch.randn(4)
+    out = op(_make_triple(c1, c2, scale=0.3))
+
+    _assert_eqprop_matches_ublb(out.x)
+    _assert_eqprop_matches_ublb(out.y)
+    _assert_eqprop_matches_ublb(out.x - out.y)
 
 
 # =====================================================================

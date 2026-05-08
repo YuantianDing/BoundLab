@@ -105,5 +105,5 @@ class Stack(Expr):
             child_ops.append(weights @ embed_op)
         return (0, child_ops)
 
-    def to_string(self, *children_str: str) -> str:
+    def to_string(self, *children_str: str, indent:int = 0) -> str:
         return f"stack([{', '.join(children_str)}], dim={self.dim})"
