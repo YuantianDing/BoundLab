@@ -46,6 +46,24 @@ def _make_input(center_val: torch.Tensor, scale: float = 1.0):
     return center + eps * scale
 
 
+def test_bilinear_matmul_accepts_asymmetric_residuals():
+    torch.manual_seed(0)
+    a_center = torch.tensor([[-0.2, 0.1, 0.4], [0.3, -0.1, 0.2]])
+    b_center = torch.randn(3, 2)
+    a_in = _make_input(a_center, scale=0.35)
+    b_expr = _make_input(b_center, scale=0.1)
+    a_expr = zono.interpret["relu"](a_in)
+
+    out = zono.bilinear_matmul(a_expr, b_expr)
+    ub, lb = out.ublb()
+
+    noise_a = (torch.rand(500, *a_center.shape) * 2 - 1) * 0.35
+    noise_b = (torch.rand(500, *b_center.shape) * 2 - 1) * 0.1
+    concrete = torch.relu(a_center + noise_a) @ (b_center + noise_b)
+    assert (concrete <= ub.unsqueeze(0) + 1e-5).all()
+    assert (concrete >= lb.unsqueeze(0) - 1e-5).all()
+
+
 def _sample_inputs(center: torch.Tensor, scale: float, n: int = 2000) -> torch.Tensor:
     """Uniform samples from the L∞ ball of radius `scale` around `center`."""
     noise = torch.rand(n, *center.shape) * 2 - 1  # ∈ (-1, 1)

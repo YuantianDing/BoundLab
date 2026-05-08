@@ -44,7 +44,6 @@ class COOSparsify:
             assert sorted_table.length == self.torch_table.length
             self.torch_table.is_unique = True
 
-        assert all(v is None or v.shape[0] != 1 for k, v in torch_table.items())
         self.symbolic_supersets = list(symbolic_supersets or [])
         self.identifier = identifier
         self.__post_init__()

@@ -203,7 +203,6 @@ class LinearOp:
         # warnings.warn(f"LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.", stacklevel=2)
         dense = self.tensor.to_dense()
         if DEBUG_LINEAR_OP and self.debug_jacobian is not None:
-            print("Check")
             assert self.debug_jacobian.allclose(dense)
         return dense.expand(self.output_dims + self.input_dims)
     

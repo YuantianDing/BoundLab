@@ -62,6 +62,11 @@ def _table_join_sorted_from_tensors(
     else:
         device = tensors[0].device
         dtype = tensors[0].dtype
+        if all(len(column) == 0 for column in columns):
+            length = 1
+            for tensor in tensors:
+                length *= int(tensor.shape[0])
+            return torch.zeros((length, 0), dtype=dtype, device=device)
         df = [
             pd.DataFrame(
                 {f"t{columns[i][j]}": tensors[i][:, j].cpu().numpy() for j in range(tensors[i].shape[1])}
@@ -76,8 +81,10 @@ def _table_join_sorted_from_tensors(
                 result = result.merge(df[i], on=shared, how="inner")
             else:
                 result = result.merge(df[i], how="cross")
-        N = max(max(column) for column in columns) + 1
+        N = max((max(column) for column in columns if column), default=-1) + 1
         cols = [f"t{i}" for i in range(N)]
+        if N == 0:
+            return torch.zeros((len(result), 0), dtype=dtype, device=device)
         if result.empty:
             return torch.zeros((0, N), dtype=dtype, device=device)
         # ``.values`` may produce a numpy array with negative strides (e.g.

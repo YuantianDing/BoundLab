@@ -126,6 +126,13 @@ class TestNewGetSliceOp:
         y = op.forward(x)
         assert torch.allclose(y, x[2:5, 1:6])
 
+    def test_singleton_slice(self):
+        op = GetSliceOp(torch.Size([10, 8]), [[slice(2, 3)], [slice(1, 6)]])
+        assert op.output_shape == torch.Size([1, 5])
+        x = torch.randn(10, 8)
+        y = op.forward(x)
+        assert torch.allclose(y, x[2:3, 1:6])
+
     def test_multi_slice(self):
         op = GetSliceOp(torch.Size([10]), [[slice(0, 2), slice(5, 8)]])
         assert op.output_shape == torch.Size([5])

@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from boundlab.sparse.dim import Dim
+from boundlab.sparse.ops import table_join_sorted
 from boundlab.sparse.table import TorchTable
 
 
@@ -227,6 +228,48 @@ class TestMerge:
         out = a & b
         assert out.length == 3
         assert set(out.columns) == set(cols([0, 1]))
+
+    def test_merge_zero_column_tables(self):
+        a = TorchTable([], [], length=1)
+        b = TorchTable([], [], length=1)
+        out = TorchTable.merge([a, b])
+        assert out.columns == []
+        assert out.length == 1
+        assert out.materialize().shape == (1, 0)
+
+    def test_combine_preserves_columns(self):
+        a = TorchTable(cols([0]), [None], length=3)
+        b = TorchTable(cols([1]), [idx([7, 8, 9])])
+        out = TorchTable.combine([a, b])
+        assert out.length == 3
+        assert out.columns == cols([0, 1])
+        assert torch.equal(out.materialize(), torch.tensor([[0, 7], [1, 8], [2, 9]]))
+
+    def test_combine_preserves_uniqueness_when_one_input_is_unique(self):
+        a = TorchTable(cols([0]), [idx([1, 2, 3])])
+        a.is_unique = True
+        b = TorchTable(cols([1]), [idx([9, 9, 9])])
+        out = TorchTable.combine([b, a])
+        assert out.is_unique
+
+    def test_reduce_skips_conflicting_related_tables(self):
+        a = TorchTable(cols([0, 1]), [None, idx([1, 2, 3])], length=3)
+        b = TorchTable(cols([0, 1]), [None, idx([1, 4, 5])], length=3)
+        a.is_unique = True
+        b.is_unique = True
+        out = TorchTable.reduce_table_merge_inner(col(0), [a, b], [(0, 0), (1, 0)])
+        assert out is None
+
+
+class TestTableJoinSorted:
+    def test_zero_output_columns(self):
+        out = table_join_sorted(
+            torch.zeros((1, 0), dtype=torch.int64),
+            [],
+            torch.zeros((1, 0), dtype=torch.int64),
+            [],
+        )
+        assert out.shape == (1, 0)
 
 
 # --- index ----------------------------------------------------------------

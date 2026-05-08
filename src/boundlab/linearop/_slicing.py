@@ -27,6 +27,13 @@ def _output_size(dim_slices: list[slice]) -> int:
     return sum(s.stop - s.start for s in dim_slices)
 
 
+def _slice_indices(all_slices: list[list[slice]]) -> list[torch.Tensor]:
+    return [
+        torch.cat([torch.arange(s.start, s.stop, dtype=torch.long) for s in slices], dim=0)
+        for slices in all_slices
+    ]
+
+
 def _is_full(dim_slices: list[slice], dim_size: int) -> bool:
     return len(dim_slices) == 1 and dim_slices[0].start == 0 and dim_slices[0].stop == dim_size
 
@@ -96,6 +103,7 @@ class GetSliceOp(LinearOp):
         input_shape = torch.Size(input_shape)
         assert len(input_shape) == len(slices)
         self.slices = _normalize_slices(slices, input_shape)
+        self._indices = _slice_indices(self.slices)
         output_shape = torch.Size(_output_size(s) for s in self.slices)
 
         tensor, input_dims, output_dims = _slice_tensor(input_shape, output_shape, self.slices, set_mode=False)
@@ -132,6 +140,7 @@ class SetSliceOp(LinearOp):
         output_shape = torch.Size(output_shape)
         assert len(output_shape) == len(slices)
         self.slices = _normalize_slices(slices, output_shape)
+        self._indices = _slice_indices(self.slices)
         input_shape = torch.Size(_output_size(s) for s in self.slices)
         tensor, input_dims, output_dims = _slice_tensor(input_shape, output_shape, self.slices, set_mode=True)
         debug_jacobian = jacobian_from_function(input_shape, output_shape, lambda x: _set_slice_debug(x, output_shape, self._indices)) if DEBUG_LINEAR_OP else None

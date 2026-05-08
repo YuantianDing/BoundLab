@@ -149,15 +149,20 @@ def boundlab_bounds(exported: onnx_ir.Model, center: torch.Tensor, perturbed_idx
     if unsupported:
         raise RuntimeError(f"Unsupported ONNX ops for zono.interpret: {unsupported}")
 
-    op = zono.interpret(exported, verbose=True)
+    op = zono.interpret(exported)
     mask = torch.zeros_like(center)
     mask[perturbed_idx] = 1.0
-    noise = expr.LpEpsilon(list(center.shape), p="inf")
-    x = center + eps * (noise * mask)
-    y = op(x)
-    ub, lb = y.ublb()
+    class Mod(nn.Module):
+        def forward(self, center):
+            noise = expr.LpEpsilon(list(center.shape), p="inf")
+            x = center + noise * mask
+            y = op(x)
+            ub, lb = y.ublb()
+            return ub, lb
         
-    # ub, lb = Mod()(center)
+    onnx_exported = onnx_export(Mod(), (center.shape,))
+    onnx_ir.save(onnx_exported, HERE / "boundlab_export.onnx")
+    ub, lb = _run_onnxruntime(HERE / "boundlab_export.onnx", center, HERE / "boundlab_profile.html")
     return ub, lb, op_types
 
 
@@ -205,12 +210,19 @@ def _profile(label: str, output_path: Path, fn):
     return result, profiler.last_session.duration
 
 
-def _run_onnxruntime(ir: onnx_ir.Model, center: torch.Tensor, output_path: Path) -> torch.Tensor:
-    onnx_ir.save(ir, output_path)
-    session = onnxruntime.InferenceSession(str(output_path), providers=["CPUExecutionProvider"])
+def _run_onnxruntime(path: Path, center: torch.Tensor, profile_path: Path) -> torch.Tensor:
+    session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
+    profiler = Profiler()
+    profiler.start()
     outputs = session.run(None, {input_name: center.detach().cpu().numpy()})
-    return torch.from_numpy(outputs[0])
+    profiler.stop()
+    profile_path.write_text(
+        HTMLRenderer(show_all=False).render(profiler.last_session),
+        encoding="utf-8",
+    )
+    print(f"ONNXRuntime profile: {profile_path}")
+    return torch.from_numpy(outputs[0]), torch.from_numpy(outputs[1])
 
 
 def main() -> None:
@@ -224,18 +236,10 @@ def main() -> None:
     ir = onnx_export(model, (center,))
     # ort_out = _run_onnxruntime(ir, center, HERE / "onnxruntime_export.onnx")
 
-    (bl_ub, bl_lb, op_types), bl_time = _profile(
-        "BoundLab",
-        HERE / "pyinstrument_boundlab.html",
-        lambda: boundlab_bounds(ir, center, perturbed_idx, eps),
-    )
+    (bl_ub, bl_lb, op_types), bl_time = boundlab_bounds(ir, center, perturbed_idx, eps),
     max_bl_width = torch.max(bl_ub - bl_lb).item()
 
-    (dt_ub, dt_lb), dt_time = _profile(
-        "DeepT",
-        HERE / "pyinstrument_deept.html",
-        lambda: deept_bounds(model, center, perturbed_idx, eps),
-    )
+    (dt_ub, dt_lb), dt_time = deept_bounds(model, center, perturbed_idx, eps)
     max_dt_width = torch.max(dt_ub - dt_lb).item()
 
     print("Model: sst-bert-small-3 (3-layer, LayerNorm removed)")

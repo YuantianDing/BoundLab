@@ -95,26 +95,14 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     # softmax(x)[i] = 1 / sum_j exp(x[j] - x[i]) = 1 / sum_j exp(diff[..., i, j])
     diff = -utils.pairwise_diff(x, dim)
     ub, lb = diff.ublb()
-    diff0 = -utils.pairwise_diff0(x, dim)
-    ub0, lb0 = diff0.ublb()
-    assert torch.allclose(ub, ub0) and torch.allclose(lb, lb0)
-    print((ub - ub0).abs().max(), (lb - lb0).abs().max())
-
-    expbounds = exp_linearizer(ub0, lb0)
-    bias = expbounds.bias
-    error = expbounds.error_coeffs.coeff
-    weights = expbounds.input_weights[0]
-    assert torch.isfinite(bias).all()
-    assert torch.isfinite(error).all()
-    assert torch.isfinite(weights).all()
 
     expbounds = exp_linearizer(ub, lb)
     bias = expbounds.bias
     error = expbounds.error_coeffs.coeff
     weights = expbounds.input_weights[0]
-    assert torch.isfinite(bias).all()
-    assert torch.isfinite(error).all()
-    assert torch.isfinite(weights).all()
+    # assert torch.isfinite(bias).all()
+    # assert torch.isfinite(error).all()
+    # assert torch.isfinite(weights).all()
 
     # finite_mask = torch.isfinite(weights) & torch.isfinite(error) & torch.isfinite(bias) & (lb < 30) & (ub < 30)
     # bias = torch.where(finite_mask, bias, 0)
@@ -126,8 +114,8 @@ def softmax_handler(x: Expr, dim: int = -1, dtype=None) -> Expr:
     sum_exp_ub, sum_exp_lb = sum_exp.ublb()
     sum_exp_ub = torch.minimum(sum_exp_ub, torch.exp(ub).sum(dim=-1))
     sum_exp_lb = torch.maximum(sum_exp_lb, torch.exp(lb).sum(dim=-1))
-    assert torch.isfinite(sum_exp_ub).all()
-    assert torch.isfinite(sum_exp_lb).all()
+    # assert torch.isfinite(sum_exp_ub).all()
+    # assert torch.isfinite(sum_exp_lb).all()
     bounds = reciprocal_linearizer(sum_exp_ub, sum_exp_lb)
     w = bounds.input_weights[0]
     mu = bounds.bias

@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import Optional
 
 import torch
@@ -45,7 +46,9 @@ class TorchTable:
             "Must provide at least one column of data or specify length."
         self.is_sorted = is_sorted
         self.is_unique = is_unique
-        if all(dat is None for dat in self.data):
+        if (len(self.data) > 0 and all(dat is None for dat in self.data)) or (
+            len(self.data) == 0 and self.length <= 1
+        ):
             self.is_sorted = True
             self.is_unique = True
     
@@ -184,9 +187,79 @@ class TorchTable:
         new.is_sorted = True
         new.is_unique = True
         return new, inverse
+    
+    @staticmethod
+    def reduce_table_merge(tables: list["TorchTable"]) -> list["TorchTable"]:
+        """Reduce a list of tables by merging those that share the same values in the given columns."""
+        cols = defaultdict[Dim, list[tuple[int, int]]](list)
+        dims = []
+        for i, t1 in enumerate(tables):
+            for j, c in enumerate(t1.columns):
+                cols[c].append((i, j))
+                if t1.data[j] is None and c not in dims:
+                    dims.append(c)
+        for dim in dims:
+            a = TorchTable.reduce_table_merge_inner(dim, tables, cols[dim])
+            if a is not None:
+                return TorchTable.reduce_table_merge(a)
+        return tables
+
+
+            
+    @staticmethod
+    def reduce_table_merge_inner(dim: Dim, tables: list["TorchTable"], cols: list[tuple[int, int]]) -> list["TorchTable"]:
+        remaining = [t for i, t in enumerate(tables) if all(i != idx for idx, _ in cols)]
+        related = [tables[idx] for idx, j in cols if tables[idx].data[j] is None]
+        related_table = TorchTable.combine(related)
+        if related_table is None:
+            return None
+        main = [tables[idx] for idx, j in cols if tables[idx].data[j] is not None]
+        if len(related) == 1 and len(main) == 0:
+            return None
+        if len(main) == 0:
+            return remaining + [related_table]
+        
+        main_table = TorchTable.merge(main, no_reduce=True)
+
+        indices: Indices = main_table.column_data(dim)
+        related_table = related_table[indices]
+        combined = TorchTable.combine([related_table, main_table])
+        if combined is None:
+            return None
+        return [combined] + remaining
 
     @staticmethod
-    def merge(tables: list["TorchTable"]) -> "TorchTable":
+    def combine(tables: list["TorchTable"]) -> "TorchTable":
+        """Combine same-row tables, trimming arange-backed index columns to the shared prefix."""
+        assert len(tables) > 0, "combine() requires at least one table."
+        length = min(t.length for t in tables)
+        table = dict()
+        for t in tables:
+            for c, d in t.items():
+                data = d[:length] if d is not None else None
+                if c in table:
+                    existing = table[c]
+                    existing_mat = (
+                        torch.arange(length, dtype=torch.int64)
+                        if existing is None
+                        else existing.to(torch.int64)
+                    )
+                    data_mat = (
+                        torch.arange(length, dtype=torch.int64)
+                        if data is None
+                        else data.to(torch.int64)
+                    )
+                    if not torch.equal(existing_mat, data_mat):
+                        return None
+                    continue
+                table[c] = data
+        result = TorchTable(list(table.keys()), list(table.values()), length=length)
+        result.is_unique = any(t.is_unique for t in tables)
+        return result
+        
+
+    @staticmethod
+    def merge(tables: list["TorchTable"], no_reduce: bool = False) -> "TorchTable":
         """Inner-join a list of sorted+unique tables on their shared columns.
 
         Fast path: when every shared column is an index column in every input,
@@ -201,11 +274,11 @@ class TorchTable:
         assert all(isinstance(t, TorchTable) for t in tables)
         assert all(t.is_unique for t in tables), \
             "All tables must be sorted and unique before merging."
+        
+        if not no_reduce:
+            tables = TorchTable.reduce_table_merge(tables)
         if len(tables) == 1:
             return tables[0]
-
-        # print("Merge Pattern: ", ", ".join(f"{t.length} " + " ".join(f"{'' if v is None else '!'}{k}.{k.length}"for k, v in t.items()) for t in tables))
-        
 
         # Slow path — remap columns to dense indices and call table_join_sorted.
         all_col_names = sorted(set(k for t in tables for k, _ in t.items()))
@@ -291,5 +364,13 @@ class TorchTable:
         self.columns = [self.columns[i] for i in permutation]
         self.data = [self.data[i] for i in permutation]
         self.is_sorted = False
-
+    def __getitem__(self, idx: Indices) -> "TorchTable":
+        """Return a new table with the same columns but only the row at index ``idx``."""
+        new_data = []
+        for dat in self.data:
+            if dat is None:
+                new_data.append(idx)
+            else:
+                new_data.append(dat[idx])
+        return TorchTable(list(self.columns), new_data, length=idx.shape[0])
 __all__ = ["TorchTable", "Indices"]
