@@ -10,6 +10,7 @@ Dot Product / Matrix Multiply:
 
 import torch
 
+from boundlab import utils
 from boundlab.expr._core import Expr
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.zono.bilinear import (
@@ -48,12 +49,13 @@ def diff_bilinear_matmul(a: DiffExpr3, b: DiffExpr3) -> DiffExpr3:
     sub_diff = out_x - out_y
     bw_d = bound_width(out_diff)
     bw_s = bound_width(sub_diff)
-    n_reset = (bw_s < bw_d).sum().item()
-    n_total = bw_d.numel()
-    max_d = bw_d.max().item()
-    max_s = bw_s.max().item()
-    print(f"  [matmul reset] {n_reset}/{n_total} neurons reset, "
-          f"max bw_d={max_d:.3e}, max bw_s={max_s:.3e}")
+    if not utils.current_fake_mode():
+        n_reset = (bw_s < bw_d).sum().item()
+        n_total = bw_d.numel()
+        max_d = bw_d.max().item()
+        max_s = bw_s.max().item()
+        print(f"  [matmul reset] {n_reset}/{n_total} neurons reset, "
+              f"max bw_d={max_d:.3e}, max bw_s={max_s:.3e}")
     mask = (bw_s < bw_d).float()
     out_diff = mask * sub_diff + (1.0 - mask) * out_diff
 

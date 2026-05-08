@@ -20,11 +20,11 @@ def prod(shape: torch.Size) -> int:
 
 
 def make_input_dims(shape: torch.Size) -> list[Dim]:
-    return [Dim(int(size), 1000.0 + i, f"i{i}") for i, size in enumerate(shape)]
+    return [Dim(size, 1000.0 + i, f"i{i}") for i, size in enumerate(shape)]
 
 
 def make_output_dims(shape: torch.Size) -> list[Dim]:
-    return [Dim(int(size), float(i), f"o{i}") for i, size in enumerate(shape)]
+    return [Dim(size, float(i), f"o{i}") for i, size in enumerate(shape)]
 
 
 def unravel(flat: torch.Tensor, shape: torch.Size) -> torch.Tensor:

@@ -28,8 +28,8 @@ def _coords(shape: torch.Size) -> torch.Tensor:
 
 
 def _reshape_unit_axes(input_shape: torch.Size, output_shape: torch.Size) -> tuple[list[int], list[int]]:
-    squeezed_input_axes = [axis for axis, size in enumerate(input_shape) if size == 1]
-    unsqueezed_output_axes = [axis for axis, size in enumerate(output_shape) if size == 1]
+    squeezed_input_axes = [axis for axis, size in enumerate(input_shape) if isinstance(size, int) and size == 1]
+    unsqueezed_output_axes = [axis for axis, size in enumerate(output_shape) if isinstance(size, int) and size == 1]
     return squeezed_input_axes, unsqueezed_output_axes
 
 
@@ -39,10 +39,10 @@ def _groups(input_shape: torch.Size, output_shape: torch.Size):
         input_start, output_start = i, j
         input_numel = output_numel = 1
         if i < len(input_shape):
-            input_numel *= int(input_shape[i])
+            input_numel *= input_shape[i]
             i += 1
         if j < len(output_shape):
-            output_numel *= int(output_shape[j])
+            output_numel *= output_shape[j]
             j += 1
         while input_numel != output_numel:
             if (input_numel < output_numel and i < len(input_shape)) or j == len(output_shape):
@@ -118,6 +118,10 @@ def _reshape_zero_stride_axes(input_shape: torch.Size, output_shape: torch.Size)
 
 class ReshapeOp(LinearOp):
     def __init__(self, input_shape: torch.Size, output_shape: tuple[int, ...]):
+        input_shape = [s.item() if isinstance(s, torch.Tensor) else s for s in input_shape]
+        output_shape = [s.item() if isinstance(s, torch.Tensor) else s for s in output_shape]
+        assert all(isinstance(s, int) and s > 0 for s in input_shape), f"Input shape must be fully defined with positive integers, got {input_shape}"
+        assert all(isinstance(s, int) and s > 0 for s in output_shape), f"Output shape must be fully defined with positive integers, got {list(output_shape)}"
         input_shape = torch.Size(input_shape)
         if not isinstance(output_shape, torch.Size):
             output_shape = _meta_output_shape(lambda x: x.reshape(*output_shape), input_shape)

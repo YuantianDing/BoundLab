@@ -16,11 +16,15 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import tempfile
 import os
 import sys
 import time
 from pathlib import Path
 
+import onnx_ir
+import onnxruntime
+import pyinstrument
 import torch
 from torch import nn, Tensor
 
@@ -146,6 +150,18 @@ def _export_masked_onnx(vit, mask: Tensor, cache: dict[bytes, object]):
     return cache[key]
 
 
+def _ort_providers(prefer_cuda: bool) -> list[str]:
+    """Provider order for ONNX Runtime, preferring CUDA when available."""
+    import onnxruntime as ort
+
+    available = ort.get_available_providers()
+    providers = []
+    if prefer_cuda and "CUDAExecutionProvider" in available:
+        providers.append("CUDAExecutionProvider")
+    providers.append("CPUExecutionProvider")
+    return providers
+
+
 # ---------------------------------------------------------------------------
 # Zonotope certification methods
 # ---------------------------------------------------------------------------
@@ -176,14 +192,34 @@ def certify_zono3(gm1, gm2, center, eps):
     """Differential verification via diff_net (tightest)."""
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     merged = diff_net(gm1, gm2)
-    op = zono3.interpret(merged)
-    x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
-    out = op(x)
-    if isinstance(out, DiffExpr3):
-        d = out.diff
-    else:
-        d = out.x - out.y
-    return (*d.ublb(), _bound_width_reasons(d))
+    op = zono3.interpret(merged, verbose=['graph'])
+    class Mod(nn.Module):
+        def forward(self, center):
+            x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
+            out = op(x)
+            if isinstance(out, DiffExpr3):
+                d = out.diff
+            else:
+                d = out.x - out.y
+            return d.ublb()
+    profiler = pyinstrument.Profiler()
+    profiler.start()
+    pipeline = onnx_export(Mod(), (center.shape,), input_names=["center"], output_names=["ub", "lb"])
+    profiler.stop()
+    (_HERE / "zono3_export_profile.html").write_text(profiler.output_html())
+
+    with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
+        onnx_ir.save(pipeline, f.name)
+        session = onnxruntime.InferenceSession(
+            f.name,
+            providers=_ort_providers(TORCH_DEVICE.type == "cuda"),
+        )
+        ub_np, lb_np = session.run(["ub", "lb"], {"center": center.detach().cpu().numpy()})
+    return (
+        torch.from_numpy(ub_np).to(device=center.device),
+        torch.from_numpy(lb_np).to(device=center.device),
+        {},
+    )
 
 
 def certify_zono3_gradlin(gm1, gm2, center, eps):
@@ -198,6 +234,20 @@ def certify_zono3_gradlin(gm1, gm2, center, eps):
     else:
         d = out.x - out.y
     return (*d.ublb(), _bound_width_reasons(d))
+
+
+def certify_zono3_ort(gm1, gm2, center, eps, providers, compile_cache):
+    """Differential zonotope bounds compiled through ONNX Runtime."""
+    prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
+    key = (id(gm1), id(gm2))
+    if key not in compile_cache:
+        merged = diff_net(gm1, gm2)
+        compile_cache[key] = zono3.interpret.onnx_compile(merged, providers=providers)
+    run = compile_cache[key]
+    ub = center + eps
+    lb = center - eps
+    d_ub, d_lb = run(ub, lb)
+    return d_ub, d_lb, {}
 
 
 def certify_zonohex(gm1, gm2, center, eps):
@@ -275,11 +325,7 @@ def main():
     samples = load_test_samples(args.n_samples, args.data_dir, args.seed)
 
     methods = [
-        ("zonohex", certify_zonohex),
-        ("zono/interval", certify_int_sub),
-        ("zono", certify_zono_sub),
-        ("zono3", certify_zono3),
-        ("zono3/gradlin", certify_zono3_gradlin),
+        ("zono3/ort", certify_zono3),
     ]
 
     print("=" * 75)

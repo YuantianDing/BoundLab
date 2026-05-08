@@ -39,7 +39,7 @@ class COOSparsify:
         
         if is_unique:
             assert self.torch_table.is_unique
-        else:
+        elif not utils.current_fake_mode():
             sorted_table, _ = self.torch_table.sort_dedup()
             assert sorted_table.length == self.torch_table.length
             self.torch_table.is_unique = True
@@ -51,19 +51,6 @@ class COOSparsify:
         if self._is_md_eye():
             self.is_md_eye = True
 
-    def _infer_table_flags(self) -> None:
-        if self.torch_table.is_unique:
-            return
-        mat = self.torch_table.materialize()
-        if mat.shape[0] <= 1:
-            self.torch_table.is_sorted = True
-            return
-        if mat.shape[1] == 0:
-            self.torch_table.is_sorted = True
-            return
-
-        sorted_table, _ = self.torch_table.sort_dedup()
-        assert sorted_table.length != self.torch_table.length
 
     def __post_init__(self):
         assert self.input_dim.length == self.torch_table.length
@@ -115,7 +102,7 @@ class COOSparsify:
         return Dense(tensor=result, dims=other_dims + self.output_dims)
 
     def backward(self, y: Union[Dense, TN]) -> Union[Dense, TN]:
-        assert self.torch_table.is_unique, "backward() requires the torch_table to be unique."
+        assert utils.current_fake_mode() or self.torch_table.is_unique, "backward() requires the torch_table to be unique."
         # TODO: for TN, deal with each Dense factor separately.
         # for Dense, if none of output_dims are present, do not change anything;
         # if any output_dim is present, 
@@ -689,7 +676,8 @@ class MultiCOOTensorSum:
     def __post_init__(self):
         if self.dims is None:
             self.dims = self.terms[0].dims
-        self.terms.sort(key=lambda term: term.real_numel(), reverse=True)
+        if not utils.current_fake_mode():
+            self.terms.sort(key=lambda term: term.real_numel(), reverse=True)
         self._assert_sorted()
     
     @property
@@ -704,7 +692,10 @@ class MultiCOOTensorSum:
     
     def add_term(self, term: MultiCOOTensor):
         for t in range(len(self.terms)):
-            if term.real_numel() > self.terms[t].real_numel():
+            if (
+                not utils.current_fake_mode()
+                and term.real_numel() > self.terms[t].real_numel()
+            ):
                 break
             if tensor := self.terms[t].__add__(term):
                 self.terms[t] = tensor
@@ -723,6 +714,8 @@ class MultiCOOTensorSum:
 
     def _assert_sorted(self):
         assert all(t.dims == self.dims for t in self.terms), "All terms must have the same dims"
+        if utils.current_fake_mode():
+            return
         assert all(
             t.real_numel() >= self.terms[i + 1].real_numel()
             for i, t in enumerate(self.terms[:-1])
@@ -756,7 +749,8 @@ class MultiCOOTensorSum:
         new_terms = []
         for term in self.terms:
             new_terms.append(term.sum(dims))
-        new_terms.sort(key=lambda term: term.real_numel(), reverse=True)
+        if not utils.current_fake_mode():
+            new_terms.sort(key=lambda term: term.real_numel(), reverse=True)
         return MultiCOOTensorSum(new_terms)
     
     def tensordot(self, other: Union["MultiCOOTensorSum", MultiCOOTensor, Dense], dims) -> "MultiCOOTensorSum":

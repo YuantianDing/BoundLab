@@ -15,7 +15,7 @@ from boundlab.sparse.dim import Dim
 class Dense:
     tensor: torch.Tensor
     dims: list[Dim]
-    keep_1_dims: bool = False
+    keep_1_dims: bool = True
 
     def __post_init__(self):
         assert self.tensor.ndim == len(self.dims), f"Tensor has {self.tensor.ndim} dimensions, but {len(self.dims)} dims were provided."
@@ -23,7 +23,7 @@ class Dense:
         for idx, dim in enumerate(self.dims):
             assert self.tensor.shape[idx] == dim.length, \
                 f"Tensor axis {idx} has length {self.tensor.shape[idx]}, but dim has length {dim.length}."
-        drops = [self.tensor.shape[i] == 1 and not self.keep_1_dims or self.tensor.stride(i) == 0 and self.tensor.shape[i] > 0 for i in range(self.tensor.ndim)]
+        drops = [not self.keep_1_dims and self.tensor.shape[i] == 1 or self.tensor.stride(i) == 0 and self.tensor.shape[i] > 0 for i in range(self.tensor.ndim)]
         if True in drops:
             self.tensor = self.tensor[tuple(slice(None) if not drop else 0 for drop in drops)]
             self.dims = [dim for dim, drop in zip(self.dims, drops) if not drop]

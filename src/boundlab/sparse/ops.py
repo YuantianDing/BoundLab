@@ -52,45 +52,66 @@ def _table_join_sorted_from_tensors(
     assert all(t.dim() == 2 and t.dtype in [torch.int8, torch.int16, torch.int32, torch.int64] for t in tensors)
     assert all(len(dims) == t.shape[1] for t, dims in zip(tensors, columns))
     if utils.current_fake_mode():
-        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+        n_rows = _symbolic_join_row_count(tensors, columns)
+        n_cols = len(set(i for column in columns for i in column))
         return torch.onnx.ops.symbolic(
             "boundlab::TableJoinSorted",
-            inputs=original_args,
+            inputs=[arg if isinstance(arg, torch.Tensor) else torch.tensor(arg) for arg in original_args],
             dtype=tensors[0].dtype,
-            shape=(ShapeEnv.create_symintnode(), ShapeEnv.create_symintnode()),
+            shape=(n_rows, n_cols),
         )
-    else:
-        device = tensors[0].device
-        dtype = tensors[0].dtype
-        if all(len(column) == 0 for column in columns):
-            length = 1
-            for tensor in tensors:
-                length *= int(tensor.shape[0])
-            return torch.zeros((length, 0), dtype=dtype, device=device)
-        df = [
-            pd.DataFrame(
-                {f"t{columns[i][j]}": tensors[i][:, j].cpu().numpy() for j in range(tensors[i].shape[1])}
-            )
-            for i in range(len(tensors))
-        ]
+    return _table_join_sorted_concrete(tensors, columns)
 
-        result = df[0]
-        for i in range(1, len(df)):
-            shared = list(set(result.columns) & set(df[i].columns))
-            if shared:
-                result = result.merge(df[i], on=shared, how="inner")
-            else:
-                result = result.merge(df[i], how="cross")
-        N = max((max(column) for column in columns if column), default=-1) + 1
-        cols = [f"t{i}" for i in range(N)]
-        if N == 0:
-            return torch.zeros((len(result), 0), dtype=dtype, device=device)
-        if result.empty:
-            return torch.zeros((0, N), dtype=dtype, device=device)
-        # ``.values`` may produce a numpy array with negative strides (e.g.
-        # after pandas' merge reorders columns); ``torch.tensor`` rejects
-        # those. ``.copy()`` materialises a contiguous-stride view first.
-        return torch.tensor(result[cols].values.copy(), dtype=dtype, device=device)
+
+def _symbolic_join_row_count(
+    tensors: list[torch.Tensor],
+    columns: list[list[int]],
+):
+    # Use a SymInt that already belongs to the traced graph. Creating a fresh
+    # unbacked SymInt here leaves proxy-tensor export with no proxy slot for it.
+    if all(len(column) == 0 for column in columns):
+        n_rows = 1
+        for tensor in tensors:
+            n_rows = n_rows * tensor.shape[0]
+        return n_rows
+    return tensors[0].shape[0]
+
+
+def _table_join_sorted_concrete(
+    tensors: list[torch.Tensor],
+    columns: list[list[int]],
+) -> torch.Tensor:
+    device = tensors[0].device
+    dtype = tensors[0].dtype
+    if all(len(column) == 0 for column in columns):
+        length = 1
+        for tensor in tensors:
+            length *= int(tensor.shape[0])
+        return torch.zeros((length, 0), dtype=dtype, device=device)
+    df = [
+        pd.DataFrame(
+            {f"t{columns[i][j]}": tensors[i][:, j].cpu().numpy() for j in range(tensors[i].shape[1])}
+        )
+        for i in range(len(tensors))
+    ]
+
+    result = df[0]
+    for i in range(1, len(df)):
+        shared = list(set(result.columns) & set(df[i].columns))
+        if shared:
+            result = result.merge(df[i], on=shared, how="inner")
+        else:
+            result = result.merge(df[i], how="cross")
+    N = max((max(column) for column in columns if column), default=-1) + 1
+    cols = [f"t{i}" for i in range(N)]
+    if N == 0:
+        return torch.zeros((len(result), 0), dtype=dtype, device=device)
+    if result.empty:
+        return torch.zeros((0, N), dtype=dtype, device=device)
+    # ``.values`` may produce a numpy array with negative strides (e.g.
+    # after pandas' merge reorders columns); ``torch.tensor`` rejects
+    # those. ``.copy()`` materialises a contiguous-stride view first.
+    return torch.tensor(result[cols].values.copy(), dtype=dtype, device=device)
 
 
 def _unwrap_functorch_metadata(tensor: torch.Tensor) -> torch.Tensor:
@@ -109,16 +130,13 @@ def list_index_unique(tensor1: torch.Tensor, tensor2: torch.Tensor) -> torch.Ten
     """
     Parallel of [list(tensor1).index(t) for t in tensor2] for tensors. Assumes that each row of tensor2 appears exactly once in tensor1.
     """
-    # assert tensor1.dtype == tensor2.dtype
-    # if utils.current_fake_mode():
-    #     from torch.fx.experimental.symbolic_shapes import ShapeEnv
-    #     return torch.onnx.ops.symbolic(
-    #         "boundlab::ListIndexUnique",
-    #         inputs=(tensor1, tensor2),
-    #         dtype=torch.int64,
-    #         shape=(tensor2.shape[0],),
-    #     )
-    # else:
+    if utils.current_fake_mode():
+        return torch.onnx.ops.symbolic(
+            "boundlab::ListIndexUnique",
+            inputs=(tensor1, tensor2),
+            dtype=torch.int64,
+            shape=(tensor2.shape[0],),
+        )
     assert tensor1.dim() == 2 and tensor2.dim() == 2, "Input tensors must be 2D"
     assert tensor1.shape[1] == tensor2.shape[1], "Input tensors must have the same number of columns"
     N = tensor1.shape[0]

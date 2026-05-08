@@ -14,9 +14,10 @@ Interpret an ONNX model:
 from __future__ import annotations
 
 import copy
+from boundlab import utils
 import math
 from pathlib import Path
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar, Union
 import onnx_ir as ir
 import torch
 import beartype
@@ -58,7 +59,10 @@ def _onnx_attr_value(attr) -> Any:
 def _unwrap_shape(x) -> list[int]:
     """Extract a concrete shape/axes list from a tensor."""
     if isinstance(x, torch.Tensor):
-        return x.long().tolist()
+        result = x.long().tolist()
+        # assert result[0] <= 500000, f"Suspiciously large shape/axes value: {result}"
+        return result
+
     return list(x)
 
 
@@ -106,19 +110,21 @@ def _onnx_squeeze(data, axes=None):
 
 def _onnx_constant(value=None, value_float=None, value_int=None, value_string=None, value_floats=None, value_ints=None, value_strings=None, **_):
     """ONNX Constant node: wrap the tensor attribute as a torch.Tensor."""
-
+    device = torch.get_default_device()
+    if device.type == "meta":
+        device = torch.device("cpu")
     if value is not None:
-        return torch.tensor(value).to(torch.get_default_device()) if value is not None else None
+        return torch.tensor(value).to(device) if value is not None else None
     elif value_float is not None:
-        return torch.tensor(value_float).to(torch.get_default_device())
+        return value_float
     elif value_int is not None:
-        return torch.tensor(value_int).to(torch.get_default_device())
+        return value_int
     elif value_string is not None:
         return value_string
     elif value_floats is not None:
-        return torch.tensor(value_floats).to(torch.get_default_device())
+        return list(value_floats)
     elif value_ints is not None:
-        return torch.tensor(value_ints).to(torch.get_default_device())
+        return list(value_ints)
     elif value_strings is not None:
         return value_strings
     else:
@@ -216,20 +222,6 @@ def _onnx_gather(data, indices, axis=0):
     out_shape = list(data.shape[:axis]) + list(indices.shape) + list(data.shape[axis + 1 :])
     return gathered.reshape(out_shape)
 
-
-def _onnx_concat(*inputs, axis):
-    """ONNX Concat: concatenate inputs along *axis*.
-
-    Dispatches to :class:`boundlab.expr.Cat` when any input is an
-    :class:`Expr` (wrapping plain tensors as :class:`ConstVal`),
-    otherwise uses :func:`torch.cat`.
-    """
-    axis = int(axis)
-    if any(isinstance(x, Expr) for x in inputs):
-        from boundlab.expr import Cat, ConstVal
-        parts = [x if isinstance(x, Expr) else ConstVal(x) for x in inputs]
-        return Cat(*parts, dim=axis)
-    return torch.cat(list(inputs), dim=axis)
 
 
 def _onnx_einsum(*inputs, equation):
@@ -433,6 +425,8 @@ def _onnx_concat(*args, axis=0):
         from boundlab.expr import Cat
         wrapped = [x if isinstance(x, Expr) else ConstVal(x) for x in inputs]
         return Cat(*wrapped, dim=int(axis))
+    if all(isinstance(x, list) for x in inputs):
+        return sum(inputs, [])
     return torch.cat(inputs, dim=int(axis))
 
 
@@ -622,7 +616,7 @@ class Interpreter(Generic[E]):
         return Interpreter(result)
 
     def __call__(
-        self, model: ir.Model | str | Path, verbose: bool = False
+        self, model: ir.Model | str | Path, verbose: Union[bool, list[str]] = False
     ) -> Callable[..., E]:
         """Build an expression-level interpreter for an ONNX model.
 
@@ -658,6 +652,11 @@ class Interpreter(Generic[E]):
         >>> from boundlab.zono import interpret
         >>> import boundlab.expr as expr
         """
+        if verbose is True:
+            verbose = ['graph', 'bound']
+        if verbose is False:
+            verbose = []
+
         if isinstance(model, torch.onnx.ONNXProgram):
             model = model.model
         elif isinstance(model, torch.export.ExportedProgram):
@@ -724,7 +723,7 @@ class Interpreter(Generic[E]):
                         return f"Tensor{list(x.shape)}({x.abs().max().item():.4g})"
                     return repr(x)
                 
-                if verbose:
+                if 'graph' in verbose:
                     outputs = ", ".join("%" + node.name for node in node.outputs if node is not None)
                     inputs = ", ".join("%" + node.name for node in node.inputs if node is not None)
                     kwargs_str = ", ".join(f"{k}={to_repr(v)}" for k, v in kwargs.items())
@@ -736,7 +735,9 @@ class Interpreter(Generic[E]):
                 result = handler(*args, **kwargs)
                 
 
-                if verbose:
+                if 'expr' in verbose:
+                    print(f"-> {result}")
+                if 'bound' in verbose:
                     print(f"-> {to_repr(result)}")
 
                 assert not isinstance(result, tuple), f"Handler for {node.op_type} returned a tuple, but only single outputs are supported. Got: {result}"
@@ -777,7 +778,7 @@ ONNX_BASE_INTERPRETER = Interpreter({
     "Einsum":   _onnx_einsum,
     "Conv":     _onnx_conv,
     # ---- shape ops ----------------------------------------------------
-    "Reshape":  lambda data, shape, **_: data.reshape(_unwrap_shape(_as_const(shape))),
+    "Reshape":  lambda data, shape, **_: data.reshape(*_unwrap_shape(_as_const(shape))),
     "Flatten":  _onnx_flatten,
     "Transpose": lambda data, perm=None: (data.permute(*perm) if perm is not None else data.T),
     "Unsqueeze": lambda data, axes: _onnx_unsqueeze(data, _as_const(axes)),

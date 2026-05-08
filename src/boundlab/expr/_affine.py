@@ -71,7 +71,8 @@ class AffineSum(Expr):
         output_shapes = {op.output_shape for op in self.children_dict.values()}
         if self.constant is not None:
             output_shapes.add(self.constant.shape)
-        assert len(output_shapes) == 1, \
+        output_shapes = list(output_shapes)
+        assert all(shape == output_shapes[0] for shape in output_shapes), \
             f"All ops must share the same output shape; got {output_shapes}."
         self._shape = output_shapes.pop()
         # Propagate flags

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import torch
 
+from boundlab import utils
+
 
 _INF = 1e30
 _FEAS_SLACK = 1e-9  # numerical slack on strip/rectangle feasibility tests
@@ -83,7 +85,7 @@ def hex_slope_range(
 
     # Fallback
     no_feas = s_min >= _INF / 2
-    if no_feas.any():
+    if utils.current_fake_mode() or no_feas.any():
         mx = (x_lb + x_ub) / 2
         my = (y_lb + y_ub) / 2
         md = mx - my

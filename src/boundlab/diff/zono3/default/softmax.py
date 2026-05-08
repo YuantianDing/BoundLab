@@ -6,6 +6,7 @@ softmax as ``exp → reduce-sum → reciprocal → element-wise product''
 
 import torch
 
+from boundlab import utils
 from boundlab.diff.zono3 import expr
 from boundlab.expr import Expr, ConstVal
 from boundlab.diff.expr import DiffExpr2, DiffExpr3

@@ -86,7 +86,7 @@ def onnx_export(
         allow_non_fake_inputs=True,
         shape_env=ShapeEnv(allow_dynamic_output_shape_ops=True),
     ):
-        program = torch.export.export(mod, args_tensor)
+        program = torch.export.export(mod, args_tensor, strict=False)
 
 
     onnx_program = torch.onnx.export(

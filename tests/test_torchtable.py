@@ -262,6 +262,15 @@ class TestMerge:
 
 
 class TestTableJoinSorted:
+    def test_inner_join_shared_column(self):
+        out = table_join_sorted(
+            torch.tensor([[1, 10], [2, 20], [3, 30]], dtype=torch.int64),
+            [0, 1],
+            torch.tensor([[20, 200], [30, 300], [40, 400]], dtype=torch.int64),
+            [1, 2],
+        )
+        assert torch.equal(out, torch.tensor([[2, 20, 200], [3, 30, 300]]))
+
     def test_zero_output_columns(self):
         out = table_join_sorted(
             torch.zeros((1, 0), dtype=torch.int64),

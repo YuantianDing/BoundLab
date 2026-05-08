@@ -1,17 +1,22 @@
 
 
 
-from typing import Any
+from typing import Any, Union
+
+import torch
 
 
 class Dim:
-    def __init__(self, length: int, ordering: float, name: str | None = None):
+    def __init__(self, length: Union[int, torch.SymInt], ordering: float, name: str | None = None):
         self.length = length
+        if isinstance(self.length, torch.Tensor):
+            self.length = self.length.item()
         self.ordering = ordering
         self.name = name
 
     def _sort_key(self) -> tuple[float, int, str, int]:
-        return (self.ordering, self.length, self.name or "", id(self))
+        length = self.length if isinstance(self.length, int) else 0
+        return (self.ordering, length, self.name or "", id(self))
     
     def __le__(self, other: "Dim") -> bool:
         return self._sort_key() <= other._sort_key()

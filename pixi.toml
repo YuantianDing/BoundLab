@@ -2,7 +2,7 @@
 authors = ["Yuantian Ding <work.yt.ding@gmail.com>"]
 channels = ["conda-forge", "pytorch"]
 name = "boundlab"
-platforms = ["osx-64", "osx-arm64", "linux-64"]
+platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
@@ -11,12 +11,11 @@ test-cov = "pytest --cov=boundlab"
 docs = { cmd = "make html", cwd = "docs" }
 
 [dependencies]
-python = ">=3.11,<3.13"
-pytorch = ">=2.0"
+python = ">=3.14,<3.15"
+pytorch = ">=2.10,<2.11"
 scipy = ">=1.11"
-onnxruntime = "*"
 beartype = ">=0.22.9,<0.23"
-torchvision = ">=0.25.0,<0.26"
+torchvision = ">=0.26.0,<0.27"
 safetensors = ">=0.7.0,<0.8"
 pyyaml = ">=6.0.3,<7"
 termcolor = ">=3.3.0,<4"
@@ -33,6 +32,7 @@ opt-einsum = ">=3.3"
 pytorch-pretrained-bert = "*"
 nltk = "*"
 pandas = "*"
+onnxruntime = ">=1.25.1,<1.26"
 onnx2pytorch = { git = "https://github.com/Verified-Intelligence/onnx2pytorch.git" }
 onnxsim = ">=0.6.3, <0.7"
 onnxoptimizer = ">=0.4.2, <0.5"

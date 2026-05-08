@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 
+from boundlab import utils
 from boundlab.sparse.ops import list_index_unique, table_join_sorted
 from .dim import Dim
 Indices = torch.Tensor
@@ -21,7 +22,7 @@ class TorchTable:
         self,
         columns: list[Dim],
         data: list[Optional[Indices]],
-        length: Optional[int] = None,
+        length: int,
         is_sorted: bool = False,
         is_unique: bool = False,
     ):
@@ -29,16 +30,13 @@ class TorchTable:
         assert len(set(columns)) == len(columns), "Column names must be unique."
         self.columns: list[Dim] = list(columns)
         self.data: list[Optional[Indices]] = data
-        set_len = set(int(d.shape[0]) for d in self.data if d is not None)
-        if length is not None:
-            set_len.add(length)
-        assert len(set_len) == 1, "All columns must have the same length as each other and the provided length."
-        self.length: int = set_len.pop()
+        assert all(d is None or d.dim() == 1 and d.shape[0] == length for d in data), f"{[d.shape[0] if d is not None else 'None' for d in data]} vs length {length}"
+        self.length: int = length
 
         for i, dat in enumerate(self.data):
             if dat is not None:
                 assert dat.dim() == 1, "Column data must be 1D."
-                assert int(dat.shape[0]) == self.length, \
+                assert dat.shape[0] == self.length, \
                         "All columns must have the same length."
             elif data is None:
                 assert self.columns[i].length == self.length, f"Index column length must match table length, but column {self.columns[i]} has length {self.columns[i].length} and table has length {self.length}."
@@ -100,11 +98,12 @@ class TorchTable:
         Used after sort/dedup/merge to preserve the index-column compression
         whenever the materialised column happens to be ``0..length-1``.
         """
-        if col.shape[0] != length:
-            return col
-        arange = torch.arange(length, dtype=col.dtype)
-        if torch.equal(col, arange):
-            return None
+        if not utils.current_fake_mode():
+            if col.shape[0] != length:
+                return col
+            arange = torch.arange(length, dtype=col.dtype)
+            if torch.equal(col, arange):
+                return None
         return col
 
     def sort_dedup(self) -> tuple["TorchTable", Optional[Indices]]:
@@ -142,7 +141,7 @@ class TorchTable:
             mask = torch.cat([torch.ones(1, dtype=torch.bool), diff])
 
         unique_mat = sorted_mat[mask]
-        new_length = int(mask.sum().item())
+        new_length = unique_mat.shape[0]
 
         # Position of each sorted row in the unique output; -1 cumsum trick
         # gives [0, 0, 1, 1, 2, ...] for a mask like [T, F, T, F, T].
@@ -177,7 +176,7 @@ class TorchTable:
             return self, None
         mask = torch.cat([torch.ones(1, dtype=torch.bool), diff])
         unique_mat = mat[mask]
-        new_length = int(mask.sum().item())
+        new_length = unique_mat.shape[0]
         inverse = mask.to(torch.int64).cumsum(dim=0) - 1
         new_data = [
             TorchTable._maybe_compress(unique_mat[:, k], new_length)
@@ -275,7 +274,7 @@ class TorchTable:
         assert all(t.is_unique for t in tables), \
             "All tables must be sorted and unique before merging."
         
-        if not no_reduce:
+        if not no_reduce and not utils.current_fake_mode():
             tables = TorchTable.reduce_table_merge(tables)
         if len(tables) == 1:
             return tables[0]
@@ -290,7 +289,7 @@ class TorchTable:
             args.append(mat)
             args.append(remapped_cols)
         result_tensor = table_join_sorted(*args)
-        new_length = int(result_tensor.shape[0])
+        new_length = result_tensor.shape[0]
         new_data = [
             result_tensor[:, i]
             for i in range(len(all_col_names))
