@@ -622,7 +622,7 @@ class Interpreter(Generic[E]):
         return Interpreter(result)
 
     def __call__(
-        self, model: ir.Model | str | Path, verbose: bool = False
+        self, model: ir.Model | str | Path, verbose: bool | list[str] = False
     ) -> Callable[..., E]:
         """Build an expression-level interpreter for an ONNX model.
 
@@ -658,6 +658,10 @@ class Interpreter(Generic[E]):
         >>> from boundlab.zono import interpret
         >>> import boundlab.expr as expr
         """
+        if verbose is True:
+            verbose = ['graph', 'bound']
+        elif verbose is False:
+            verbose = []
         if isinstance(model, torch.onnx.ONNXProgram):
             model = model.model
         elif isinstance(model, torch.export.ExportedProgram):
@@ -724,7 +728,7 @@ class Interpreter(Generic[E]):
                         return f"Tensor{list(x.shape)}({x.abs().max().item():.4g})"
                     return repr(x)
                 
-                if verbose:
+                if 'graph' in verbose:
                     outputs = ", ".join("%" + node.name for node in node.outputs if node is not None)
                     inputs = ", ".join("%" + node.name for node in node.inputs if node is not None)
                     kwargs_str = ", ".join(f"{k}={to_repr(v)}" for k, v in kwargs.items())
@@ -736,8 +740,13 @@ class Interpreter(Generic[E]):
                 result = handler(*args, **kwargs)
                 
 
-                # if verbose:
-                #     print(f"-> {result}")
+                if 'bound' in verbose:
+                    print(f"-> {result}")
+                if 'expr' in verbose and not isinstance(result, torch.Tensor):
+                    if hasattr(result, 'diff'):
+                        print(f"-> diff {result.diff}")
+                    else:
+                        print(f"-> {result}")
 
                 assert not isinstance(result, tuple), f"Handler for {node.op_type} returned a tuple, but only single outputs are supported. Got: {result}"
 

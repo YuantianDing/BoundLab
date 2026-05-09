@@ -176,14 +176,20 @@ def certify_zono3(gm1, gm2, center, eps):
     """Differential verification via diff_net (tightest)."""
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     merged = diff_net(gm1, gm2)
-    op = zono3.interpret(merged)
+    op = zono3.interpret(merged, verbose=['graph', 'expr'])
+    import pyinstrument
+    profiler = pyinstrument.Profiler()
+    profiler.start()
     x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
     out = op(x)
     if isinstance(out, DiffExpr3):
         d = out.diff
     else:
         d = out.x - out.y
-    return (*d.ublb(), _bound_width_reasons(d))
+    ub, lb = d.ublb()
+    profiler.stop()
+    (_HERE / "zono3_profile.html").write_text(profiler.output_html())
+    return (ub, lb, _bound_width_reasons(d))
 
 
 def certify_zono3_gradlin(gm1, gm2, center, eps):
@@ -275,11 +281,11 @@ def main():
     samples = load_test_samples(args.n_samples, args.data_dir, args.seed)
 
     methods = [
-        ("zonohex", certify_zonohex),
+        ("zono3", certify_zono3),
         ("zono/interval", certify_int_sub),
         ("zono", certify_zono_sub),
-        ("zono3", certify_zono3),
         ("zono3/gradlin", certify_zono3_gradlin),
+        ("zonohex", certify_zonohex),
     ]
 
     print("=" * 75)

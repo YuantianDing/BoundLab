@@ -163,8 +163,28 @@ class LinearOp:
         if DEBUG_LINEAR_OP:
             other_debug_jacobian = other.debug_jacobian.replace_dims(output_dim_map)
             jac = self.debug_jacobian.tensordot(other_debug_jacobian, self.input_dims)
-            assert jac.allclose(tensor.to_dense())
             debug_jacobian = jac.expand(self.output_dims + other.input_dims)
+            if not jac.allclose(tensor.to_dense()):
+                if not isinstance(other_tensor, MultiCOOTensorSum):
+                    import pickle
+                    with open("linear_op_debug.pkl", "wb") as f:
+                        pickle.dump((self, other), f)
+                    assert False, f"{self} @ {other} {tensor} {tensor.to_dense()}"
+                result2 = None
+                jac2 = None
+                for t in other_tensor.terms:
+                    t_dense = t.to_dense() 
+                    t_debug_jacobian = t_dense.expand(self.input_dims + other.input_dims)
+                    otheri = LinearOp(tensor=t, input_dims=other.input_dims, output_dims=self.input_dims, flags=other.flags, debug_jacobian=t_debug_jacobian)
+                    if result2 is None:
+                        result2 = self @ otheri
+                        jac2 = self.debug_jacobian.tensordot(t_dense, self.input_dims) 
+                    else:
+                        result2 = result2 + (self @ otheri)
+                        jac2 = jac2 + self.debug_jacobian.tensordot(t_dense, self.input_dims)
+                assert jac2.allclose(jac), f"{self} @ {other} {jac} {jac2}"
+                assert torch.allclose(result2.jacobian(), debug_jacobian), f"{self} @ {other} "
+                assert False, f"{self} @ {other}"
 
         return LinearOp(tensor=tensor, input_dims=other.input_dims, output_dims=self.output_dims, flags=self.flags & other.flags, debug_jacobian=debug_jacobian)
 
@@ -203,7 +223,6 @@ class LinearOp:
         # warnings.warn(f"LinearOp {self} does not implement jacobian method. Falling back to force_jacobian, which may be inefficient.", stacklevel=2)
         dense = self.tensor.to_dense()
         if DEBUG_LINEAR_OP and self.debug_jacobian is not None:
-            print("Check")
             assert self.debug_jacobian.allclose(dense)
         return dense.expand(self.output_dims + self.input_dims)
     
