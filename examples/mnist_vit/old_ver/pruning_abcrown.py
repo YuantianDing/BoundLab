@@ -37,7 +37,7 @@ from boundlab.interp.onnx import onnx_export
 from mnist_vit import build_mnist_vit
 from BoundLab.examples.mnist_vit.old_ver.certify import PatchifyStage
 from BoundLab.examples.mnist_vit.old_ver.certify_pruned import ScoringModel, build_zonotope_no_cat, classify_topk
-from pruning_zono import MaskedModel, load_test_samples
+from examples.mnist_vit.pruning_zono import MaskedModel, load_test_samples
 
 
 # ---------------------------------------------------------------------------

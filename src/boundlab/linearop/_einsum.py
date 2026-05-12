@@ -297,7 +297,7 @@ class EinsumOp(LinearOp):
         input_indices = [result[i] for i in self.input_dims]
         return result, input_indices, max_index
 
-    def permute_for_input(self):
+    def permute_for_input(self) -> "EinsumOp":
         permute_dims = [i for i in range(self.tensor.dim()) if i not in self.input_dims] + self.input_dims
         new_tensor = self.tensor.permute(permute_dims)
         input_dims = [permute_dims.index(i) for i in self.input_dims]
@@ -306,7 +306,7 @@ class EinsumOp(LinearOp):
         assert input_dims == list(range(len_diff, len(permute_dims))), "Input dimensions should be permuted to the end."
         return EinsumOp(new_tensor, input_dims, output_dims, name=self.name)
 
-    def permute_for_output(self):
+    def permute_for_output(self) -> "EinsumOp":
         non_output_dims = [i for i in range(self.tensor.dim()) if i not in self.output_dims]
         non_output_dims.sort(key=lambda x: self.input_dims.index(x))
         permute_dims = self.output_dims + non_output_dims
@@ -476,6 +476,7 @@ class EinsumOp(LinearOp):
             
 
 def merge_einsumop(x: EinsumOp, y: EinsumOp) -> EinsumOp:
+    # print(x, y)
     assert x.input_shape == y.output_shape, f"Cannot compose EinsumOps with incompatible shapes: {x.output_shape} vs {y.input_shape}"
     output_idx = list(range(len(x.output_dims)))
     max_index = len(output_idx)

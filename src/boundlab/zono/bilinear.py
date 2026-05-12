@@ -11,6 +11,7 @@ from typing import Union
 
 import torch
 
+from boundlab import prop
 from boundlab.expr._core import Expr
 from boundlab.expr._affine import AffineSum, ConstVal
 from boundlab.expr._var import LpEpsilon
@@ -216,38 +217,6 @@ def deept_precise_matmul(A: Expr, B: Expr) -> Expr:
     result = result + err * new_eps
     return result
 
-def square_matmul(A: Expr, B: Expr) -> Expr:
-    assert len(A.shape) >= 2 and len(B.shape) >= 2, \
-        f"Need at least 2D for matmul, got {A.shape} @ {B.shape}"
-    assert A.shape[:-2] == B.shape[:-2], \
-        f"Batch dims must match: {A.shape} @ {B.shape}"
-    assert A.shape[-1] == B.shape[-2], \
-        f"Inner dims must match: {A.shape} @ {B.shape}"
-
-    Ac, As = A.split_const()
-    Bc, Bs = B.split_const()
-
-    result = Ac @ Bs + As @ Bc + Ac @ Bc
-    assert As.is_symmetric_to_0() and Bs.is_symmetric_to_0()
-
-    m, k, n = A.shape[-2], A.shape[-1], B.shape[-1]
-    As = As.unsqueeze(-1).expand(*As.shape, n) # (..., m, k, n)
-    Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n) # (..., m, k, n)
-    
-    a = As.ub()
-    b = Bs.ub()
-    a = a / (a + b)
-    b = b / (a + b)
-    Pos = torch.nan_to_num((a * As + b * Bs).ub() ** 2 / (4 * (a * b)), nan=0.0, posinf=0.0, neginf=0.0)
-    Neg = torch.nan_to_num(-(a * As - b * Bs).ub() ** 2 / (4 * (a * b)), nan=0.0, posinf=0.0, neginf=0.0)
-    U = Pos.sum(dim=-2) # (..., m, n)
-    L = Neg.sum(dim=-2) # (..., m, n)
-
-    result += (U + L) / 2 + (U - L) / 2 * LpEpsilon(result.shape)
-    return result
-
-
-
 
 def matmul_handler(A, B):
     """Dispatcher implementation for ``torch.matmul``.
@@ -341,12 +310,29 @@ def square_matmul(A: Expr, B: Expr) -> Expr:
         As = As.unsqueeze(-1).expand(*As.shape, n) # (..., m, k, n)
         Bs = Bs.unsqueeze(-3).expand(*Bs.shape[:-2], m, k, n) # (..., m, k, n)
 
+        # print("As:", As)
+        # print("Bs:", Bs)
         a = torch.sqrt(Asu)
         b = torch.sqrt(Bsu)
         lama = a / b
         lamb = b / a
-        PosU, PosL = (lama * As + lamb * Bs).ublb()
-        NegU, NegL = (lama * As - lamb * Bs).ublb()
+        pos_expr = lama * As + lamb * Bs
+        neg_expr = lama * As - lamb * Bs
+        # print("pos_expr:", pos_expr)
+        # print("neg_expr:", neg_expr)
+
+        # from boundlab.diff.zonohex import ZonoHexGate
+        # if isinstance(pos_expr, AffineSum):
+        #     pos_expr = pos_expr.replace_subnode_once(lambda c: c.simplify() if isinstance(c, ZonoHexGate) else None)
+        # if isinstance(neg_expr, AffineSum):
+        #     neg_expr = neg_expr.replace_subnode_once(lambda c: c.simplify() if isinstance(c, ZonoHexGate) else None)
+        
+
+
+        # print(pos_expr)
+        # print(neg_expr)
+        PosU, PosL = pos_expr.ublb()
+        NegU, NegL = neg_expr.ublb()
         Pos = torch.nan_to_num(torch.maximum(PosU ** 2, PosL ** 2) / 4, nan=1e10, posinf=1e10, neginf=1e10)
         Neg = torch.nan_to_num(-torch.maximum(NegU ** 2, NegL ** 2) / 4, nan=-1e10, posinf=-1e10, neginf=-1e10)
         U = torch.minimum(Pos.sum(dim=-2), U) # (..., m, n)

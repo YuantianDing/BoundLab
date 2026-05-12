@@ -54,6 +54,10 @@ class TupleExpr:
         """Return a GetTupleItem expression that extracts the specified index from this TupleExpr."""
         return GetTupleItem(self, index)
     
+    def to_string(self, *children_str: str, indent: int = 0) -> str:
+        """Convert this expression to a string for debugging purposes. The children_str arguments are the string representations of the children expressions, in the same order as self.children."""
+        raise NotImplementedError(f"The :code:`to_string` method is not implemented for {self.__class__.__name__}.")
+    
     
 class GetTupleItem(Expr):
     """Expression representing indexing into a TupleExpr.
@@ -76,7 +80,7 @@ class GetTupleItem(Expr):
             return super().__new__(cls)
 
     def __init__(self, child: Expr, index: int):
-        super().__init__(ExprFlags.IS_AFFINE)
+        super().__init__(ExprFlags.IS_AFFINE | ExprFlags.PRINT_FUSE)
         assert type(child.shape) is tuple, "GetTupleItem child must be a TupleExpr."
         assert 0 <= index < len(child.children), "GetTupleItem index out of range."
         self._child = child
@@ -89,7 +93,7 @@ class GetTupleItem(Expr):
 
     @property
     def children(self) -> tuple[Expr, ...]:
-        raise NotImplementedError("GetTupleItem does not support the children property. It routes the :code:`children` method to :code:`tuple_expr` for topological sorting and weight propagation.")
+        return (self._child,)
 
     @property
     def tuple_expr(self) -> TupleExpr:
@@ -100,11 +104,15 @@ class GetTupleItem(Expr):
         for child in self.tuple_expr.children:
             child.simplify_ops_()
 
-    def backward(self, weights, direction = "==") -> tuple[torch.Tensor] | None:
+    def backward(self, weights, direction = "==") -> tuple[torch.Tensor, list[LinearOp]] | None:
         raise NotImplementedError("GetTupleItem does not support `backward` method. It needs be handled as a special case in bound propagation.")
     
     def with_children(self, *new_children: Expr) -> "GetTupleItem":
-        raise NotImplementedError("GetTupleItem does not support the children property. It needs be handled as a special case in bound propagation.")
+        assert len(new_children) == 1, "GetTupleItem must have exactly one child."
+        return GetTupleItem(new_children[0], self._index)
+    
+    def to_string(self, *children_str: str, indent: int = 0) -> str:
+        return f"{children_str[0]}[{self._index}]"
    
 class MakeTuple(TupleExpr):
     """Expression representing the construction of a tuple from multiple sub-expressions.

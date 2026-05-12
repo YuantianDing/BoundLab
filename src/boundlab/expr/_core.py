@@ -7,7 +7,7 @@ the expression framework.
 from copy import copy
 import itertools
 import sys
-from typing import Callable, Literal, Union
+from typing import Callable, Literal, Optional, Union
 
 import torch
 import enum
@@ -550,37 +550,64 @@ class Expr:
             A tuple ``(non_const_part, const_part)`` where exactly one of the two is zero.
         """
         raise NotImplementedError(f"The :code:`split_const` method is not implemented for {self.__class__.__name__}.")
+    
+    def all_subnodes(self) -> list[Union["Expr", "TupleExpr"]]:
+        """Return a list of all sub-expressions in the DAG rooted at this expression, in topological order."""
+        visited = list()
+
+        from boundlab.expr import TupleExpr, GetTupleItem
+
+        def dfs(e: Union[Expr, TupleExpr]):
+            if e in visited:
+                return
+            visited.append(e)
+            for child in e.children:
+                dfs(child)
+        dfs(self)
+
+        visited.sort(key=lambda e: e.id)
+        return visited
+    
+    def replace_subnode_once(self, replace_fn: Callable[["Expr"], Optional["Expr"]]) -> "Expr":
+        """Return a new expression with the same structure but sub-expressions replaced by replace_fn."""
+        visited = self.all_subnodes()
+        for i, e in reversed(list(enumerate(visited))):
+            new_e = replace_fn(e)
+            if new_e is not None:
+                new_visited = copy(visited)
+                new_visited[i] = new_e
+                for j in range(i + 1, len(visited)):
+                    parent = visited[j]
+                    new_children = tuple(new_visited[visited.index(child)] for child in parent.children)
+                    new_visited[j] = parent.with_children(*new_children)
+                return new_visited[-1]
+        return self
 
 
 def expr_pretty_print(expr: Expr, indent: int = 0) -> str:
     """Pretty print an expression in SSA form."""
-    visited = list()
+    from boundlab.expr import TupleExpr, GetTupleItem
+    visited = expr.all_subnodes()
 
-    def dfs(e: Expr):
-        if e in visited:
-            return
-        visited.append(e)
-        for child in e.children:
-            dfs(child)
-    dfs(expr)
-
-    visited.reverse()
-
-    ref_count = {e: 0 for e in visited}
-    for e in visited:
-        for child in e.children:
-            ref_count[child] += 1
-
-    def can_fuse(e: Expr) -> bool:
-        return (ExprFlags.PRINT_FUSE in e.flags) and ref_count[e] <= 1
+    def can_fuse(e: Union[Expr, TupleExpr]) -> bool:
+        if isinstance(e, Expr):
+            return (ExprFlags.PRINT_FUSE in e.flags)
+        else: 
+            return False
+        
+    def get_children(e: Union[Expr, TupleExpr]) -> tuple[Union[Expr, TupleExpr], ...]:
+            if isinstance(e, GetTupleItem):
+                return (e.tuple_expr,)
+            return e.children
 
     expr_to_str = {}
 
-    def get_expr_str(e: Expr) -> str:
+    def get_expr_str(e: Union[Expr, TupleExpr]) -> str:
         if e in expr_to_str:
             return expr_to_str[e]
+        
         children_strs = []
-        for child in e.children:
+        for child in get_children(e):
             if can_fuse(child):
                 children_strs.append(get_expr_str(child))
             else:

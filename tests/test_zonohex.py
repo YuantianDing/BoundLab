@@ -24,6 +24,7 @@ import boundlab.expr as expr
 from boundlab.diff.expr import DiffExpr2, DiffExpr3
 from boundlab.diff.zonohex import interpret as hex_interpret, ZonoHexGate, expr3_to_expr2
 from boundlab.interp.onnx import onnx_export
+from boundlab.prop.eqprop import eqprop
 
 
 # =====================================================================
@@ -62,6 +63,23 @@ def _check_pair_sound(out: DiffExpr2, model, s1, s2, tol: float = 1e-4):
     lb_d = lb_x - ub_y
     assert (d <= ub_d + tol).all(), (d - ub_d).max().item()
     assert (d >= lb_d - tol).all(), (lb_d - d).max().item()
+
+
+def _has_node(root: expr.Expr, node_type) -> bool:
+    seen = set()
+
+    def walk(node):
+        if id(node) in seen:
+            return False
+        seen.add(id(node))
+        if isinstance(node, node_type):
+            return True
+        for child in getattr(node, "children", ()):
+            if walk(child):
+                return True
+        return False
+
+    return walk(root)
 
 
 # =====================================================================
@@ -191,3 +209,16 @@ def test_plain_expr_passthrough():
         f = model(s)
     assert (f <= ub + 1e-4).all()
     assert (f >= lb - 1e-4).all()
+
+
+def test_eqprop_removes_zonohex_gate():
+    """eqprop should eliminate ZonoHexGate nodes and leave only exact residuals."""
+    x = expr.LpEpsilon([3], reason="x")
+    y = expr.LpEpsilon([3], reason="y")
+    d = expr.LpEpsilon([3], reason="d")
+
+    gate = ZonoHexGate(x, y, d)
+    out = eqprop(gate[0] + gate[1])
+
+    assert not _has_node(out, ZonoHexGate)
+    assert _has_node(out, expr.LpEpsilon)

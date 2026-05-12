@@ -23,7 +23,7 @@ import torch
 import boundlab.expr
 from boundlab.linearop import ScalarOp
 from boundlab.linearop._base import ZeroOp
-
+from .eqprop import eqprop
 __all__ = [
     "ub",
     "lb",
@@ -32,6 +32,7 @@ __all__ = [
     "bound_width",
     "max_bound_width",
     "bound_width_reasons_breakdown",
+    "eqprop"
 ]
 
 if typing.TYPE_CHECKING:
@@ -308,7 +309,7 @@ def ublb(e: "Expr") -> tuple[torch.Tensor, torch.Tensor]:
     >>> (u >= l).all().item()
     True
     """
-    e.simplify_ops_()
+    # e.simplify_ops_()
     from boundlab.linearop import EinsumOp
     from boundlab.expr._tuple import GetTupleItem, TupleExpr
 

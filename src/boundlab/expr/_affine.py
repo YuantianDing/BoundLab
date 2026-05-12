@@ -82,6 +82,8 @@ class AffineSum(Expr):
                 self.flags |= ExprFlags.IS_CONST
         else:
             self.flags |= ExprFlags.IS_CONST
+        
+        self.ops = list(self.children_dict.values())
 
     def _add_constant(self, const: torch.Tensor):
         """Accumulate a constant term into this AffineSum."""

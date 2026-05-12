@@ -102,6 +102,7 @@ def build_zonotope_no_cat(vit, img, eps, op_patch, normalize, mean, std):
     # Stage 2: Pad patches (N, D) → (N+1, D), add cls + pos
     pad_op = PadOp(patch_zono.shape, [0, 0, 1, 0])
     padded = AffineSum((pad_op, patch_zono))
+                       
     cls_padded = F.pad(vit.cls_token[0], [0, 0, 0, num_patches])
     return padded + ConstVal(cls_padded + vit.pos_embedding[0])
 
@@ -110,7 +111,7 @@ def build_zonotope_no_cat(vit, img, eps, op_patch, normalize, mean, std):
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_test_samples(n, data_dir, seed):
+def load_test_samples(n, data_dir, seed) -> list[tuple[Tensor, int]]:
     try:
         from torchvision import datasets, transforms
         ds = datasets.MNIST(
@@ -134,7 +135,7 @@ def load_test_samples(n, data_dir, seed):
 
 def certify(
     checkpoint, eps, n_samples, seed, data_dir,
-    normalize, mean, std,
+    normalize, mean, std
 ):
     torch.manual_seed(seed)
     vit = build_mnist_vit(checkpoint)

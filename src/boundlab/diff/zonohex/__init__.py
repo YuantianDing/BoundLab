@@ -65,33 +65,33 @@ class ZonoHexGate(TupleExpr):
             "ZonoHexGate.backward: at least one of x-/y-weight must be non-zero"
         downstream_shape = ref.output_shape
 
-        def _as_jacobian(w, in_shape):
-            if isinstance(w, int) and w == 0:
-                return torch.zeros(downstream_shape + in_shape)
-            return w.jacobian()
+        if isinstance(x_weight, int) and x_weight == 0:
+            return 0, [0, y_weight, 0]
+        if isinstance(y_weight, int) and y_weight == 0:
+            return 0, [x_weight, 0, 0]
 
-        x_weight = _as_jacobian(x_weight, self.x.shape)
-        y_weight = _as_jacobian(y_weight, self.y.shape)
-
-        cond_xy = (x_weight > 0) == (y_weight > 0) 
-        cond_y_diff = (x_weight + y_weight >= 0) == (x_weight <= 0)
-        cond_x_diff = ~(cond_xy | cond_y_diff)
-        new_x_weight = torch.zeros_like(x_weight)
-        new_x_weight = torch.where(cond_xy, x_weight, new_x_weight)
-        new_x_weight = torch.where(cond_x_diff, x_weight + y_weight, new_x_weight)
-        new_x_weight = EinsumOp.from_full(new_x_weight, len(self.x.shape))
-
-        new_y_weight = torch.zeros_like(y_weight)
-        new_y_weight = torch.where(cond_xy, y_weight, new_y_weight)
-        new_y_weight = torch.where(cond_y_diff, x_weight + y_weight, new_y_weight)
-        new_y_weight = EinsumOp.from_full(new_y_weight, len(self.y.shape))
-
-        new_diff_weight = torch.zeros_like(x_weight)
-        new_diff_weight = torch.where(cond_x_diff, -y_weight, new_diff_weight)
-        new_diff_weight = torch.where(cond_y_diff, x_weight, new_diff_weight)
-        new_diff_weight = EinsumOp.from_full(new_diff_weight, len(self.diff.shape))
-
-        return (0, [new_x_weight, new_y_weight, new_diff_weight])
+        x_weight : EinsumOp =  x_weight.einsum_op()
+        y_weight : EinsumOp = y_weight.einsum_op()
+        x_weight = x_weight.permute_for_output()
+        y_weight = y_weight.permute_for_output()
+        if x_weight.input_dims == y_weight.input_dims and x_weight.output_dims == y_weight.output_dims:
+            # If the weights have the same input and output dimensions, we can directly apply the zono-hex transformation to them.
+            new_x_weight, new_y_weight, new_diff_weight = zono_hex_gate(x_weight.tensor, y_weight.tensor)
+            new_x_weight = EinsumOp(new_x_weight, x_weight.input_dims, x_weight.output_dims)
+            new_y_weight = EinsumOp(new_y_weight, y_weight.input_dims, y_weight.output_dims)
+            new_diff_weight = EinsumOp(new_diff_weight, x_weight.input_dims, x_weight.output_dims)
+            return 0, [new_x_weight, new_y_weight, new_diff_weight]
+        else:
+            x_weight = x_weight.jacobian()
+            y_weight = y_weight.jacobian()
+    
+            new_x_weight, new_y_weight, new_diff_weight = zono_hex_gate(x_weight, y_weight)
+    
+            new_x_weight = EinsumOp.from_full(new_x_weight, len(self.x.shape))
+            new_y_weight = EinsumOp.from_full(new_y_weight, len(self.y.shape))
+            new_diff_weight = EinsumOp.from_full(new_diff_weight, len(self.diff.shape))
+    
+            return (0, [new_x_weight, new_y_weight, new_diff_weight])
 
     def with_children(self, *new_children: Expr) -> "TupleExpr":
         """Return a new TupleExpr with the same flags but new children. This is used for expression rewriting during bound propagation."""
@@ -101,6 +101,37 @@ class ZonoHexGate(TupleExpr):
     def split_const(self):
         """ZonoHexGate is a pure affine op, so the "const" part is just the bias."""
         return 0, self
+    
+    def to_string(self, *children_str: str, indent: int = 0) -> str:
+        return f"<zonohex x={children_str[0]}, y={children_str[1]}, diff={children_str[2]}>"
+
+    def simplify(self) -> "ZonoHexGate":
+        from boundlab.prop import eqprop
+        x_res = eqprop(self.x)
+        assert all(not isinstance(e, ZonoHexGate) for e in x_res.all_subnodes()), \
+            "ZonoHexGate.simplify: expected no ZonoHexGate nodes in simplified x expression"
+        return ZonoHexGate(
+            x_res,
+            eqprop(self.y),
+            eqprop(self.diff),
+        )
+
+def zono_hex_gate(x_weight: torch.Tensor, y_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cond_xy = (x_weight > 0) == (y_weight > 0) 
+    cond_y_diff = (x_weight + y_weight >= 0) == (x_weight <= 0)
+    cond_x_diff = ~(cond_xy | cond_y_diff)
+    new_x_weight = torch.zeros_like(x_weight)
+    new_x_weight = torch.where(cond_xy, x_weight, new_x_weight)
+    new_x_weight = torch.where(cond_x_diff, x_weight + y_weight, new_x_weight)
+
+    new_y_weight = torch.zeros_like(y_weight)
+    new_y_weight = torch.where(cond_xy, y_weight, new_y_weight)
+    new_y_weight = torch.where(cond_y_diff, x_weight + y_weight, new_y_weight)
+
+    new_diff_weight = torch.zeros_like(x_weight)
+    new_diff_weight = torch.where(cond_x_diff, -y_weight, new_diff_weight)
+    new_diff_weight = torch.where(cond_y_diff, x_weight, new_diff_weight)
+    return new_x_weight, new_y_weight, new_diff_weight
 
 def expr3_to_expr2(expr3, **_kwargs) -> DiffExpr2:
     """Convert a DiffExpr3 to a DiffExpr2 via a :class:`ZonoHexGate` relaxation.

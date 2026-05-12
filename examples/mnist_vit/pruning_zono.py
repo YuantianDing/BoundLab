@@ -204,6 +204,7 @@ def certify_zonohex(gm1, gm2, center, eps):
     """Differential verification via zonohex."""
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     merged = diff_net(gm1, gm2)
+    
     op = zonohex.interpret(merged, verbose=True)
     x = expr.ConstVal(center) + eps * expr.LpEpsilon(list(center.shape))
     out = op(x)
@@ -254,6 +255,11 @@ def main():
                     help="Run concrete inference and Monte Carlo sampling on CUDA if available.")
     ap.add_argument("--mean", type=float, default=0.1307)
     ap.add_argument("--std", type=float, default=0.3081)
+    ap.add_argument(
+        "--profile-dir",
+        default=os.path.join(os.getcwd(), "profiles"),
+        help="Directory to write per-method pyinstrument HTML profiles.",
+    )
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -275,10 +281,10 @@ def main():
     samples = load_test_samples(args.n_samples, args.data_dir, args.seed)
 
     methods = [
+        ("zono3", certify_zono3),
         ("zonohex", certify_zonohex),
         ("zono/interval", certify_int_sub),
         ("zono", certify_zono_sub),
-        ("zono3", certify_zono3),
         ("zono3/gradlin", certify_zono3_gradlin),
     ]
 
@@ -287,9 +293,11 @@ def main():
     print("=" * 75)
     print(f"  eps={args.eps}, K={args.K}, MC={args.mc_samples}")
     print(f"  device={TORCH_DEVICE}")
+    print(f"  profiles={args.profile_dir}")
     print()
 
     all_results = {name: [] for name, _ in methods}
+    all_profiles = {}
     all_mc = []
     onnx_cache: dict[bytes, object] = {}
     mask_full = torch.ones(17, 64)
@@ -297,64 +305,68 @@ def main():
     gm_full = _export_masked_onnx(vit, mask_full, onnx_cache)
     model_full_mc = MaskedModel(vit, mask_full_run).eval()
 
-    for i, (img, label) in enumerate(samples):
-        img_run = img.to(TORCH_DEVICE)
-        with torch.no_grad():
-            if args.normalize:
-                x = (img_run - args.mean) / args.std
+    profile_dir = Path(args.profile_dir)
+
+    def run_method(name: str, fn):
+        total_start = time.perf_counter()
+        for i, (img, label) in enumerate(samples):
+            img_run = img.to(TORCH_DEVICE)
+            with torch.no_grad():
+                if args.normalize:
+                    x = (img_run - args.mean) / args.std
+                else:
+                    x = img_run
+                x = vit.to_patch_embedding(x)
+                center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
+
+            full_zono = build_zonotope_no_cat(vit, img_run, args.eps, op_patch)
+            prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
+            score_zono = op_score(full_zono)
+            ub_sc, lb_sc = score_zono.ublb()
+
+            definite_keep, definite_prune, uncertain = classify_topk(ub_sc, lb_sc, args.K)
+
+            K_remaining = args.K - len(definite_keep)
+            if K_remaining < 0:
+                K_remaining = 0
+                uncertain = set()
+            if K_remaining > len(uncertain):
+                K_remaining = len(uncertain)
+
+            uncertain_list = sorted(uncertain)
+            if len(uncertain_list) == 0 or K_remaining == len(uncertain_list):
+                cases = [definite_keep | uncertain]
+            elif K_remaining == 0:
+                cases = [definite_keep.copy()]
             else:
-                x = img_run
-            x = vit.to_patch_embedding(x)
-            center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
-    
-        full_zono = build_zonotope_no_cat(vit, img_run, args.eps, op_patch)
-        prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
-        score_zono = op_score(full_zono)
-        ub_sc, lb_sc = score_zono.ublb()
+                from itertools import combinations
+                cases = [definite_keep | set(c)
+                         for c in combinations(uncertain_list, K_remaining)]
 
-        definite_keep, definite_prune, uncertain = classify_topk(ub_sc, lb_sc, args.K)
+            n_cases = len(cases)
 
-        K_remaining = args.K - len(definite_keep)
-        if K_remaining < 0:
-            K_remaining = 0
-            uncertain = set()
-        if K_remaining > len(uncertain):
-            K_remaining = len(uncertain)
+            mc_max = 0.0
+            with torch.no_grad():
+                for t in range(args.mc_samples):
+                    torch.manual_seed(t)
+                    delta = (2 * torch.rand_like(center) - 1) * args.eps
+                    xp = center + delta
+                    sc = scoring_run(xp)
+                    _, topk = sc.topk(args.K)
+                    kept_mc = set(topk.tolist())
+                    mp = torch.zeros(17, 64, device=TORCH_DEVICE)
+                    mp[0] = 1.0
+                    for p in kept_mc:
+                        mp[p + 1] = 1.0
+                    model_pruned_mc = MaskedModel(vit, mp).eval()
+                    diff = model_full_mc(xp) - model_pruned_mc(xp)
+                    mc_max = max(mc_max, diff.abs().max().item())
+            all_mc.append(mc_max)
 
-        uncertain_list = sorted(uncertain)
-        if len(uncertain_list) == 0 or K_remaining == len(uncertain_list):
-            cases = [definite_keep | uncertain]
-        elif K_remaining == 0:
-            cases = [definite_keep.copy()]
-        else:
-            from itertools import combinations
-            cases = [definite_keep | set(c)
-                     for c in combinations(uncertain_list, K_remaining)]
+            print(f"  [{i+1}/{len(samples)}] label={label}, "
+                  f"keep={len(definite_keep)} prune={len(definite_prune)} "
+                  f"unc={len(uncertain)} cases={n_cases}")
 
-        n_cases = len(cases)
-
-        mc_max = 0.0
-        with torch.no_grad():
-            for t in range(args.mc_samples):
-                torch.manual_seed(t)
-                delta = (2 * torch.rand_like(center) - 1) * args.eps
-                xp = center + delta
-                sc = scoring_run(xp)
-                _, topk = sc.topk(args.K)
-                kept_mc = set(topk.tolist())
-                mp = torch.zeros(17, 64, device=TORCH_DEVICE)
-                mp[0] = 1.0
-                for p in kept_mc: mp[p + 1] = 1.0
-                model_pruned_mc = MaskedModel(vit, mp).eval()
-                diff = model_full_mc(xp) - model_pruned_mc(xp)
-                mc_max = max(mc_max, diff.abs().max().item())
-        all_mc.append(mc_max)
-
-        print(f"  [{i+1}/{len(samples)}] label={label}, "
-              f"keep={len(definite_keep)} prune={len(definite_prune)} "
-              f"unc={len(uncertain)} cases={n_cases}")
-
-        for name, fn in methods:
             t0 = time.perf_counter()
             best_d_ub = None
             best_d_lb = None
@@ -380,7 +392,26 @@ def main():
             print(f"    {name:<15} bound={bound:.4f}  width={width:.4f}  time={elapsed:.1f}s")
             print(f"    {'reasons':<15} {_format_reason_breakdown(best_breakdown or {}, width)}")
 
-        print(f"    {'MC':<15} max|diff|={mc_max:.6f}")
+            print(f"    {'MC':<15} max|diff|={mc_max:.6f}")
+
+        return time.perf_counter() - total_start
+
+    for name, fn in methods:
+        try:
+            from pyinstrument import Profiler
+        except ImportError:
+            elapsed = run_method(name, fn)
+            all_profiles[name] = None
+            print(f"  profile skipped: pyinstrument not installed ({name}, {elapsed:.1f}s)")
+            continue
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profiler = Profiler()
+        with profiler:
+            run_method(name, fn)
+        profile_path = profile_dir / f"{name}.html"
+        profile_path.write_text(profiler.output_html(), encoding="utf-8")
+        all_profiles[name] = profile_path
+        print(f"  profile saved: {profile_path}")
 
     print()
     print("=" * 75)
@@ -406,6 +437,11 @@ def main():
             print(f"  {name:<15} {avg_b:>10.4f} {avg_w:>10.4f} {avg_t:>8.1f}s {vs:>10}")
         else:
             print(f"  {name:<15} {'(no data)':>10}")
+
+    if all_profiles:
+        print("\n  Profiles:")
+        for name, path in all_profiles.items():
+            print(f"  {name:<15} {path}")
 
 
 if __name__ == "__main__":
