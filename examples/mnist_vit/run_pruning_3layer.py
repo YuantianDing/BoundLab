@@ -38,10 +38,10 @@ if str(_HERE) not in sys.path:
 
 from mnist_vit import ViT
 from pruning import (
-    PatchifyStage, ScoringModel, MaskedPostConcat,
+    ScoringModel, MaskedPostConcat,
     build_emb_mask, build_full_emb_mask,
     build_zonotope_no_cat, classify_topk, enumerate_pruning_cases,
-    export_masked_post_concat, export_scoring,
+    export_masked_post_concat, export_scoring, export_patch_embedding,
 )
 
 import boundlab.prop as prop
@@ -144,7 +144,6 @@ def run(
     checkpoint="mnist_transformer_3.pt",
     eps=0.004, K=8,
     n_samples=3, mc_samples=500, seed=0,
-    normalize=True, mean=0.1307, std=0.3081,
     debug=False, score_layer=0,
 ):
     torch.manual_seed(seed)
@@ -155,10 +154,7 @@ def run(
     print(f"[setup] exporting sub-models (3-layer) ...", flush=True)
     t0 = time.time()
 
-    patchify = PatchifyStage(vit, normalize, mean, std).eval()
-    gm_patch = onnx_export(patchify, ([1, 28, 28],))
-    op_patch = zono.interpret(gm_patch)
-
+    op_patch = export_patch_embedding(vit, [1, 28, 28])
     op_score, scoring_model = export_scoring(vit, num_tokens, dim, score_layer=score_layer)
 
     full_mask = build_full_emb_mask(num_tokens, dim)
@@ -166,17 +162,6 @@ def run(
                                          mask_from_layer=score_layer)
 
     print(f"[setup] done ({time.time() - t0:.1f}s)\n")
-
-    if normalize:
-        class NormVit(torch.nn.Module):
-            def __init__(s):
-                super().__init__()
-                s.m, s.s, s.vit = torch.tensor(mean), torch.tensor(std), vit
-            def forward(s, x):
-                return s.vit((x - s.m) / s.s)
-        concrete = NormVit().eval()
-    else:
-        concrete = vit
 
     try:
         from torchvision import datasets, transforms
@@ -204,9 +189,8 @@ def run(
 
     for i, (img, label) in enumerate(samples):
         with torch.no_grad():
-            pred = int(concrete(img).argmax().item())
-            x_img = (img - mean) / std if normalize else img
-            x = vit.to_patch_embedding(x_img)
+            pred = int(vit(img).argmax().item())
+            x = vit.to_patch_embedding(img)
             emb_center = torch.cat((vit.cls_token[0], x), dim=0) + vit.pos_embedding[0]
 
         full_zono = build_zonotope_no_cat(vit, img, eps, op_patch)
@@ -263,8 +247,6 @@ def run(
     print(f"  Differential Pruning Verification — MNIST ViT (3 layers)")
     print(f"  checkpoint: {checkpoint}")
     print(f"  eps={eps}, K={K}/{num_tokens}, score_layer={score_layer}, MC={mc_samples}")
-    if normalize:
-        print(f"  normalize=on (mean={mean}, std={std})")
     print("=" * 72)
     print()
     print(f"  {'Method':<20} {'Avg Bound':>10}")
@@ -306,10 +288,6 @@ def main():
     ap.add_argument("--n-samples", type=int, default=3, dest="n_samples")
     ap.add_argument("--mc-samples", type=int, default=500, dest="mc_samples")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--no-normalize", dest="normalize",
-                    action="store_false", default=True)
-    ap.add_argument("--mean", type=float, default=0.1307)
-    ap.add_argument("--std", type=float, default=0.3081)
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--score-layer", type=int, default=0, dest="score_layer",
                     help="Which transformer layer's CLS attention to use for scoring")

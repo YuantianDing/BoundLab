@@ -11,6 +11,7 @@ Usage::
         MaskedPostConcat, build_emb_mask, build_full_emb_mask,
         classify_topk, enumerate_pruning_cases,
         certify_pruned_sample_diff,
+        export_patch_embedding,
     )
 """
 from __future__ import annotations
@@ -263,24 +264,6 @@ diff_interpret["MaskedSoftmax"] = diff_masked_softmax_handler
 # Pipeline sub-models
 # ---------------------------------------------------------------------------
 
-class PatchifyStage(nn.Module):
-    """``(C, H, W) -> (num_patches, dim)``.  Pure linear, no CLS token."""
-
-    def __init__(self, vit, normalize: bool = False,
-                 mean: float = 0.0, std: float = 1.0):
-        super().__init__()
-        self.patch_embed = vit.to_patch_embedding
-        self.normalize = normalize
-        if normalize:
-            self.register_buffer("mean", torch.tensor(float(mean)))
-            self.register_buffer("std", torch.tensor(float(std)))
-
-    def forward(self, img: Tensor) -> Tensor:
-        if self.normalize:
-            img = (img - self.mean) / self.std
-        return self.patch_embed(img)
-
-
 class ScoringModel(nn.Module):
     """``(N+1, D) embeddings -> (N,) importance`` per patch token.
 
@@ -487,10 +470,10 @@ def export_scoring(vit, num_tokens, dim, score_layer=0):
     return zono.interpret(gm), scoring
 
 
-def export_patchify(vit, img_shape, normalize=False, mean=0.0, std=1.0):
-    patchify = PatchifyStage(vit, normalize, mean, std).eval()
-    gm = onnx_export(patchify, (img_shape,))
-    return zono.interpret(gm), patchify
+def export_patch_embedding(vit, img_shape):
+    """Export ``vit.to_patch_embedding`` for zonotope interpretation."""
+    gm = onnx_export(vit.to_patch_embedding, (img_shape,))
+    return zono.interpret(gm)
 
 
 def export_masked_post_concat(vit, emb_mask, num_tokens, dim, mask_from_layer=0):
