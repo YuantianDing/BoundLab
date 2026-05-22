@@ -1,7 +1,7 @@
 """Soundness tests for the BoundLab MNIST ViT certifier (split pipeline).
 
-Uses the same Pad+Add strategy as ``certify.py`` to avoid the ``Cat``
-expression node, so the original (tight) ``bilinear_matmul`` with
+Uses the Pad+Add strategy from ``token_pruning.build_input_zonotope`` to avoid
+the ``Cat`` expression node, so the original (tight) ``bilinear_matmul`` with
 ``symmetric_decompose`` works correctly.
 
 Run::
@@ -31,7 +31,7 @@ from boundlab.interp.onnx import onnx_export
 from boundlab.linearop import PadOp
 
 from mnist_vit import build_mnist_vit
-from certify import PatchifyStage, PostConcatStage, build_zonotope_no_cat
+from token_pruning import build_input_zonotope, export_patch_embedding
 
 CHECKPOINT = str(_PKG / "mnist_transformer.pt")
 FP_ATOL = 1e-4
@@ -50,15 +50,25 @@ def model():
 @pytest.fixture(scope="session")
 def op_patch(model):
     """Patchify interpreter (pixel → patches)."""
-    patchify = PatchifyStage(model).eval()
-    gm = onnx_export(patchify, ([1, 28, 28],))
-    return zono.interpret(gm)
+    return export_patch_embedding(model, [1, 28, 28])
 
 
 @pytest.fixture(scope="session")
 def op_post(model):
-    """Post-concat interpreter (tokens → logits)."""
-    post = PostConcatStage(model).eval()
+    """Transformer + head interpreter (tokens → logits)."""
+    class _TransformerHead(torch.nn.Module):
+        def __init__(self, vit):
+            super().__init__()
+            self.transformer = vit.transformer
+            self.pool = vit.pool
+            self.mlp_head = vit.mlp_head
+        def forward(self, x):
+            for attn, ff in self.transformer.layers:
+                x = attn(x)
+                x = ff(x)
+            x = x.mean(dim=0) if self.pool == "mean" else x[0]
+            return self.mlp_head(x)
+    post = _TransformerHead(model).eval()
     gm = onnx_export(post, ([17, 64],))
     return zono.interpret(gm)
 
@@ -73,8 +83,8 @@ def _certify_one(model, op_patch, op_post, img, eps):
     """Build zonotope via split pipeline and compute bounds."""
     prop._UB_CACHE.clear()
     prop._LB_CACHE.clear()
-    full_zono = build_zonotope_no_cat(
-        model, img, eps, op_patch, False, 0.0, 1.0
+    full_zono = build_input_zonotope(
+        model, img, eps, op_patch
     )
     return op_post(full_zono).ublb()
 
@@ -93,6 +103,7 @@ class TestAdapterCorrectness:
         assert list(unexpected) == []
 
     def test_forward_bit_equivalent_to_deept(self, model):
+        sys.path.insert(0, str(_PKG / "old_ver"))
         import vit_deept
         ref = vit_deept.ViT(
             image_size=28, patch_size=7, num_classes=10, channels=1,
@@ -253,8 +264,8 @@ class TestSplitPipeline:
         """The split pipeline must produce an AffineSum with symmetric
         LpEpsilon children — no Cat node."""
         img = sample_images[0]
-        full_zono = build_zonotope_no_cat(
-            model, img, 1e-3, op_patch, False, 0.0, 1.0
+        full_zono = build_input_zonotope(
+            model, img, 1e-3, op_patch
         )
         assert isinstance(full_zono, AffineSum)
         assert full_zono.constant is not None, "constant should include cls_token"
