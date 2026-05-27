@@ -20,6 +20,7 @@ in all regimes its vertex values tightly bracket the true range).
 """
 
 from __future__ import annotations
+from boundlab import utils
 
 import torch
 
@@ -83,7 +84,7 @@ def hex_slope_range(
 
     # Fallback
     no_feas = s_min >= _INF / 2
-    if no_feas.any():
+    if utils.current_fake_mode() or no_feas.any():
         mx = (x_lb + x_ub) / 2
         my = (y_lb + y_ub) / 2
         md = mx - my

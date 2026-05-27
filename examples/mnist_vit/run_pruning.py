@@ -24,6 +24,8 @@ import time
 import warnings
 from pathlib import Path
 
+import onnx_ir
+
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
 
@@ -135,6 +137,7 @@ def _diff_case(gm_full, gm_pruned, full_zono):
     """Differential zonotope via diff_net."""
     prop._UB_CACHE.clear(); prop._LB_CACHE.clear()
     merged = diff_net(gm_full, gm_pruned)
+    onnx_ir.save(merged, _HERE / "diff_net.onnx")
     out = diff_interpret(merged)(full_zono)
     if isinstance(out, DiffExpr3):
         return out.diff.ublb()
@@ -326,7 +329,7 @@ def main():
                     help="Checkpoint path (default: mnist_transformer.pt for depth=1, "
                          "mnist_transformer_3.pt for depth=3)")
     ap.add_argument("--eps", type=float, default=0.004)
-    ap.add_argument("--K", type=int, default=8,
+    ap.add_argument("--K", type=int, default=15,
                     help="Number of patch tokens to keep (out of 16)")
     ap.add_argument("--n-samples", type=int, default=3, dest="n_samples")
     ap.add_argument("--mc-samples", type=int, default=500, dest="mc_samples")

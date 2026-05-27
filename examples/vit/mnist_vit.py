@@ -1,27 +1,34 @@
-"""MNIST ViT for BoundLab certification.
+"""ViT adapter for BoundLab certification.
 
-Architecture mirrors the DeepT MNIST checkpoint layout so ``load_state_dict``
-succeeds strictly against weights saved in ``mnist_vit_1.safetensors`` (depth=1)
-and ``mnist_vit_3.safetensors`` (depth=3).
+Loads the DeepT MNIST checkpoint (``mnist_transformer.pt``) with its original
+``state_dict`` keys intact, but:
 
-No batch dimension: forward takes ``(C, H, W)`` and returns ``(num_classes,)``.
+* drops the batch dimension — forward takes ``(C, H, W)`` and returns
+  ``(num_classes,)``.  This matches the style of BoundLab's own
+  ``examples/vit/vit.py``;
+* replaces ``einops.Rearrange`` / ``rearrange`` / ``repeat`` with plain
+  ``reshape`` and ``permute`` so ``torch.onnx.export`` traces cleanly into
+  primitive ONNX ops that the zonotope interpreter dispatches on (``MatMul``,
+  ``Softmax``, ``Relu``, ``ReduceMean``, ``Gather``, ``Concat``, ...);
+* replaces ``nn.Dropout`` with ``nn.Identity`` (dropout is a no-op at eval
+  time anyway, but Identity keeps the Sequential indices so state-dict keys
+  line up with the original).
+
+The module tree is intentionally identical to the DeepT ``vit.py`` the user
+uploaded, so ``load_state_dict`` with the DeepT checkpoint succeeds
+*strictly* (no missing / unexpected keys).
 """
-
 from __future__ import annotations
-
 from pathlib import Path
-from typing import Literal
+from typing_extensions import Literal
 
 import torch
-from torch import nn, Tensor
 from safetensors.torch import load_file
-
-
-_MODELS_DIR = Path(__file__).parent
+from torch import nn, Tensor
 
 
 # ---------------------------------------------------------------------------
-# Layer-norm variants
+# Layer-norm variants (bit-for-bit copies of the DeepT ones)
 # ---------------------------------------------------------------------------
 
 class LayerNorm(nn.Module):
@@ -56,7 +63,7 @@ def _make_norm(dim: int, kind: str) -> nn.Module:
 
 
 # ---------------------------------------------------------------------------
-# Residual / PreNorm wrappers
+# Residual / PreNorm wrappers — same shapes as DeepT so keys align
 # ---------------------------------------------------------------------------
 
 class Residual(nn.Module):
@@ -79,7 +86,8 @@ class PreNorm(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# FeedForward — Identity stubs preserve Sequential indices from original ckpt.
+# FeedForward — identical key layout (net.0 / net.3 hold the Linear weights,
+# dropouts replaced by Identity so indices are preserved).
 # ---------------------------------------------------------------------------
 
 class FeedForward(nn.Module):
@@ -98,7 +106,8 @@ class FeedForward(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Attention — no bias on Q/K/V, plain reshape/permute (no einops).
+# Attention — plain reshape/permute in place of einops rearrange.
+# No batch dim: input/output are (N, D).
 # ---------------------------------------------------------------------------
 
 class Attention(nn.Module):
@@ -114,13 +123,16 @@ class Attention(nn.Module):
         self.to_v = nn.Linear(dim, inner_dim, bias=False)
 
         project_out = not (heads == 1 and dim_head == dim)
-        self.to_out = (
-            nn.Sequential(nn.Linear(inner_dim, dim), nn.Identity())  # .0 / .1
-            if project_out
-            else nn.Identity()
-        )
+        if project_out:
+            self.to_out = nn.Sequential(
+                nn.Linear(inner_dim, dim),  # .0
+                nn.Identity(),              # .1  (was Dropout)
+            )
+        else:
+            self.to_out = nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
+        # x: (N, D)
         n = x.shape[0]
         h, d = self.heads, self.dim_head
 
@@ -128,28 +140,31 @@ class Attention(nn.Module):
         k = self.to_k(x).reshape(n, h, d).permute(1, 0, 2)
         v = self.to_v(x).reshape(n, h, d).permute(1, 0, 2)
 
-        dots = (q @ k.transpose(-2, -1)) * self.scale         # (h, N, N)
+        dots = (q @ k.transpose(-2, -1)) * self.scale        # (h, N, N)
         attn = dots.softmax(dim=-1)
-        out = (attn @ v).permute(1, 0, 2).reshape(n, h * d)   # (N, h*d)
+        out = attn @ v                                       # (h, N, d)
+        out = out.permute(1, 0, 2).reshape(n, h * d)         # (N, h*d)
         return self.to_out(out)
 
 
 # ---------------------------------------------------------------------------
-# Transformer stack — layers[i][0]=attn-block, layers[i][1]=ff-block.
+# Transformer stack — same nesting as DeepT: layers[i][0]=attn-block,
+# layers[i][1]=ff-block.
 # ---------------------------------------------------------------------------
 
 class Transformer(nn.Module):
     def __init__(self, dim: int, depth: int, heads: int, dim_head: int,
                  mlp_dim: int, layer_norm_type: str):
         super().__init__()
-        self.layers = nn.ModuleList([
-            nn.ModuleList([
-                Residual(PreNorm(dim, Attention(dim, heads=heads, dim_head=dim_head),
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Residual(PreNorm(dim, Attention(dim, heads=heads,
+                                                dim_head=dim_head),
                                  layer_norm_type)),
-                Residual(PreNorm(dim, FeedForward(dim, mlp_dim), layer_norm_type)),
-            ])
-            for _ in range(depth)
-        ])
+                Residual(PreNorm(dim, FeedForward(dim, mlp_dim),
+                                 layer_norm_type)),
+            ]))
 
     def forward(self, x: Tensor) -> Tensor:
         for attn, ff in self.layers:
@@ -159,34 +174,40 @@ class Transformer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Patchify — replaces einops.Rearrange, no parameters.
-# Lives at to_patch_embedding.0; Linear is at to_patch_embedding.1.
+# Patchify — replaces einops.Rearrange for the patch embedding.
+# No params, so state_dict is unaffected; lives at to_patch_embedding.0
+# so that to_patch_embedding.1 remains the Linear (matching checkpoint keys).
 # ---------------------------------------------------------------------------
 
 class Patchify(nn.Module):
+    """``(C, H, W)`` → ``(num_patches, C*p*p)`` via reshape + permute.
+
+    Equivalent to einops::
+
+        Rearrange('c (h p1) (w p2) -> (h w) (p1 p2 c)',
+                  p1=patch_size, p2=patch_size)
+    """
+
     def __init__(self, patch_size: int):
         super().__init__()
         self.patch_size = patch_size
 
     def forward(self, img: Tensor) -> Tensor:
+        # img: (C, H, W)
         C, H, W = img.shape
         p = self.patch_size
         hh, ww = H // p, W // p
-        x = img.reshape(C, hh, p, ww, p)
-        x = x.permute(1, 3, 2, 4, 0).contiguous()
-        return x.reshape(hh * ww, p * p * C)
+        x = img.reshape(C, hh, p, ww, p)              # (C, hh, p, ww, p)
+        x = x.permute(1, 3, 2, 4, 0).contiguous()     # (hh, ww, p, p, C)
+        return x.reshape(hh * ww, p * p * C)          # (N, patch_dim)
 
 
 # ---------------------------------------------------------------------------
-# ViT — no batch dim, cls-token or mean pooling.
+# ViT — no batch dim, cls-token pooling by default.
+# Key layout matches the DeepT vit.py uploaded by the user exactly.
 # ---------------------------------------------------------------------------
 
 class ViT(nn.Module):
-    """MNIST Vision Transformer.
-
-    Input: ``(C, H, W)``  →  Output: ``(num_classes,)``
-    """
-
     def __init__(
         self,
         *,
@@ -197,9 +218,9 @@ class ViT(nn.Module):
         depth: int,
         heads: int,
         mlp_dim: int,
-        layer_norm_type: Literal["standard", "no_var"],
-        pool: Literal["cls", "mean"] = "cls",
-        channels: int = 1,
+        layer_norm_type: str,
+        pool: str = "cls",
+        channels: int = 3,
         dim_head: int = 64,
     ):
         super().__init__()
@@ -210,46 +231,35 @@ class ViT(nn.Module):
         patch_dim = channels * patch_size * patch_size
 
         self.to_patch_embedding = nn.Sequential(
-            Patchify(patch_size),          # .0
-            nn.Linear(patch_dim, dim),     # .1
+            Patchify(patch_size),                   # .0 — no params
+            nn.Linear(patch_dim, dim),              # .1 — checkpoint key
         )
+        self.patch_size = patch_size
 
+        # Exactly the same parameter shapes as the DeepT checkpoint.
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
 
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim,
-                                       layer_norm_type)
+        self.transformer = Transformer(dim, depth, heads, dim_head,
+                                       mlp_dim, layer_norm_type)
 
         self.pool = pool
+        self.layer_norm_type = layer_norm_type
+
         self.mlp_head = nn.Sequential(
-            _make_norm(dim, layer_norm_type),  # .0
-            nn.Linear(dim, num_classes),       # .1
+            _make_norm(dim, layer_norm_type),       # .0
+            nn.Linear(dim, num_classes),            # .1
         )
 
     def forward(self, img: Tensor) -> Tensor:
-        x = self.to_patch_embedding(img)          # (N, D)
-        cls = self.cls_token[0]                   # (1, D)
-        x = torch.cat((cls, x), dim=0)            # (N+1, D)
-        x = x + self.pos_embedding[0]
-        x = self.transformer(x)
+        # img: (C, H, W)
+        x = self.to_patch_embedding(img)                 # (N, D)
+        cls = self.cls_token[0]                          # (1, D)
+        x = torch.cat((cls, x), dim=0)                   # (N+1, D)
+        x = x + self.pos_embedding[0]                    # (N+1, D)
+        x = self.transformer(x)                          # (N+1, D)
         x = x.mean(dim=0) if self.pool == "mean" else x[0]
-        return self.mlp_head(x)
-
-
-# ---------------------------------------------------------------------------
-# Input normalisation wrapper
-# ---------------------------------------------------------------------------
-
-class _NormViT(nn.Module):
-    def __init__(self, vit: ViT, mean: float, std: float):
-        super().__init__()
-        self.vit = vit
-        self.register_buffer("mean", torch.tensor(mean))
-        self.register_buffer("std", torch.tensor(std))
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.vit((x - self.mean) / self.std)
-
+        return self.mlp_head(x)                          # (num_classes,)
 
 # ---------------------------------------------------------------------------
 # Factories
@@ -257,51 +267,35 @@ class _NormViT(nn.Module):
 
 DIRPATH = Path(__file__).parent
 
-
-def _load_vit(cfg: dict, ckpt: Path) -> ViT:
-    model = ViT(**cfg)
-    model.load_state_dict(load_file(ckpt), strict=True)
-    return model.eval()
-
-
-def _resolve(checkpoint: str | Path | None, default: Path) -> Path:
-    path = Path(default if checkpoint is None else checkpoint)
-    return path if path.is_absolute() else DIRPATH / path
-
-
 def mnist_vit(
-    checkpoint: str | Path | None = None,
+    depth: int = 1,
     layer_norm_type: Literal["standard", "no_var"] = "no_var",
-    input_norm: tuple[float, float] | None = (0.1307, 0.3081),
+    device: str = "cpu",
 ) -> nn.Module:
-    """1-layer MNIST ViT (depth=1, heads=4, dim=64).
+    """MNIST ViT (heads=4, dim=64); ``depth`` selects the checkpoint.
 
     ``input_norm`` applies ``(x - mean) / std`` before the model; pass
     ``None`` to skip normalisation.
     """
-    cfg = dict(image_size=28, patch_size=7, num_classes=10, channels=1,
-               dim=64, depth=1, heads=4, mlp_dim=128,
-               layer_norm_type=layer_norm_type, pool="cls", dim_head=64)
-    model = _load_vit(cfg, _resolve(checkpoint, DIRPATH / "mnist_vit_1.safetensors"))
-    if input_norm is not None:
-        return _NormViT(model, *input_norm).eval()
-    return model
+    assert depth in (1, 3)
+    model = ViT(
+        image_size=28,
+        patch_size=7,
+        num_classes=10,
+        channels=1,
+        dim=64,
+        depth=depth,
+        heads=4,
+        mlp_dim=128,
+        layer_norm_type=layer_norm_type,
+        pool="cls",
+        dim_head=64,
+    ).to(device)
+    
+    checkpoint_path = DIRPATH / f"mnist_vit_{depth}.safetensors"
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}. "
+                                f"Please run the training script to generate it.")
 
-
-def mnist_vit_3(
-    checkpoint: str | Path | None = None,
-    layer_norm_type: Literal["standard", "no_var"] = "no_var",
-    input_norm: tuple[float, float] | None = (0.1307, 0.3081),
-) -> nn.Module:
-    """3-layer MNIST ViT (depth=3, heads=4, dim=64).
-
-    ``input_norm`` applies ``(x - mean) / std`` before the model; pass
-    ``None`` to skip normalisation.
-    """
-    cfg = dict(image_size=28, patch_size=7, num_classes=10, channels=1,
-               dim=64, depth=3, heads=4, mlp_dim=128,
-               layer_norm_type=layer_norm_type, pool="cls", dim_head=64)
-    model = _load_vit(cfg, _resolve(checkpoint, DIRPATH / "mnist_vit_3.safetensors"))
-    if input_norm is not None:
-        return _NormViT(model, *input_norm).eval()
-    return model
+    model.load_state_dict(load_file(str(checkpoint_path), device=device), strict=True)
+    return model.eval()

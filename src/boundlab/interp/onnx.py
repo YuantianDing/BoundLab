@@ -28,6 +28,7 @@ Examples
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Sequence, Union
 
 import onnx_ir as ir
@@ -41,10 +42,12 @@ __all__ = ["onnx_export", "register_onnx_translation"]
 def onnx_export(
     f: Callable[..., torch.Tensor] | nn.Module,
     args: tuple[Union[torch.Size, list[int], torch.Tensor], ...],
+    path: str | Path | None = None,
     kwargs: dict[str, Union[torch.Size, list[int]]] = {},
     input_names: Sequence[str] | None = None,
     output_names: Sequence[str] | None = None,
-    optimize: bool = None,
+    optimize: bool = True,
+    use_fake_tensors: bool = True,
 ) -> ir.Model:
     """Export a PyTorch function or module to an ONNX IR model.
 
@@ -81,14 +84,27 @@ def onnx_export(
     else:
         mod = f.eval()
     args_tensor = tuple(x if isinstance(x, torch.Tensor) else torch.zeros(x) for x in args)
-    
-    with FakeTensorMode(
-        allow_non_fake_inputs=True,
-        shape_env=ShapeEnv(allow_dynamic_output_shape_ops=True),
-    ):
+
+    if use_fake_tensors:
+        with FakeTensorMode(
+            allow_non_fake_inputs=True,
+            shape_env=ShapeEnv(allow_dynamic_output_shape_ops=True),
+        ):
+            program = torch.export.export(mod, args_tensor)
+    else:
         program = torch.export.export(mod, args_tensor)
-
-
+    if path is not None:
+        torch.onnx.export(
+            program,
+            args=(),
+            f=path,
+            export_params=True,
+            optimize=optimize,
+            input_names=input_names,
+            output_names=output_names,
+            verbose=False
+        )
+        return None
     onnx_program = torch.onnx.export(
         program,
         args=(),

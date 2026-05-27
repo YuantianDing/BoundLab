@@ -16,6 +16,7 @@ import torch.library
 import onnxscript
 from onnxscript import opset18 as _opset18
 
+from boundlab import utils
 from boundlab.diff.expr import DiffExpr2
 from boundlab.expr._affine import ConstVal
 
@@ -92,6 +93,31 @@ def heaviside_pruning(scores: torch.Tensor, data: torch.Tensor) -> torch.Tensor:
         shape=data.shape,
         version=1,
     )
+
+def softmax_pruning(scores: torch.Tensor, data: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """
+    A mock operator for differential verification that simulates the effect of softmax-based pruning based on scores. This operator is not intended for actual use in production code, but serves as a placeholder for differential verification.
+
+    For one network, this operator simply gives back the :code:`data` tensor.
+    For the other network, it gives :code:`masked_softmax(scores, data, dim)`, simulating the effect of softmax-based pruning based on the scores.
+
+    Args:
+        scores: A tensor of scores used for pruning. Must have the same shape as :code:`data`.
+        data: A tensor of data to be pruned. Must have the same shape as :code:`scores`.
+        dim: The dimension along which to apply the softmax.
+    Returns:
+        A tensor of the same shape as :code:`scores` and :code:`data`.
+    """
+    assert scores.shape == data.shape, "scores and data must have the same shape"
+    assert dim == -1, "only dim=-1 is supported in this mock operator"
+    
+    diff: torch.Tensor = -utils.pairwise_diff(data)
+    exp = torch.exp(diff)
+    scores = scores.unsqueeze(-2).expand(exp.shape)  # shape (..., 1, N)
+    sum_exp = heaviside_pruning(scores, exp).sum(dim=-1)
+    result = torch.reciprocal(sum_exp)
+    assert result.shape == data.shape, f"result {result.shape} should have the same shape as data {data.shape}"
+    return result
 
 def topk_pruning(scores: torch.Tensor, data: torch.Tensor, k: int, dim: int = -1) -> torch.Tensor:
     """

@@ -219,7 +219,7 @@ def current_fake_mode():
     mode = torch.utils._python_dispatch._get_current_dispatch_mode()
     return mode if isinstance(mode, FakeTensorMode) else None
 
-def pairwise_diff(x: Expr, dim: int = -1) -> Expr:
+def pairwise_diff(x: Union[Expr, torch.Tensor], dim: int = -1) -> Union[Expr, torch.Tensor]:
     """Build ``d[..., i, j, ...] = x[..., j, ...] - x[..., i, ...]`` as a
     single :class:`EinsumOp` applied to *x*.
 
@@ -229,10 +229,16 @@ def pairwise_diff(x: Expr, dim: int = -1) -> Expr:
     """
     if dim < 0:
         dim += len(x.shape)
-    N = x.shape[dim]
-    l = x.unsqueeze(dim).expand_on(dim, N)
-    r = x.unsqueeze(dim+1).expand_on(dim + 1, N)
-    return r - l
+    if isinstance(x, torch.Tensor):
+        N = x.shape[dim]
+        l = x.unsqueeze(dim)
+        r = x.unsqueeze(dim+1)
+        return r - l
+    else:
+        N = x.shape[dim]
+        l = x.unsqueeze(dim).expand_on(dim, N)
+        r = x.unsqueeze(dim+1).expand_on(dim + 1, N)
+        return r - l
 
 def remove_diagonal(tensor: Union[torch.Tensor, Expr], dim1: int=0, dim2: int=1) -> Union[torch.Tensor, Expr]:
     """Remove the diagonal along the specified dims, returning a tensor with one fewer dimension."""

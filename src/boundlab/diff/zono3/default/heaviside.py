@@ -197,7 +197,6 @@ def _linearize_mask_term(s_y: Expr, y: Expr) -> tuple[torch.Tensor, torch.Tensor
     w_sy = -w_s
     return w_sy, w_x, bias, err
 
-
 def diff_heaviside_pruning_handler(scores, data):
     """Differential handler for ``boundlab::heaviside_pruning``.
 
@@ -215,7 +214,6 @@ def diff_heaviside_pruning_handler(scores, data):
         # Treat constant scores as identical for both networks
         from boundlab import expr as _expr
         sy = _expr.ConstVal(scores) if isinstance(scores, torch.Tensor) else scores
-    
 
     if isinstance(data, DiffExpr2):
         data = DiffExpr3(data.x, data.y, data.x - data.y)
@@ -226,6 +224,8 @@ def diff_heaviside_pruning_handler(scores, data):
 
     assert isinstance(sy, Expr) and isinstance(data, DiffExpr3), (
         f"heaviside_pruning requires expressions convertible to DiffExpr3: {scores} vs {data}")
+    if isinstance(sy, expr.ConstVal):
+        return const_heaviside_pruning(sy.value, data)
 
     y = data.y
 
@@ -274,8 +274,56 @@ def diff_heaviside_pruning_handler(scores, data):
     return _build_triple_from_dzb(dzb, xs, ys, ds)
 
 
-# Register handler
+def const_heaviside_pruning(scores, data):
+    """Fast-path handler for ``HeavisidePruning`` with concrete scores.
+
+    When ``scores`` is a :class:`~boundlab.expr.ConstVal` (or plain
+    :class:`torch.Tensor`), the heaviside mask is a deterministic 0/1 tensor,
+    so the diff component is exact (no approximation error). The output
+    matches the semantics encoded by ``softmax_pruning`` / the general handler:
+
+        out_x = data.x
+        out_y = mask * data.y
+        out_d = (1 - mask) * data.y + data.diff
+
+    Returns :data:`NotImplemented` for symbolic scores so :class:`FnList`
+    falls through to :func:`diff_heaviside_pruning_handler`.
+    """
+    from boundlab.diff.expr import DiffExpr2, DiffExpr3
+    from boundlab.expr._affine import ConstVal
+
+    if isinstance(scores, ConstVal):
+        score_vals = scores.value
+    elif isinstance(scores, torch.Tensor):
+        score_vals = scores
+    else:
+        return NotImplemented
+
+    dtype = score_vals.dtype if score_vals.is_floating_point() else torch.float32
+    mask = (score_vals >= 0).to(dtype)
+    one_minus_mask = 1 - mask
+
+    if isinstance(data, DiffExpr3):
+        dx, dy, dd = data.x, data.y, data.diff
+    elif isinstance(data, DiffExpr2):
+        dx, dy = data.x, data.y
+        dd = data.x - data.y
+    else:
+        dx = ConstVal(data) if isinstance(data, torch.Tensor) else data
+        dy = dx
+        dd = None
+
+    out_x = dx
+    out_y = mask * dy
+    out_diff = one_minus_mask * dy if dd is None else one_minus_mask * dy + dd
+    return DiffExpr3(out_x, out_y, out_diff)
+
+
+# Register handlers — FnList iterates in reverse, so the const fast path is
+# tried first and falls through to the general handler when scores are
+# symbolic.
 interpret["HeavisidePruning"] = diff_heaviside_pruning_handler
+interpret["HeavisidePruning"] = const_heaviside_pruning
 
 
-__all__ = ["diff_heaviside_pruning_handler"]
+__all__ = ["diff_heaviside_pruning_handler", "const_heaviside_pruning"]
