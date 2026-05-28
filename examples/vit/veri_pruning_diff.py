@@ -55,7 +55,7 @@ from boundlab.expr._var import LpEpsilon
 from boundlab.interp import Interpreter
 
 from mnist_vit import mnist_vit as mnist_vit_clean
-from pruning_diff import mnist_vit_pruning, scoring_model
+from vit_pruning_diff import mnist_vit_pruning, scoring_model
 
 
 # ---------------------------------------------------------------------------
